@@ -1,0 +1,71 @@
+# =============================================================================
+# HireSnap frontend - build context filter.
+#
+# WHERE THIS FILE IS ACTUALLY READ: the frontend image is built with
+# "context: ../frontend" and "dockerfile: docker/Dockerfile"
+# (docker/docker-compose.yaml:118-124, mirroring
+# R:\GPTHub\docker\docker-compose.yaml:44-48), so ../frontend IS the context
+# root and Docker does read this file.
+#
+# WHY it matters more here than for the backend: node_modules is routinely
+# 300 MB - 1 GB of platform-specific binaries, and the multi-stage Dockerfile
+# runs "npm ci" itself (frontend/docker/Dockerfile:47-52). Shipping a host
+# node_modules to the daemon is pure waste: it is ignored, not copied, and it
+# costs an upload on every build. Same reasoning as R:\GPTHub\.dockerignore:1-14.
+# =============================================================================
+
+# --- secrets ---------------------------------------------------------------
+# CRA inlines every REACT_APP_* variable it can see into the bundle, and the
+# bundle is public by definition. A .env file here is a local override; only the
+# template is allowed through. NOTE: the real contract is docker/.env.example -
+# this one exists only for "npm start" outside the stack.
+.env
+.env.*
+!.env.example
+
+# --- VCS --------------------------------------------------------------
+.git
+.gitignore
+.gitattributes
+
+# --- dependency trees (rebuilt inside the image) -------------------------
+node_modules
+*/node_modules
+.yarn
+.pnp
+
+# --- build output (rebuilt inside the image) -----------------------------
+build/
+dist/
+coverage/
+.cache
+
+# --- test / tooling noise -------------------------------------------------
+.eslintcache
+*.test.js.snap
+__snapshots__
+
+# --- editor and OS noise -------------------------------------------------
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# --- C# leftovers from the pre-React client ------------------------------
+# These belong to an abandoned .NET project (client.sln / client.esproj /
+# nuget.config) that is not part of the image and changes independently.
+*.sln
+*.esproj
+*.csproj
+nuget.config
+bin/
+obj/
+
+# --- docs ---------------------------------------------------------------
+docs/
+**/*.md
+!Dockerfile
+!nginx.conf

@@ -1,0 +1,28 @@
+# Normalisation of line endings. The repository stores LF and every working tree
+# gets LF on checkout, on any OS. This removes the CRLF shebang that makes a
+# Linux container fail with "bash\r: No such file or directory".
+#
+# Mirrored from R:\GPTHub\backend\.gitattributes:1-8. The rule matters MORE here
+# than in the superproject: a service is checked out on its own by CI and by
+# anyone running it outside Docker, so its normalisation cannot depend on the
+# root repository's settings.
+* text=auto eol=lf
+
+# Scripts and files that run inside a container - strictly LF.
+*.sh    text eol=lf
+*.bash  text eol=lf
+Dockerfile      text eol=lf
+*.dockerfile    text eol=lf
+
+# Binary files are never converted.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.pdf  binary
+*.woff  binary
+*.woff2 binary
+*.xlsx binary
+*.pem  binary
