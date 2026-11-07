@@ -1,0 +1,46 @@
+# Build context is ml/ (compose: context: ../ml, dockerfile: docker/Dockerfile).
+#
+# WHY EACH LINE IS HERE: the context is what the daemon uploads, so anything excluded
+# is both faster to build and impossible to leak into a layer. .git is excluded because
+# it is the repository history, not the application; tests are excluded because a
+# production image that ships pytest invites someone to run it against a live GPU.
+
+# --- version control and tooling state ----------------------------------
+.git
+.gitignore
+.gitattributes
+.pre-commit-config.yaml
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# --- local Python environments ------------------------------------------
+.venv/
+venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+
+# --- tests and developer-only files -------------------------------------
+tests/
+*.md
+!README.md
+
+# --- model artifacts and scratch data -----------------------------------
+# Weights are NOT in the repository (ml/README.md "Weights") and must never be baked
+# into a layer: a 2 GB .pth in the image would be rebuilt and pushed on every code
+# change. The deployment mounts them read-only instead (infra/models/).
+models/
+data/
+*.pth
+*.jit
+*.npy
+*.onnx
+*.ckpt
+*.safetensors
+
+# --- editor / OS noise ---------------------------------------------------
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

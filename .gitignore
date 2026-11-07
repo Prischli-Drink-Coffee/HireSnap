@@ -1,0 +1,39 @@
+# Local state of the ML sidecar checkout. Everything here is regenerated; nothing in
+# this list is ever needed to build or run the service.
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments. The image installs its own dependencies from
+# docker/requirements.txt; a host venv is a developer convenience only.
+.venv/
+venv/
+*.egg-info/
+
+# Environment files. This submodule has no secrets of its own (it receives bytes and
+# returns vectors), and the only committed env file is docker/.env.example in the
+# SUPERPROJECT - so any .env here is a local override and must never be committed.
+.env
+.env.*
+!.env.example
+
+# Model artifacts. Weights and checkpoints are licence-bound, multi-gigabyte and
+# mounted at runtime from infra/models/; a checkout must never contain one.
+models/
+data/
+*.pth
+*.jit
+*.npy
+*.onnx
+*.ckpt
+*.safetensors
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

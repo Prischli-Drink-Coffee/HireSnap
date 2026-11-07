@@ -1,0 +1,48 @@
+# Runtime dependencies of the HireSnap ML sidecar, pinned.
+#
+# WHY A CUDA WHEEL INDEX IS NOT OPTIONAL: torch 1.12.1 is the last release with a
+# cp39 cu113/cu116 build that matches the CUDA 11.6.2 base image, and the default
+# PyPI torch wheel bundles CUDA 11.7 user-space libraries that the 11.6 driver
+# rejects at import time with "CUDA driver version is insufficient". The +cu116
+# local version is selected from the extra index below, not from PyPI.
+#
+# WHY torch/torchvision/torchaudio ARE PINNED TOGETHER: they are compiled against
+# one ABI. A newer torchvision against this torch fails at import with an undefined
+# symbol, which looks like a corrupt install rather than a version mismatch.
+#
+# WHY THE REST ARE PINNED TO EXACT VERSIONS TOO: this image is the only place the
+# model stack exists, so a rebuild six months from now must produce the same env or
+# the vectors change. `pip install -r` with unpinned floats is how the backend
+# ended up with a requirements file nobody could reproduce (docs/KNOWN_GAPS.md 4).
+
+--extra-index-url https://download.pytorch.org/whl/cu116
+
+# --- model runtime -------------------------------------------------------
+torch==1.12.1+cu116
+torchvision==0.13.1+cu116
+torchaudio==0.12.1+cu116
+transformers==4.30.2
+sentence-transformers==2.2.2
+moviepy==1.0.3
+imageio==2.34.0
+imageio-ffmpeg==0.5.1
+librosa==0.10.1
+numpy==1.26.4
+# pandas is NOT here: the sidecar writes no transcripts table (video_to_text.py
+# uses the stdlib csv module). It was a backend dependency that came along for the
+# ride and cost ~50 MB of image for nothing.
+Pillow==10.4.0
+
+# --- HTTP layer ---------------------------------------------------------
+fastapi==0.111.0
+uvicorn==0.30.1
+# python-multipart is what makes the multipart branch of /v1/embed/video work.
+# Without it FastAPI answers 415 for every form upload, which is the shape docker/
+# and the frontend both use, so it is a hard dependency and not an extra.
+python-multipart==0.0.9
+
+# --- outbound HTTP -------------------------------------------------------
+# Not used to call anything today: it is what requests-based tooling and the
+# huggingface_hub download path expect to find, and pinning it here keeps the
+# transitive version stable across rebuilds.
+requests==2.32.3

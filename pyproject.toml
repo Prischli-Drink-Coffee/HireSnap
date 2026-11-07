@@ -1,0 +1,72 @@
+# Tooling configuration for the HireSnap ML sidecar.
+#
+# THIS IS NOT A PACKAGE. There is deliberately NO [build-system] table: the
+# sidecar is an application that runs from a flat directory of top-level modules
+# (service/app.py, service/engine.py, ...), imported as bare names exactly the way
+# the container imports them via PYTHONPATH=/app/service. Adding a build system
+# would make `pip install .` importable under a package name, and the service would
+# then work from a wheel while the image works from a directory - two layouts, one
+# of which is never tested. R:/GPTHub/whisper/pyproject.toml documents the same
+# decision.
+#
+# WHAT THIS FILE ACTUALLY DOES: it is the thing that makes the repository-root test
+# command work. `python -m pytest ml/tests -q` finds ml/pyproject.toml, makes ml/
+# the rootdir, and applies [tool.pytest.ini_options] below - pythonpath = ["service"]
+# is what lets the tests say `import app` with no sys.path.insert anywhere.
+
+[project]
+name = "hiresnap-ml-sidecar"
+version = "1.0.0"
+description = "HireSnap ML inference sidecar: video/text embeddings and transcription over HTTP"
+requires-python = ">=3.9"
+# Runtime dependencies are NOT listed here. They are pinned in
+# docker/requirements.txt against the cu116 wheel index, because a CUDA stack needs
+# an extra index and an exact torch build; duplicating that list here would let the
+# two drift. This file only declares the tooling.
+dependencies = []
+
+[project.optional-dependencies]
+# What a developer or CI needs to run the contract tests and the linters. These are
+# the only packages the test suite needs: it stubs the engine, so no torch.
+dev = [
+    "pytest>=8,<9",
+    "httpx>=0.27,<1", # fastapi.testclient requires httpx
+    "ruff>=0.6,<1",
+]
+
+[tool.pytest.ini_options]
+# The directory holding the flat modules. This is the whole point: the tests and the
+# container use the same import names.
+pythonpath = ["service"]
+testpaths = ["tests"]
+# Fail on an unknown marker instead of silently ignoring a typo that makes a test
+# always match.
+addopts = "--strict-markers"
+filterwarnings = [
+    "error::DeprecationWarning:pytest.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+# The vendored NVIDIA tokenizer is upstream code, carried verbatim (see
+# service/cosmos_tokenizer/). Formatting it would make every future diff against
+# NVIDIA an unreadable mess and split the blame for a bug between two vendors.
+extend-exclude = ["service/cosmos_tokenizer"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+
+[tool.ruff.lint.isort]
+# Every module in service/ is top-level (no package), so first-party detection has
+# to be told the names instead of inferred from a package tree.
+known-first-party = [
+    "app",
+    "engine",
+    "frames",
+    "settings",
+    "text_embedding",
+    "user_embedding",
+    "video_embedding",
+    "video_to_text",
+]

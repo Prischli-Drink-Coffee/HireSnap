@@ -1,0 +1,47 @@
+# Pre-commit gates for the ML sidecar. Mirrors the shape of
+# R:/GPTHub/whisper/.pre-commit-config.yaml so the submodules feel the same.
+#
+# WHY THE LOCAL HOOKS DO NOT USE `uv run --frozen` LIKE THE REFERENCE DOES: that form
+# needs a committed uv.lock to be reproducible, and this submodule deliberately has
+# none - its runtime dependencies are pinned against a CUDA wheel index in
+# docker/requirements.txt, which uv does not resolve. A bare `ruff`/`pytest` is worse
+# than either: on a developer machine with several checkouts it resolves to whichever
+# virtualenv is active, so the hook silently checks another service. `python -m` at
+# least ties the run to the interpreter the developer activated, and the exit code is
+# the same as the one CI gets from ml/pyproject.toml.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      # A file without a trailing newline produces a diff on every subsequent edit and
+      # makes the Dockerfile/requirements pins irritating to review.
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      # debug-statements catches a committed breakpoint()/pdb import. In a GPU
+      # container that is not a slow test, it is a hung request.
+      - id: debug-statements
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: ml-ruff
+        name: ruff (ml sidecar)
+        entry: python -m ruff check .
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: ml-pytest
+        name: pytest (ml contract tests, no torch required)
+        entry: python -m pytest -q
+        language: system
+        types: [python]
+        pass_filenames: false
+        # The suite is the one gate that proves the HTTP contract still holds, so it runs
+        # on every Python change rather than only when tests/ is touched.
+        always_run: false
