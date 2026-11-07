@@ -1,0 +1,116 @@
+# =============================================================================
+# HireSnap backend - build context filter for a STANDALONE build.
+#
+# WHERE THIS FILE IS ACTUALLY READ: nowhere, in the stack as shipped.
+# The compose files build the backend with "context: .." and
+# "dockerfile: ./backend/docker/Dockerfile" (docker/docker-compose.yaml:70-73,
+# mirroring R:\GPTHub\docker\docker-compose.yaml:32-37), so the context root is
+# the SUPERPROJECT and Docker reads the root .dockerignore, not this file.
+# It exists for the other path: "docker build backend/" while iterating on the
+# service alone, and for anyone who copies backend/ out as the standalone repo
+# it also is (it has its own remote and branch).
+#
+# WHY an ignore list at all: BuildKit ships every file it is not told to skip to
+# the daemon BEFORE it reads the Dockerfile. backend/ carries HireSnap.sql, a
+# venv, pytest caches and - on the ML path - model weights; a 20 GB vendor/ or
+# weights/ directory turns a 30-second build into a ten-minute one, and on a
+# remote daemon into a failed upload (R:\GPTHub\.dockerignore:1-14 makes the
+# same argument for the GPTHub root).
+#
+# The Dockerfile itself is NOT ignored here: BuildKit reads <Dockerfile>.dockerignore
+# when it exists, and "backend/docker/Dockerfile.dockerignore" is the escape
+# hatch if a context ever needs different rules than this file.
+# =============================================================================
+
+# --- secrets ---------------------------------------------------------------
+# The backend reads configuration from backend/.env (backend/env.py loads the
+# dotenv file next to itself). Real values must never be baked into an image
+# layer: layers are readable by anyone who can pull, and "docker history" shows
+# the filesystem diff. Only the template is allowed through.
+# Mirror of R:\GPTHub\.dockerignore:3-5.
+.env
+.env.*
+!.env.example
+
+# --- VCS --------------------------------------------------------------
+.git
+.gitignore
+.gitattributes
+
+# --- JWT material ---------------------------------------------------------
+# src/certs holds the RS256 key pair that signs every issued token
+# (backend/src/database/models.py:29-30). In the stack it is a read-only bind
+# mount (docker/docker-compose.yaml:255-257) so that tokens stay valid across a
+# rebuild; baking it in would ship one deployment's private key inside a
+# distributable artifact.
+src/certs
+certs
+*.pem
+*.key
+
+# --- Python environment and caches ----------------------------------------
+venv
+.venv
+env/
+ENV/
+__pycache__
+*.py[cod]
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# --- runtime state the container mounts instead ---------------------------
+# Uploaded videos / embeddings (DATA_PATH), logs and model weights are HOST
+# state under infra/ and are mounted read-only or read-write at run time
+# (docker/docker-compose.yaml:250-262). Copying them in would both bloat the
+# image and ship user data inside it.
+data/
+logs/
+*.log
+src/weights/
+weights/
+pretrained_ckpts/
+*.pt
+*.pth
+*.onnx
+*.npy
+*.ckpt
+
+# --- SQL dumps other than the one the image NEEDS -------------------------
+# create_sql.py:18 resolves "<DB>.sql" NEXT TO ITSELF, i.e. /app/HireSnap.sql,
+# so backend/HireSnap.sql is deliberately NOT ignored (Dockerfile:187). Any other
+# dump is a developer's local export and must not enter the image: it may hold
+# production rows.
+*.sql.bak
+*.sql.gz
+*.dump
+mysqldump*.sql
+!HireSnap.sql
+
+# --- vendored/tooling noise the server does not import --------------------
+# setup/ is packaging metadata for the vendored cosmos_tokenizer package; the
+# runtime imports the package, never its installer.
+setup/
+*.ipynb
+.ipynb_checkpoints/
+notebooks/
+tests/
+docs/
+**/*.md
+!requirements.txt
+!requirements_external.txt
+.mailmap
+.editorconfig
+.idea
+.vscode
+.DS_Store
+Thumbs.db

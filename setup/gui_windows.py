@@ -8,22 +8,21 @@ def main_menu():
     while True:
         print('=============================================================')
         print(' Меню для работы с HireSnap:\n')
-        print(' 1. Запуск train')
-        print(' 2. Запуск uvicorn')
-        print(' 3. Запуск pytest')
-        print(' 4. Выход из меню')
+        print(' 1. Запуск uvicorn')
+        print(' 2. Запуск pytest')
+        print(' 3. Выход из меню')
         print('=============================================================')
 
         choice = input('\nСделайте выбор: ')
         print('')
 
-        if choice in ['1', '2', '3']:
+        if choice in ['1', '2']:
             set_key(path_to_env(), 'CHOICE', choice)  # Устанавливаем значение переменной окружения
             break
-        elif choice == '4':
+        elif choice == '3':
             sys.exit()
         else:
-            print('Выберите между 1-4')
+            print('Выберите между 1-3')
 
 
 if __name__ == '__main__':

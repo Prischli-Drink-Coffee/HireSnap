@@ -35,10 +35,8 @@ if %errorlevel% equ 0 (
     if /i "%comspec% /c %~0 " equ "%cmdcmdline:"=%" (
         REM echo Этот скрипт запущен с помощью двойного нажатия.
         if %var% == '1' (
-            cmd /k python.exe ./src/pipeline/train.py
-        ) else if %var% == '2' (
             cmd /k python.exe ./src/pipeline/server.py
-        ) else if %var% == '3' (
+        ) else if %var% == '2' (
             cmd /k pytest ./src/pipeline/test.py
         ) else (
             echo Not found value: %var%
@@ -46,10 +44,8 @@ if %errorlevel% equ 0 (
     ) else (
         REM echo Этот скрипт был запущен с помощью командной строки.
         if %var% == '1' (
-            python.exe ./src/pipeline/train.py
-        ) else if %var% == '2' (
             python.exe ./src/pipeline/server.py
-        ) else if %var% == '3' (
+        ) else if %var% == '2' (
             pytest ./src/pipeline/test.py
         ) else (
             echo Not found value: %var%

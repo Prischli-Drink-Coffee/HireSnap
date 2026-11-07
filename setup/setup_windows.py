@@ -15,14 +15,18 @@ YELLOW = '\033[93m'
 RESET_COLOR = '\033[0m'
 
 
-def install_tensorflow():
+def install_venv():
+    # Раньше здесь ставился requirements_external.txt - GPU-стек (torch+cu116,
+    # tensorflow) внутрь интерпретатора backend. Этот стек переехал в ml/ (у
+    # sidecar свой образ со своим torch), поэтому ставим только зависимости
+    # самого backend.
     setup_common.check_repo_version()
     setup_common.check_python()
 
     # Обновление pip, если необходимо
     setup_common.install('--upgrade pip')
 
-    setup_common.install_requirements('requirements_external.txt', check_no_verify_flag=True)
+    setup_common.install_requirements('requirements.txt', check_no_verify_flag=True)
 
 
 def sync_bits_and_bytes_files():
@@ -122,7 +126,7 @@ def main_menu():
         print('')
 
         if choice == '1':
-            install_tensorflow()
+            install_venv()
         elif choice == '2':
             cudnn_install()
         elif choice == '3':

@@ -1,0 +1,125 @@
+# ===========================================================================
+# HireSnap backend - PINNED SNAPSHOT of backend/requirements.txt
+# ===========================================================================
+#
+# WHAT THIS IS: backend/requirements.txt, verbatim. Since the ML stack left the
+# backend, every dependency in that file is pinned already, so this snapshot and
+# its source are byte-identical below the header. The two files are kept separate
+# on purpose: the Dockerfile installs one of them by basename
+# (ARG REQUIREMENTS_FILE), and a build that wants the reviewed snapshot should
+# not have to depend on requirements.txt staying pinned forever.
+#
+# WHAT THIS IS NOT: a resolved lock. It contains no transitive dependencies and
+# no hashes - 'pip install -r' still resolves the tree at install time. What it
+# does guarantee is that no DIRECT dependency drifts between two builds of the
+# same commit, which was the actual gap (docs/KNOWN_GAPS.md 4).
+#
+# THE ML STACK IS NOT IN HERE ANY MORE. torch, torchvision, torchaudio,
+# transformers, sentence-transformers, moviepy, librosa, torchmetrics,
+# torcheval, faiss-cpu, spacy, textattack, nltk, webrtcvad, twisted,
+# aiobotocore, opencv-python, notebook, munch, protobuf, matplotlib and seaborn
+# were removed: none of them is reachable from src/pipeline/server.py now that
+# inference lives in the ml sidecar (ml/) and is reached over HTTP through
+# src/services/ml_client.py. numpy, pandas and scikit-learn stay - candidate and
+# vacancy matching is business logic.
+#
+# Constraints that still decide a version here:
+#   1. Python 3.9 - every pin has a cp39 (or py3-none-any) wheel, so the image
+#      installs no compiler. That is why there is no build-essential in the
+#      Dockerfile any more; adding a source-only dependency means deciding to
+#      put it back.
+#   2. pydantic 2.7.4 / pydantic_core 2.18.4 - the pair the models in
+#      src/database/models.py are written against.
+#   3. numpy 1.26.4 - the last 1.x line, and pandas 2.2.2 + scikit-learn 1.5.1
+#      are built against the 1.x ABI.
+#
+# HOW TO USE IT: build with
+#     --build-arg REQUIREMENTS_FILE=requirements.lock.txt
+# (backend/docker/Dockerfile, layer 1). The Dockerfile's default stays
+# requirements.txt so the image keeps matching the repository; switching to
+# this file is an explicit decision by whoever needs the reproducible build.
+#
+# MAINTENANCE: regenerate whenever requirements.txt changes - this file is a
+# copy, and a stale copy is worse than no copy because it looks authoritative.
+# ===========================================================================
+
+# ===========================================================================
+# HireSnap backend - runtime dependencies
+# ===========================================================================
+#
+# WHAT IS IN HERE: the exact third-party import closure of the server entry
+# point, backend/src/pipeline/server.py, plus pytest for the test suite. Nothing
+# else. Every line is pinned.
+#
+# WHAT IS NOT IN HERE: the inference stack. Embedding, transcription and the
+# Cosmos tokenizer live in the ml sidecar (ml/); the backend reaches them over
+# HTTP through src/services/ml_client.py and imports no ML library at all. torch,
+# torchvision, torchaudio, transformers, sentence-transformers, moviepy, librosa,
+# torchmetrics, torcheval, faiss-cpu, spacy, textattack, nltk, webrtcvad,
+# twisted, aiobotocore, opencv-python, notebook, munch, protobuf, matplotlib and
+# seaborn were removed with it - none of them was reachable from server.py.
+#
+# numpy, pandas and scikit-learn stay: candidate/vacancy matching (cosine
+# distances, MinMaxScaler) is business logic that runs in the API process.
+#
+# WHY THE VERSIONS ARE PINNED: an unpinned install makes two builds a month apart
+# produce two different images from the same commit (docs/KNOWN_GAPS.md 4). The
+# previous file pinned only its first block and left the whole ML tail floating.
+#
+# PYTHON 3.9 IS THE TARGET: every pin below publishes a cp39 wheel, so the image
+# builds without a compiler. Keep that property when you bump one - the base
+# image has no build-essential any more.
+#
+# TWO SIBLING FILES, DELIBERATELY SEPARATE:
+#   requirements_platform.txt  celery, redis, boto3 - only for the worker and S3
+#                              images, imported lazily by src/infra/*.py
+#   docker/requirements.lock.txt  this file, verbatim: the reproducible build
+#
+# THERE IS NO GPU SIBLING ANY MORE. requirements_external.txt (torch+cu116,
+# tensorflow) is deleted: a file whose purpose is to install the inference stack
+# into THIS interpreter is how the boundary erodes. The sidecar's image installs
+# its own torch from ml/.
+#
+# HOW THIS LIST WAS COMPUTED: an AST walk from src/pipeline/server.py over the
+# local import graph (39 modules), collecting the top-level third-party names,
+# with src/modelling and cosmos_tokenizer excluded from the walk because they are
+# deleted. Re-run it after adding an import to a module the entry point reaches.
+# ===========================================================================
+
+# --- web framework and server ---------------------------------------------
+fastapi==0.111.0
+uvicorn==0.30.1
+# uvicorn --reload (DEBUG=true) refuses to start without it.
+watchfiles==0.22.0
+
+# --- configuration and validation -----------------------------------------
+pydantic==2.7.4
+pydantic_core==2.18.4
+# src/database/models.py Settings reads backend/.env against these two.
+pydantic-settings==2.2.1
+python-dotenv==1.0.1
+PyYAML==6.0.2
+
+# --- persistence ----------------------------------------------------------
+PyMySQL==1.1.1
+
+# --- auth -----------------------------------------------------------------
+PyJWT==2.8.0
+bcrypt==4.1.3
+
+# --- matching and ranking (business logic, not inference) -----------------
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.1
+
+# --- HTTP, files, logging -------------------------------------------------
+requests==2.32.3
+aiofiles==24.1.0
+rich==13.7.1
+# Transitive, pinned for reproducible builds: rich -> markdown-it-py,
+# pydantic -> annotated-types.
+markdown-it-py==3.0.0
+annotated-types==0.7.0
+
+# --- tests ----------------------------------------------------------------
+pytest==8.2.2

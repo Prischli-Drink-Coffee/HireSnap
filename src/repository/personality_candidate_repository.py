@@ -1,4 +1,8 @@
 from src.database.my_connector import db
+# Imported here because update_*() below raises HTTPException; the module used it
+# without importing it, so any call with an empty payload was a NameError (500)
+# instead of the intended 400. Found by the repo's F821 gate, not by a test.
+from fastapi import HTTPException, status
 from src.database.models import PersonalityCandidates
 from typing import Dict
 

@@ -1,7 +1,6 @@
 import os
 import re
 import sys
-import shutil
 import argparse
 import setup_common
 
@@ -22,48 +21,6 @@ from src.utils.custom_logging import setup_logging
 log = setup_logging()
 
 
-def check_tensorflow():
-    # Проверка наличия CUDA или ROCm
-    if shutil.which('nvidia-smi') is not None or os.path.exists(
-            os.path.join(
-                os.environ.get('SystemRoot') or r'C:\Windows',
-                'System32',
-                'nvidia-smi.exe',
-            )
-    ):
-        log.info('nVidia toolkit обнаружен')
-    elif shutil.which('rocminfo') is not None or os.path.exists(
-            '/opt/rocm/bin/rocminfo'
-    ):
-        log.info('AMD toolkit обнаружен')
-    else:
-        log.info('Подключение только CPU TensorFlow')
-
-    try:
-        # Проверка наличия TensorFlow
-        import tensorflow as tf
-
-        log.info(f'TensorFlow {tf.__version__}')
-
-        # Проверка доступности GPU
-        if not tf.config.list_physical_devices('GPU'):
-            log.warning('TensorFlow сообщил, что GPU не доступен')
-        else:
-            # Информация о доступных устройствах
-            for index, device in enumerate(tf.config.list_physical_devices('GPU')):
-                log.info(f'TensorFlow обнаружил устройство: {device.name}')
-
-                # Получение информации о GPU
-                if 'GPU' in device.name:
-                    details = tf.config.experimental.get_device_details(device)
-                    log.info(f"Имя устройства: {details.get('device_name')}")
-        return 2
-
-    except Exception as e:
-        log.error(f'Невозможно загрузить tensorflow: {e}')
-        return 0
-
-
 def main():
     setup_common.check_repo_version()
     # Разобрать аргументы командной строки
@@ -79,14 +36,12 @@ def main():
     parser.add_argument('--debug', action='store_true', help='Debug on')
     args = parser.parse_args()
 
-    tensorflow_ver = check_tensorflow()
+    # GPU-стек больше не принадлежит backend: torch/tensorflow переехали в ml/
+    # и ставятся образом sidecar-а, поэтому requirements_external.txt удалён.
     setup_common.install_requirements('requirements.txt', check_no_verify_flag=True)
 
     if args.requirements:
         setup_common.install_requirements(args.requirements, check_no_verify_flag=True)
-    else:
-        if tensorflow_ver == 0:
-            setup_common.install_requirements('requirements_external.txt', check_no_verify_flag=True)
 
 
 if __name__ == '__main__':

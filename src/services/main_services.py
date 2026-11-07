@@ -3,7 +3,7 @@ import uuid
 import numpy as np
 from src.services import (file_services, embedding_services, personality_services, candidate_vacancy_services, personality_vacancy_services,
                           personality_candidate_services, info_candidate_services, user_services, personality_services, vacancy_services)
-from src.database.models import Users, Embeddings, Files, InfoCandidates, Personalities, PersonalityCandidates, Users, Vacancies, PersonalityVacancies
+from src.database.models import Users, Embeddings, Files, InfoCandidates, Personalities, PersonalityCandidates, Users, Vacancies, PersonalityVacancies, CandidateVacancies
 from fastapi import HTTPException, status, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
 from src.utils.write_file_into_server import write_file_into_server, write_embedding_into_server
@@ -13,7 +13,13 @@ from src.utils.custom_logging import setup_logging
 from src.utils.log_debugging import debug_ex, debug_err, debug_info
 from sklearn.metrics.pairwise import cosine_distances
 from sklearn.preprocessing import MinMaxScaler
-from src.modelling.user_embedding import get_user_embedding
+# The embedding pipeline lives in the ml sidecar (ml/, docs/SIDECARS.md 4); this
+# import is the TRANSPORT. It is the only way to reach inference from the backend:
+# there is no in-process path any more, so this module no longer pulls torch into
+# the API process at all. The call site inside upload_video() is unchanged, and
+# the signature and return type still match the retired
+# src.modelling.user_embedding.get_user_embedding.
+from src.services.ml_client import get_user_embedding
 from decimal import Decimal, ROUND_HALF_UP
 from env import Env
 
@@ -245,10 +251,10 @@ def upload_vacancy(name,
                    description,
                    salary,
                    skill):
-    
+
 
     return {"message": "test"}
-    
+
 
 
 
@@ -257,7 +263,10 @@ def get_all_vacancies(user_id):
     user = user_services.get_user_by_id(user_id)
     candidate_vacancies = candidate_vacancy_services.get_all_candidate_vacancies()
     user_vacancies = []
-    for smaple in candidate_vacancies:
+    # The loop variable was misspelled 'smaple' while the body read 'sample.',
+    # so this branch could never work (NameError on the first row). Renaming the
+    # variable - not aliasing it - is the only fix that keeps the body correct.
+    for sample in candidate_vacancies:
         if sample.UserID == user_id:
             user_vacancies.append(sample.model_dump())
     user_vacancies.sort(reverse=True)
@@ -269,7 +278,7 @@ def get_all_candidates(vacancy_id):
     vacancy = vacancy_services.get_vacancy_by_id(vacancy_id)
     candidate_vacancies = candidate_vacancy_services.get_all_candidate_vacancies()
     vacancy_candidates = []
-    for smaple in candidate_vacancies:
+    for sample in candidate_vacancies:  # same misspelling as above
         if sample.VacancyID == vacancy_id:
             vacancy_candidates.append(sample.model_dump())
     vacancy_candidates.sort(reverse=True)

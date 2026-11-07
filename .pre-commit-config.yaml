@@ -1,0 +1,32 @@
+# Hooks for THIS service.
+#
+# Why a second config: backend/ is an independent git repository with its own
+# .git. The superproject's hooks do not fire on a commit made inside it - and that
+# is where code is actually committed. Without this file the only gates that ever
+# ran were the superproject's, on the rare commit that only bumps a pointer.
+#
+# Install with "pre-commit install" HERE, or "make hooks" from the root.
+#
+# Deliberately not the full test suite: it lives in CI. These are the fast checks
+# that catch the classic breakages before the push.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: debug-statements
+
+  # Secret scanner, as the last line of defence: a secret that reaches a commit
+  # cannot be removed by a revert, only by rewriting history, so it has to be
+  # caught before the write rather than in review.
+  #
+  # A superproject scan cannot see inside a gitlink, so this file is the ONLY
+  # place this repository is scanned at commit time (scripts/check_*.py and
+  # gitleaks in the root CI cover the superproject's own files).
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
