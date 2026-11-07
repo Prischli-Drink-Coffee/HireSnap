@@ -65,9 +65,25 @@ logger = logging.getLogger("ml")
 # broken") when it is really a 503 ("the dependency is not mounted yet").
 # --------------------------------------------------------------------------- #
 class EngineError(Exception):
-    """The request was well formed but inference failed. HTTP 500."""
+    """The request was well formed but inference failed. HTTP 500.
+
+    The pair (code, detail) is what the HTTP layer renders as {error, detail}. It is
+    stored explicitly instead of being left in Exception.args so that str(exc) is the
+    sentence an operator reads, not the repr of a two-element tuple: app.py forwards
+    str(exc) as the response detail, and "('service_unavailable', 'UNet3D weights not
+    found at ...')" both repeats the code and buries the actionable part.
+    """
 
     code = "inference_failed"
+
+    def __init__(self, code: Optional[str] = None, detail: str = "") -> None:
+        super().__init__(detail)
+        if code:
+            self.code = code
+        self.detail = detail
+
+    def __str__(self) -> str:
+        return self.detail or type(self).__name__
 
 
 class EngineUnavailable(EngineError):
@@ -279,14 +295,20 @@ class MLEngine:
             raise EngineUnavailable(
                 "service_unavailable",
                 "UNet3D weights not found at " + str(weights)
-                + " (mount infra/models/weights at WEIGHTS_DIR)",
+                + " (mount the host directory that holds Unet3D.pth onto "
+                + str(weights.parent) + " via WEIGHTS_DIR; the deployment default is "
+                + "infra/models/weights -> /app/models/weights)",
             )
         checkpoint = settings.cosmos_encoder_path()
         if not checkpoint.is_file():
             raise EngineUnavailable(
                 "service_unavailable",
                 "Cosmos tokenizer checkpoint not found at " + str(checkpoint)
-                + " (mount infra/models/pretrained_ckpts at PRETRAINED_CKPT_DIR)",
+                + " (mount the host directory that holds "
+                + settings.COSMOS_TOKENIZER_DIRNAME
+                + " onto " + str(settings.pretrained_ckpt_dir())
+                + " via PRETRAINED_CKPT_DIR; the deployment default is "
+                + "infra/models/pretrained_ckpts -> /app/models/pretrained_ckpts)",
             )
 
         # Scratch dirs are per request and owned here: the pipeline no longer deletes

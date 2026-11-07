@@ -185,9 +185,9 @@ def extract_frames_ffmpeg(
 def process_videos(input_dir, output_dir) -> int:
     """Batch helper for maintainers: extract frames for every .mp4 in a folder.
 
-    Kept because it was the documented way to rebuild a frame corpus offline
-    (backend/inference.sh called it). It returns the number of failures instead of
-    raising, so one unreadable file does not discard a long run.
+    Kept because rebuilding a frame corpus offline is still a real task, and
+    `python frames.py <in> <out>` on the CLI drives this. It returns the number of
+    failures instead of raising, so one unreadable file does not discard a long run.
     """
     source = Path(input_dir)
     failures = 0

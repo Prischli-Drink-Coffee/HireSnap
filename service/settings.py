@@ -225,13 +225,13 @@ def video_model_id() -> str:
 
 
 def text_model_id() -> str:
-    """Same model the backend used for candidate text, so vectors produced before
+    """Same model the API container used for candidate text, so vectors produced before
     and after this extraction stay comparable (all-MiniLM-L6-v2, 384 dims)."""
     return _text("ML_TEXT_MODEL_ID", "all-MiniLM-L6-v2")
 
 
 def asr_model_id() -> str:
-    """Same ASR checkpoint the backend loaded, so transcripts do not change with
+    """Same ASR checkpoint the API container loaded, so transcripts do not change with
     the deployment shape."""
     return _text("ML_ASR_MODEL_ID", "facebook/wav2vec2-large-960h-lv60-self")
 

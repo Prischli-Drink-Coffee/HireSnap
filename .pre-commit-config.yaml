@@ -30,15 +30,24 @@ repos:
 
   - repo: local
     hooks:
+      # WHY THE ENTRY POINTS ARE scripts/ml_gate.sh AND NOT `python -m ...`:
+      # on Windows the name `python` on PATH is the Microsoft Store stub, which
+      # starts no interpreter at all and exits 49. pre-commit reported both hooks
+      # as "exit code: 9009" and refused every commit in this submodule. The
+      # helper runs each candidate interpreter with -c "import sys" and uses the
+      # first that works, which is the same fix scripts/run_guard.sh applies in the
+      # superproject. A machine with no Python gets a loud SKIP instead of a
+      # permanent block; CI installs 3.9 with setup-python, so the gate still runs
+      # where it can be trusted.
       - id: ml-ruff
         name: ruff (ml sidecar)
-        entry: python -m ruff check .
+        entry: bash scripts/ml_gate.sh ruff check .
         language: system
         types: [python]
         pass_filenames: false
       - id: ml-pytest
         name: pytest (ml contract tests, no torch required)
-        entry: python -m pytest -q
+        entry: bash scripts/ml_gate.sh pytest -q
         language: system
         types: [python]
         pass_filenames: false

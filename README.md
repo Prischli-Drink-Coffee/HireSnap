@@ -1,9 +1,10 @@
 # HireSnap ML sidecar
 
 Inference as a separate process: it turns an uploaded video into a candidate
-embedding vector and audio into text, and it owns the model code that used to sit in
-`backend/src/modelling/`. The business API keeps auth, routing and MySQL; this service
-keeps torch, the GPU, the CUDA runtime and the multi-gigabyte weights.
+embedding vector and audio into text, and it **owns the model code** - the pipeline that
+lived in `backend/src/modelling/` was moved here and that tree is deleted, so this is the
+only copy. The business API keeps auth, routing and MySQL; this service keeps torch, the
+GPU, the CUDA runtime and the multi-gigabyte weights.
 
 **Why a separate process and not a library call:** a CUDA out-of-memory kill then takes
 down the sidecar, not the API serving logins. The split is at process level on purpose;
@@ -110,7 +111,7 @@ in an optional key cannot stop the process from starting and reporting `degraded
 |----------|---------|---------|
 | `ML_HOST` | `0.0.0.0` | bind address; `127.0.0.1` would be unreachable from the network |
 | `ML_PORT` | `8080` | HTTP port inside the container |
-| `DATA_PATH` | `<ml>/data` (`/app/data` in the image) | scratch spool for request bodies; **not** the backend uploads directory |
+| `DATA_PATH` | `<ml>/data`; the image creates `/app/data`, and `docker/docker-compose.yaml` passes `/app/ml-scratch` on the `ml_scratch` volume | scratch spool for request bodies; **not** the backend uploads directory |
 | `WEIGHTS_DIR` | `<ml>/models/weights` (`/app/models/weights`) | holds `Unet3D.pth` |
 | `PRETRAINED_CKPT_DIR` | `<ml>/models/pretrained_ckpts` (`/app/models/pretrained_ckpts`) | holds `Cosmos-Tokenizer-CV4x8x8/encoder.jit` |
 | `HF_HOME` | unset (`/app/.cache/huggingface` in the image) | Hugging Face cache; must be a volume or every recreate re-downloads |

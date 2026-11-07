@@ -410,7 +410,7 @@ async def embed_video(request: Request) -> Dict[str, Any]:
 
 @app.post("/v1/embed/text")
 async def embed_text(payload: TextRequest) -> Dict[str, Any]:
-    """Sentence embedding for one string. Same model as the in-process backend."""
+    """Sentence embedding for one string. Same model the API container used to run."""
     text = payload.text.strip()
     if not text:
         raise ApiError("empty_body", "text is empty", 400)
