@@ -1,0 +1,295 @@
+# HireSnap virtual host - rendered by the nginx image at container start.
+#
+# The official nginx image runs envsubst over every file in /etc/nginx/templates
+# and writes the result into /etc/nginx/conf.d (compose mounts this directory at
+# /etc/nginx/templates, mirror of R:\GPTHub\docker\docker-compose.yaml:155).
+# envsubst only substitutes variables that exist in the container environment,
+# and APP_DOMAIN is the single one this stack passes on purpose - so nginx's own
+# variables ($host, $uri, $request_id, $backend_upstream, ...) are passed through
+# untouched. Do not add a second ${...} placeholder here: it would either be
+# blanked (variable set) or silently left as literal text (variable unset).
+#
+# This is a PLAIN HTTP vhost on :80. TLS is opt-in: the HTTPS server block at the
+# bottom of this file is commented out and enabled only when certificates exist
+# in infra/nginx/certs/.
+
+# Rate limit for the API surface. 10 r/s per client IP with a 20-request burst
+# absorbs one page load (several parallel XHRs) while still bounding a scan.
+# Mirror of R:\GPTHub\infra\nginx\templates\site.conf.template:2.
+limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+
+server {
+    listen      80 default_server;
+    listen      [::]:80 default_server;
+
+    # APP_DOMAIN is the only rendered value; "_" keeps the vhost answering for
+    # IP-only access and for a Host the operator has not configured yet, which is
+    # what a fresh `docker compose up` on localhost:8088 looks like.
+    server_name ${APP_DOMAIN} _;
+
+    # Upstreams are VARIABLES, not literal names, so nginx re-resolves them
+    # through the Docker resolver (127.0.0.11, see nginx.conf) at request time
+    # instead of caching the IP once at startup. `docker compose up` recreates the
+    # backend container on every image rebuild, and the new container gets a new
+    # IP; with a literal proxy_pass trailing traffic would go to a dead address
+    # until nginx itself restarts. Mirror of
+    # R:\GPTHub\infra\nginx\templates\site.conf.template:30-33, which states
+    # the same reason.
+    #
+    # The path rewriting therefore uses `rewrite ... break` + a URI-less
+    # proxy_pass: nginx forbids a URI part in proxy_pass when the target is a
+    # variable in a regex location, and a bare variable target passes the
+    # (already rewritten) request URI through unchanged.
+    set $backend_upstream  http://backend:8080;
+    set $frontend_upstream http://frontend:80;
+
+    # Security headers are re-declared here because nginx does not merge
+    # add_header between levels: a server block that declares one discards the
+    # http-level ones. "always" makes them survive 4xx/5xx, where they matter most.
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options SAMEORIGIN always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
+    add_header X-Request-ID $request_id always;
+
+    # ---- health ------------------------------------------------------------
+    # Answered by nginx itself, never proxied: the gateway must keep reporting
+    # alive while the backend is restarting, and this is the endpoint the compose
+    # healthcheck and `make smoke` poll. Mirror of
+    # R:\GPTHub\infra\nginx\templates\site.conf.template:11-15.
+    location = /health {
+        access_log off;
+        default_type application/json;
+        return 200 '{"status":"ok","service":"gateway"}';
+    }
+
+    # ---- API contract ------------------------------------------------------
+    # Three pieces must agree, and check_api_prefix_contract.py asserts it:
+    #   * the browser calls "<origin>/api/..." (frontend REACT_APP_BASE_URL=/api/,
+    #     backend/src/pipeline/server.py:25-32 mounts the API app at /server);
+    #   * this server strips /api/ and re-adds /server/ before proxying;
+    #   * the backend therefore sees /server/users/ and answers.
+    #
+    # proxy_pass has NO URI part here, so `rewrite ... break` is what performs the
+    # substitution: /api/users/ -> /server/users/ (the parenthesised group keeps
+    # the rest of the path, including its trailing slash, so no double slash can
+    # appear - a proxy_pass URI of ".../server/" would produce /server//users/).
+    location /api/ {
+        rewrite ^/api/(.*)$ /server/$1 break;
+        proxy_pass $backend_upstream;
+
+        # The API's own budget; burst covers a page load's parallel XHRs. Over
+        # the limit nginx answers 503, which the SPA retries.
+        limit_req zone=api burst=20 nodelay;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-ID      $request_id;
+
+        # No WebSocket endpoint exists today (the API is plain REST). The upgrade
+        # headers are set anyway so a future streaming endpoint needs no gateway
+        # change; $connection_upgrade is "close" for ordinary requests, so the
+        # cost of carrying them now is zero.
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        # One retry on a transient upstream refusal. Safe because a refusal
+        # happens before the request body is streamed; the upload itself is never
+        # replayed behind the client's back.
+        proxy_next_upstream error timeout;
+        proxy_next_upstream_tries 2;
+    }
+
+    # ---- FastAPI documentation survives the rewrite ------------------------
+    # FastAPI builds every URL in /docs and /openapi.json from the ASGI root
+    # path, and this deployment mounts the app at /server without setting
+    # root_path. Two consequences, both handled here:
+    #   1. the schema itself must stay reachable at the URL the browser asks for,
+    #      so /api/openapi.json is rewritten to /server/openapi.json;
+    #   2. the Swagger UI at /server/docs links to /server/openapi.json, i.e. an
+    #      absolute path OUTSIDE /api/, so /server/ is proxied through unchanged
+    #      below. Without it the docs page loads but cannot fetch its schema.
+    # If the backend later sets root_path="/server", /api/openapi.json keeps
+    # working unchanged; this block is the compatibility seam, not a workaround
+    # for a bug in the gateway.
+    location ~ ^/api/(docs|redoc|openapi\.json)$ {
+        rewrite ^/api/(.*)$ /server/$1 break;
+        proxy_pass $backend_upstream;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Prefix /api;
+        proxy_http_version 1.1;
+    }
+
+    # Direct passthrough of the backend's real mount (see the note above). It
+    # proxies the path unchanged - no rewrite - so /server/openapi.json and
+    # /server/docs/*.js resolve for the documentation page.
+    location /server/ {
+        proxy_pass $backend_upstream;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+    }
+
+    # ---- uploaded media ----------------------------------------------------
+    # backend mounts its DATA_PATH directory at /data (server.py:31). Proxied
+    # through the gateway so the browser never needs a second origin and the
+    # container port stays unpublished. Buffering is off because these are large
+    # video files streamed to a player that may range-request them; nginx's
+    # default buffering would spool whole files to disk first.
+    location /data/ {
+        proxy_pass $backend_upstream;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+    }
+
+    # ---- frontend ----------------------------------------------------------
+    # CRA emits content-hashed filenames (main.<hash>.js), so a one-year
+    # immutable cache is safe: a new build produces a new filename, and the HTML
+    # that references it is never cached (previous block).
+    # Mirror of R:\GPTHub\infra\nginx\templates\site.conf.template:152-168.
+    location ~* ^/(static|media)/.*\.(js|css|map|png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot)$ {
+        proxy_pass $frontend_upstream;
+        proxy_set_header Host            $host;
+        proxy_set_header X-Real-IP       $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+
+    # HTML must never be cached, or a redeploy leaves browsers pointing at asset
+    # filenames that no longer exist. Mirror of
+    # R:\GPTHub\infra\nginx\templates\site.conf.template:182-197.
+    location ~* \.html$ {
+        proxy_pass $frontend_upstream;
+        proxy_set_header Host            $host;
+        proxy_set_header X-Real-IP       $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        add_header Cache-Control "no-cache, no-store, must-revalidate, max-age=0";
+        add_header Pragma "no-cache";
+        expires -1;
+    }
+
+    # SPA fallback: every unknown path is a client-side route, so it must return
+    # the app shell rather than 404. The fallback itself lives in the frontend
+    # image (its nginx runs `try_files $uri $uri/ /index.html`); this location
+    # forwards the untouched path and lets it decide.
+    location / {
+        proxy_pass $frontend_upstream;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_redirect off;
+    }
+
+    # ---- error surfaces ----------------------------------------------------
+    # A proxy that answers with nginx's HTML error page makes the SPA show a
+    # parse error instead of a message, so every edge failure is JSON. Mirror of
+    # R:\GPTHub\infra\nginx\templates\site.conf.template:209-221.
+    error_page 500 501 502 503 504 @service_unavailable;
+    location @service_unavailable {
+        default_type application/json;
+        add_header Retry-After 30 always;
+        add_header X-Content-Type-Options nosniff always;
+        return 503 '{"error":"service_unavailable","status":503,"uri":"$request_uri","request_id":"$request_id"}';
+    }
+
+    error_page 400 401 403 @client_error;
+    location @client_error {
+        default_type application/json;
+        add_header X-Content-Type-Options nosniff always;
+        return 400 '{"error":"bad_request","status":$status,"uri":"$request_uri","request_id":"$request_id"}';
+    }
+}
+
+# ===========================================================================
+# HTTPS vhost - DISABLED BY DEFAULT.
+#
+# Kept here, commented, instead of in a second file: enabling TLS is then one
+# uncomment plus one port publish, and no other file in the stack changes.
+# (GPTHub's template is HTTPS-only because it always terminates TLS; this stack
+# must also work on a plain :8088 for a first local run.)
+#
+# To enable:
+#   1. Put a certificate at infra/nginx/certs/certificate.pem and its key at
+#      infra/nginx/certs/private.pem. compose mounts ../infra/nginx/certs at
+#      /etc/nginx/certs (mirror of R:\GPTHub\docker\docker-compose.yaml:156);
+#      that directory is gitignored (.gitignore:45) because private keys never
+#      enter history.
+#   2. Uncomment the server block below and, in the :80 server above, replace
+#      `location / { proxy_pass $frontend_upstream; ... }` with a 301 redirect to
+#      https://$host$request_uri, keeping the exact-match /health location
+#      unredirected so probes keep working.
+#   3. Publish the port: set NGINX_PUBLISH_HTTPS in docker/.env.<mode> and add
+#      the publish entry to the gateway service (${NGINX_PUBLISH_HTTPS:-8443}:443,
+#      the same shape as R:\GPTHub\docker\docker-compose.yaml:165).
+#
+# server {
+#     listen      443 ssl default_server;
+#     listen      [::]:443 ssl default_server;
+#     http2       on;
+#     server_name ${APP_DOMAIN} _;
+#
+#     ssl_certificate     /etc/nginx/certs/certificate.pem;
+#     ssl_certificate_key /etc/nginx/certs/private.pem;
+#     ssl_protocols       TLSv1.2 TLSv1.3;
+#     ssl_prefer_server_ciphers on;
+#     ssl_ciphers         "EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH";
+#     ssl_session_cache   shared:SSL:10m;
+#     ssl_session_timeout 1d;
+#
+#     # HSTS only once TLS is actually served: enabling it on a plain-HTTP
+#     # deployment would lock browsers out for a year.
+#     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+#
+#     set $backend_upstream  http://backend:8080;
+#     set $frontend_upstream http://frontend:80;
+#
+#     location = /health {
+#         access_log off;
+#         default_type application/json;
+#         return 200 '{"status":"ok","service":"gateway"}';
+#     }
+#
+#     location /api/ {
+#         rewrite ^/api/(.*)$ /server/$1 break;
+#         proxy_pass $backend_upstream;
+#         proxy_http_version 1.1;
+#         proxy_set_header Host              $host;
+#         proxy_set_header X-Real-IP         $remote_addr;
+#         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#         proxy_set_header Upgrade           $http_upgrade;
+#         proxy_set_header Connection        $connection_upgrade;
+#     }
+#
+#     location /data/ {
+#         proxy_pass $backend_upstream;
+#         proxy_buffering off;
+#     }
+#
+#     location / {
+#         proxy_pass $frontend_upstream;
+#         proxy_set_header Host $host;
+#     }
+#
+#     error_page 500 501 502 503 504 @service_unavailable;
+#     location @service_unavailable {
+#         default_type application/json;
+#         add_header Retry-After 30 always;
+#         return 503 '{"error":"service_unavailable","status":503,"uri":"$request_uri"}';
+#     }
+# }
+# ===========================================================================

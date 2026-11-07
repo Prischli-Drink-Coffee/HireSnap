@@ -1,0 +1,49 @@
+# ===========================================================================
+# HireSnap - GPU override (applied by run.sh when GPU=1).
+#
+# This file is NOT a stack. It is a compose OVERRIDE, layered on top of
+# docker-compose.yaml (prod) or docker-compose.dev.yaml (dev):
+#
+#     docker compose -f docker-compose.yaml -f docker-compose.gpu.yaml ...
+#
+# run.sh does that for you when GPU=1 in the mode's env file.
+#
+# WHY an override and not a line in the main file: a "deploy.resources.
+# reservations.devices" entry is not a preference, it is a REQUIREMENT on the
+# host. On a machine without the NVIDIA container runtime the container does not
+# start degraded - it fails to start, with an error that reads like a compose
+# bug ("could not select device driver"). Keeping that requirement in a file an
+# operator opts into means:
+#
+#   * a laptop, a CI runner or a CPU-only server runs the SAME stack with GPU=0
+#     and the sidecar serves on CPU (slow, honest, and /v1/capabilities says
+#     "cuda": false rather than pretending);
+#   * the intent is greppable: "is this deployment supposed to have a card?" is
+#     answered by GPU=1 in .env.<mode>, not by reading a reservation block.
+#
+# MIRROR: R:\GPTHub\docker\docker-compose.yaml:1-30 keeps its docker/ tree
+# host-agnostic and puts host-specific runtime facts in the env file for the same
+# reason - a compose file that only works on one machine class is a compose file
+# that cannot be reviewed.
+#
+# NO "name:" KEY HERE. Compose takes the project name from the base file
+# (hiresnap-prod or hiresnap-dev); restating it would make this override usable
+# with exactly one of the two stacks, and the whole point is that it is the same
+# override for both.
+# ===========================================================================
+
+services:
+
+  ml:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # count: all rather than "1": the sidecar runs one model set and
+              # ml/service/engine.py serialises inference behind a lock, so a second card
+              # would sit idle. "all" is what the NVIDIA runtime expects when the
+              # operator has already narrowed the set with
+              # NVIDIA_VISIBLE_DEVICES (a comma list such as "0").
+              count: all
+              capabilities: [gpu]

@@ -1,0 +1,112 @@
+# =============================================================================
+# HireSnap - build context filter for the SUPERPROJECT ROOT.
+#
+# WHY this file exists at the root and not under backend/:
+# the backend image is built with "context: .." (docker/docker-compose.yaml:70-73,
+# mirroring R:\GPTHub\docker\docker-compose.yaml:32-37), so Docker reads
+# <context>/.dockerignore - this file - and never backend/.dockerignore. It is the
+# only thing standing between a "docker build" and a multi-gigabyte context made
+# of the MySQL data directory, uploaded videos, model weights and node_modules.
+# Mirrors R:\GPTHub\.dockerignore:1-14.
+#
+# A large context is not merely slow: BuildKit ships every file it does not
+# ignore to the daemon BEFORE reading the Dockerfile, so an ignored-after-the-fact
+# 20 GB data directory turns a 30-second build into a ten-minute one and, on a
+# remote daemon, into a failed upload.
+# =============================================================================
+
+# --- secrets ---------------------------------------------------------------
+# Real values for dev and prod live beside the compose files. Only the template
+# is allowed through, because the frontend build reads REACT_APP_* from it and a
+# missing manifest makes the bundle fall back to a hardcoded URL.
+# Mirror of R:\GPTHub\.dockerignore:3-5.
+**/.env
+**/.env.*
+!**/.env.example
+
+# --- VCS and per-service dependency trees ----------------------------------
+# .git is the single biggest thing that can leak into a context: submodules keep
+# their own HEADs and object stores under .git/modules.
+.git
+**/.git
+**/.venv
+**/venv
+**/node_modules
+
+# --- live stack state (bind mounts) ---------------------------------------
+# Uploaded videos and .npy embeddings, the MySQL data directory and TLS/JWT
+# material are HOST state. Copying them into the image would ship one
+# deployment's user data inside a distributable artifact.
+# infra/storage and infra/mysql_data are also .gitignore'd (.gitignore:43-44);
+# the duplication is deliberate - .gitignore protects the repository, this file
+# protects the image, and the two lists are maintained for different reasons.
+infra/storage
+infra/mysql_data
+infra/logs
+infra/models
+infra/nginx/certs
+infra/certs
+docker/.run-state
+
+# --- model weights ---------------------------------------------------------
+# Multi-GB, licence-bound, mounted read-only into the ml sidecar at run time.
+# Never part of a build.
+#
+# NOTE: the sidecar builds with "context: ../ml", so it does NOT read this file -
+# it reads ml/.dockerignore. The two files are not duplicates: this one protects
+# the API image (whose context is the superproject root), that one protects the
+# sidecar image (whose context is the ml submodule). A weight directory under
+# backend/ or at the root is still the root file's job, which is why these
+# patterns stay here as well.
+**/src/weights
+**/pretrained_ckpts
+**/weights
+**/*.pt
+**/*.pth
+**/*.onnx
+**/*.bin
+**/*.npy
+**/*.h5
+**/*.ckpt
+
+# --- documentation and tooling that the image never imports ---------------
+# docs/ is prose. scripts/ are guards that run on the host and in CI. Neither is
+# imported at run time, and both change on almost every commit, so keeping them
+# in the context would invalidate the COPY layer for no benefit.
+docs
+scripts
+.github
+**/*.md
+
+# --- build output and test caches -----------------------------------------
+# backend/build/ and frontend/build/ are CRA/packaging output; the images build
+# their own. Caches below are per-machine and only add churn to the cache key.
+**/build
+**/dist
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/coverage
+**/.coverage
+**/htmlcov
+
+# --- editor and OS noise --------------------------------------------------
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+
+# --- snapshot files that WOULD otherwise be useful ------------------------
+# The backend image needs backend/requirements.txt, requirements.lock.txt,
+# backend/env.py, backend/create_sql.py, backend/HireSnap.sql and backend/src.
+# Nothing above excludes those, which is why the ignore list stays narrow instead
+# of using the tempting "backend/** then un-ignore" pattern: un-ignoring inside an
+# ignored subtree cannot resurrect a file whose parent directory was pruned.
+#
+# The ML stack is deliberately absent from this list: it does not belong in the
+# API image any more (scripts/check_ml_boundary.py is the gate that enforces it),
+# and ml/ is built from its own context rather than copied through this one.

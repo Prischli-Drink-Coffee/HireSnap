@@ -1,0 +1,303 @@
+# =============================================================================
+# HireSnap - git hooks for the superproject.
+#
+# Mirror of R:\GPTHub\.pre-commit-config.yaml:1-15. TWO rules from that file
+# shape everything below.
+#
+# 1. backend/ and frontend/ are GITLINKS here, exactly as the modules are in
+#    GPTHub. The superproject does not list any file inside them (git ls-files
+#    backend/ prints nothing), so a hook that selects work with files:/types:
+#    matches NOTHING inside a service and is skipped in silence. GPTHub learned
+#    this the hard way - four hooks (ruff, ruff-format, isort, black) checked
+#    nothing for months (R:\GPTHub\.pre-commit-config.yaml:3-12).
+#    => everything that touches service code is a local hook with
+#    pass_filenames: false that cd's into the service itself.
+#
+# 2. A commit that only bumps submodule pointers contains ZERO files, and
+#    pre-commit then skips the hook entirely ("no files to check"). That bump is
+#    precisely the moment two pointers move together, which is when a cross-repo
+#    contract breaks - hence always_run: true on every cross-repo guard
+#    (R:\GPTHub\.pre-commit-config.yaml:66-69).
+#
+# WHAT THIS FILE DOES NOT DO: it does not install itself. A config without
+# `pre-commit install` is documentation; `make hooks` is the step that matters
+# (R:\GPTHub\.pre-commit-config.yaml:14-15).
+#
+# NOTE ON YAML: every entry: with a colon inside the shell text is written as a
+# folded block scalar (>-). A plain scalar may not contain ": " (YAML reads it
+# as a mapping), and quoting the whole entry breaks the moment the shell text
+# itself needs a quote. >- keeps the command on one physical line after folding.
+#
+# WINDOWS NOTE - why every hook says `bash -lc` and what breaks without it.
+# pre-commit resolves the interpreter from PATH, and on a stock Windows machine
+# C:\WINDOWS\system32\bash.exe is the WSL launcher. With no WSL distribution
+# installed it fails for EVERY hook with:
+#     <3>WSL (PID - Relay) ERROR: CreateProcessCommon:818:
+#     execvpe(/bin/bash) failed: No such file or directory
+# which reads like a config defect but is a PATH defect. Put Git Bash first:
+#     set PATH=C:\Program Files\Git\bin;%PATH%        (cmd)
+#     $env:PATH = "C:\Program Files\Git\bin;" + $env:PATH   (PowerShell)
+# `make lint` is immune because the Makefile pins SHELL to the 8.3 Git Bash path
+# (R:\GPTHub\Makefile:26-40 makes the same choice), which is why it is the
+# documented entry point and this file is the secondary one.
+# =============================================================================
+repos:
+  # --- file hygiene on files the superproject actually tracks ---------------
+  # These run on docker/, infra/, scripts/, .github/ - real files in the index,
+  # so a files:/exclude: pattern is meaningful here.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # --unsafe is NOT used: the compose files contain no custom tags, and a
+      # parser that accepts anything would not validate them at all.
+      - id: check-yaml
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-added-large-files
+        # Test fixtures are NOT excluded, on purpose: that is exactly where a
+        # multi-megabyte dump lands by accident
+        # (R:\GPTHub\.pre-commit-config.yaml:26-27).
+        args: ["--maxkb=512"]
+        exclude: >-
+          (?x)^(
+              \.git/.*|
+              .*/node_modules/.*|
+              .*/package-lock\.json|
+          )$
+      - id: debug-statements
+
+  # --- secret scanning ------------------------------------------------------
+  # Last line of defence BEFORE the commit is written: once a secret is in
+  # history a revert does not remove it, only a rewrite does
+  # (R:\GPTHub\.pre-commit-config.yaml:47-49). The rev is PINNED, not floating:
+  # a new gitleaks release ships new rules, and a floating version turns an
+  # upstream update into a red build
+  # (R:\GPTHub\.github\workflows\ci.yml:430-432). .gitleaks.toml extends the
+  # default ruleset and allowlists documented placeholders only.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # ===========================================================================
+  # local hooks - the superproject guards
+  # ===========================================================================
+  # One hook per check_*.py so the output names the contract that broke, instead
+  # of one "guards" hook reporting "script 4 of 6 failed". All of them are
+  # stdlib Python: no virtualenv, no extra install.
+  #
+  # WHY EVERY hook calls scripts/run_guard.sh instead of naming an interpreter
+  # itself: "command -v python3" succeeding does NOT mean python3 works. On
+  # Windows PATH carries C:\Users\<user>\AppData\Local\Microsoft\WindowsApps,
+  # where python3.exe and python.exe are Microsoft Store STUBS that exit 49
+  # without executing anything - every guard below reported "Failed" on a host
+  # where the same scripts pass when run directly. run_guard.sh RUNS each
+  # candidate ("python3", then python3.13..python3.9, then python, then py -3)
+  # with "import sys" and uses the first that actually starts, which is the same
+  # rule as Makefile:66-78. The probe lives in one file so it cannot drift.
+  # A REAL guard failure (exit 1) is returned as-is and never retried on another
+  # interpreter, and a host with no interpreter at all prints a loud SKIP.
+  - repo: local
+    hooks:
+      - id: check-compose-parity
+        name: guard - compose dev/prod parity
+        entry: >-
+          bash scripts/run_guard.sh scripts/check_compose_parity.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: check-env-parity
+        name: guard - env manifest parity
+        entry: >-
+          bash scripts/run_guard.sh scripts/check_env_parity.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: check-dockerfile-pins
+        name: guard - Dockerfile base images pinned
+        entry: >-
+          bash scripts/run_guard.sh scripts/check_dockerfile_pins.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: check-no-generated-state
+        name: guard - generated state stays out of git
+        entry: >-
+          bash scripts/run_guard.sh scripts/check_no_generated_state.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: check-api-prefix-contract
+        name: guard - gateway /api prefix contract
+        entry: >-
+          bash scripts/run_guard.sh scripts/check_api_prefix_contract.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: check-health-contract
+        name: guard - every composable service is probed
+        entry: >-
+          bash scripts/run_guard.sh scripts/check_health_contract.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # WHY the ML boundary is a commit gate and not just a CI job: the violation
+      # is a single line ("import torch") added to a route handler, it passes every
+      # other check in this repository, and the damage (an API that needs a CUDA
+      # context) shows up only at deployment size. Catching it in CI would be
+      # enough for main; catching it in the commit is what keeps the line out of
+      # the branch in the first place.
+      - id: check-ml-boundary
+        name: guard - ML code stays in the ml submodule
+        entry: >-
+          bash scripts/run_guard.sh scripts/check_ml_boundary.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # --- compose and env validation ---------------------------------------
+      # WHY these are here AND in CI: `docker compose config -q` is the only
+      # thing that proves a compose file is not merely valid YAML but RESOLVABLE
+      # (interpolation, profiles, merged keys). CI runs the same command.
+      #
+      # docker/.env.dev and .env.prod are gitignored, so on a fresh clone they do
+      # not exist; the hook then says SKIP and exits 0, because a missing local
+      # prerequisite is not a broken commit. The message names the fix, so the
+      # skip is never mistaken for a pass.
+      - id: compose-config-parity
+        name: compose - config -q for dev and prod
+        entry: >-
+          bash -lc 'command -v docker >/dev/null 2>&1 || { echo "SKIP compose config: docker is not on PATH"; exit 0; };
+          ok=1;
+          if [ -f docker/.env.dev ]; then
+          docker compose --env-file docker/.env.dev -f docker/docker-compose.dev.yaml --profile dev --profile cache --profile storage --profile celery --profile mail config -q || ok=0;
+          else echo "SKIP docker-compose.dev.yaml - docker/.env.dev is absent (run: make env MODE=dev)"; fi;
+          if [ -f docker/.env.prod ]; then
+          docker compose --env-file docker/.env.prod -f docker/docker-compose.yaml --profile prod --profile cache --profile storage --profile celery --profile mail config -q || ok=0;
+          else echo "SKIP docker-compose.yaml - docker/.env.prod is absent (run: make env MODE=prod)"; fi;
+          exit $((1 - ok))'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # docker/sync_env.py owns the template-vs-deployment comparison
+      # (docker/sync_env.py:120-239: --check returns 1 on drift). Calling it here
+      # keeps ONE implementation; check_env_parity.py covers the same ground from
+      # the guard side and adds the interpolation and secret checks.
+      - id: env-sync-check
+        name: env - template and deployment files agree
+        entry: >-
+          bash scripts/run_guard.sh docker/sync_env.py --check
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # --- backend ----------------------------------------------------------
+      # WHY every backend hook SKIPs when the tool is absent instead of failing:
+      # backend/requirements.txt pins neither ruff nor mypy (they are installed
+      # into the service venv first), and backend/tests/ does not exist yet
+      # (docs/KNOWN_GAPS.md). A hook that fails because the TOOL is missing blocks
+      # every commit for a reason unrelated to the change - the failure mode
+      # R:\GPTHub\.pre-commit-config.yaml:198-203 names for frontend. The skip is
+      # loud and prints the install command, so it cannot be read as a pass.
+      #
+      # WHY `cd backend` rather than passing paths: ruff and mypy take their
+      # configuration from the closest pyproject.toml/ruff.toml, which lives in
+      # the service (R:\GPTHub\.pre-commit-config.yaml:113-117).
+      # WHY the FATAL SELECTION and not `ruff check .`: the full default rule set
+      # reports 208 findings on this tree (181 auto-fixable) that predate the
+      # harness - unused imports, bare f-strings, legacy formatting. A gate that is
+      # red for every commit since the first one teaches `--no-verify`, which is
+      # strictly worse than no gate at all (R:\GPTHub\.github\workflows\ci.yml:41-51
+      # records exactly this history: ruff stayed advisory until the debt was
+      # cleared in one commit).
+      # E9 / F63 / F7 / F82 are NOT style: they are syntax errors, broken
+      # comparisons, break/continue outside a loop, and - the one that bites here -
+      # UNDEFINED NAMES, i.e. a NameError waiting for the first request that takes
+      # that branch. `src` and not `.` keeps the vendored cosmos_tokenizer tree
+      # out, and the CI step runs the SAME command with the SAME flag so the two
+      # gates can never disagree.
+      # WHY --exclude "*.ipynb": ruff parses notebook cells, so the exploratory
+      # notebooks under src/stuff/ report undefined names in cells nobody imports
+      # (KNN.ipynb, generate_data_embeddings.ipynb). Those findings cannot reach a
+      # request - the image never executes a notebook - and mixing them into this
+      # gate would train the reader to skim its output past the eleven real
+      # undefined names in importable modules. The exclusion hides no servable
+      # code: the same run still fails on every .py finding.
+      # `ruff format --check` is deliberately NOT here: it would reformat 90 of 106
+      # files, which is a separate decision with its own commit.
+      - id: backend-ruff
+        name: backend - ruff (fatal rules)
+        entry: >-
+          bash -lc 'cd backend || exit 2;
+          command -v ruff >/dev/null 2>&1 || { echo "SKIP backend ruff: ruff is not on PATH (install: python -m pip install ruff)"; exit 0; };
+          ruff check --select E9,F63,F7,F82 --exclude "*.ipynb" src'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # WHY this scope and these flags. `mypy .` reports 274 errors across 45
+      # files on this tree - almost all of it legacy modules typed loosely around
+      # raw PyMySQL rows. Blocking every commit on that backlog is the same
+      # day-one-red anti-pattern as above.
+      # The scope below is the code this deployment actually added (sidecar
+      # fallbacks, the Celery app, the jobs service): it is small enough to be
+      # clean, so a finding there is actionable and a green run means something.
+      # --follow-imports=silent stops mypy from re-checking the legacy tree that
+      # these modules import; --disable-error-code=import-untyped stops "library
+      # stubs not installed for torch/pandas/celery" from failing a check that has
+      # nothing to do with typing. Widen the scope as the backlog shrinks.
+      - id: backend-mypy
+        name: backend - mypy (deployment modules)
+        entry: >-
+          bash -lc 'cd backend || exit 2;
+          command -v mypy >/dev/null 2>&1 || { echo "SKIP backend mypy: mypy is not on PATH (install: python -m pip install mypy)"; exit 0; };
+          mypy --follow-imports=silent --disable-error-code=import-untyped src/infra src/workers src/services/jobs_services.py'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # WHY the tests/ guard first: without it `pytest -q tests` exits 4
+      # ("file or directory not found") and the hook fails on the ABSENCE of a
+      # directory that this repository has not created yet, not on a defect.
+      - id: backend-pytest-critical
+        name: backend - pytest
+        entry: >-
+          bash -lc 'cd backend || exit 2;
+          [ -d tests ] || { echo "SKIP backend pytest: backend/tests/ does not exist yet (docs/KNOWN_GAPS.md)"; exit 0; };
+          command -v pytest >/dev/null 2>&1 || { echo "SKIP backend pytest: pytest is not on PATH"; exit 0; };
+          pytest -q tests'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # --- frontend ---------------------------------------------------------
+      # frontend/package.json ships only start/build/test/eject - there is NO lint
+      # script and no eslint in devDependencies, because react-scripts bundles its
+      # own ESLint. `npx --no-install eslint` is therefore the only form that works
+      # without editing a file this repository does not own (frontend is a
+      # gitlink). --no-install also refuses to download a package into the tree.
+      #
+      # WHY the missing node_modules branch exits 0: without it the hook fails on
+      # "Cannot find module eslint-plugin-react" - i.e. on the ABSENCE of
+      # dependencies - and then every backend-only commit is blocked for an
+      # unrelated reason (R:\GPTHub\.pre-commit-config.yaml:198-203).
+      - id: frontend-eslint
+        name: frontend - ESLint
+        entry: >-
+          bash -lc 'cd frontend || exit 2;
+          [ -d node_modules/eslint ] || { echo "SKIP frontend eslint: no frontend/node_modules (run: cd frontend and npm ci)"; exit 0; };
+          npx --no-install eslint "src/**/*.{js,jsx}"'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+# Nothing above uses `|| true`: a lint that cannot fail holds nothing
+# (R:\GPTHub\Makefile:337-340).

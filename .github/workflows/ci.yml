@@ -1,0 +1,455 @@
+name: CI
+
+# European CI for the HireSnap superproject.
+#
+# Mirror of R:\GPTHub\.github\workflows\ci.yml:1-19. The shape of that file is
+# kept on purpose:
+#   * checkout uses `submodules: recursive` with the stock GITHUB_TOKEN - backend
+#     and frontend are branches of the same remote, so no PAT is needed
+#     (R:\GPTHub\.github\workflows\ci.yml:3-8,28-32);
+#   * one job per concern, and each job is BLOCKING. A step that cannot fail is
+#     not a check (R:\GPTHub\.github\workflows\ci.yml:76-78);
+#   * the guards that pre-commit runs are the SAME scripts CI runs, so there is
+#     no second implementation to drift (R:\GPTHub\.github\workflows\ci.yml:502-505).
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  # Manual run: useful when a runner image changes (docker, node) and someone
+  # needs to re-check the stack without pushing a commit.
+  workflow_dispatch:
+
+# A newer push to the same ref makes the running build irrelevant; cancelling it
+# frees a runner instead of queueing behind work nobody will read
+# (R:\GPTHub\.github\workflows\ci.yml:16-18).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The three env files are resolved ONCE here. docker/.env.dev and .env.prod are
+  # gitignored, so CI fabricates them from the only committed manifest, exactly as
+  # R:\GPTHub\.github\workflows\ci.yml:512-513 does.
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+
+jobs:
+  # ===========================================================================
+  # 1. The superproject guards. These are the same scripts pre-commit calls, and
+  #    they are the only checks that understand the CROSS-REPO contracts (gateway
+  #    prefix, env manifest, health probes, pinned images, generated state).
+  # ===========================================================================
+  guards:
+    name: Guards (scripts/check_*.py)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # WHY the env files are created before the guards: check_env_parity.py
+      # compares the template against both deployment files, and a missing
+      # deployment file is a SKIP, not a pass. On a runner the files never exist,
+      # so without this step the strongest half of that guard would never run in
+      # CI - the same reason GPTHub copies .env.example twice before validating
+      # compose (R:\GPTHub\.github\workflows\ci.yml:512-513).
+      - name: Fabricate the gitignored env files from the template
+        run: |
+          cp docker/.env.example docker/.env.dev
+          cp docker/.env.example docker/.env.prod
+
+      # `python -m py_compile` first, because a guard with a syntax error would
+      # otherwise fail as "a guard failed" and hide which one is broken.
+      - name: Guards compile
+        run: python -m py_compile scripts/check_*.py
+
+      # NOTE: NOT wrapped in `|| true` and NOT `continue-on-error`. Any guard that
+      # exits non-zero fails the job. A guard that legitimately cannot run prints
+      # [SKIP] with its reason and exits 0 - the distinction is in the output, not
+      # in the exit code, so a skipped guard is visible in the log.
+      # The loop picks up every scripts/check_*.py, so a NEW guard is in CI the
+      # moment it is committed - including scripts/check_ml_boundary.py, the gate
+      # that keeps torch and friends out of the API image. That is deliberate: a
+      # per-file list here would let a guard exist and never run, which is the
+      # "a check that cannot fail" failure mode with extra steps.
+      - name: Run every guard
+        run: |
+          set -e
+          for script in scripts/check_*.py; do
+            echo "=== $script"
+            python "$script"
+          done
+
+      # `config -q` is the only thing that proves a compose file is RESOLVABLE -
+      # interpolation, profiles and merged keys - rather than merely valid YAML
+      # (R:\GPTHub\.github\workflows\ci.yml:510-517). -q keeps the rendered
+      # document, which contains every secret, out of the log.
+      # NOTE: there is no --profile ml any more. The sidecar became a CORE
+      # service (profiles prod/dev) when it moved into its own submodule, because
+      # "the API cannot answer an upload without it" is the definition of core -
+      # leaving it behind a profile meant the default stack came up with no
+      # embedding path at all. scripts/check_compose_parity.py asserts this
+      # (section 7), so a regression is caught here as well.
+      - name: Validate both compose files
+        run: |
+          docker compose --env-file docker/.env.dev -f docker/docker-compose.dev.yaml \
+            --profile dev --profile cache --profile storage \
+            --profile celery --profile mail config -q
+          docker compose --env-file docker/.env.prod -f docker/docker-compose.yaml \
+            --profile prod --profile cache --profile storage \
+            --profile celery --profile mail config -q
+
+      # A submodule pointer that no longer resolves (force-pushed branch, missing
+      # fetch) makes every later job fail with a confusing error; this step names
+      # the cause (R:\GPTHub\.github\workflows\ci.yml:471-472).
+      - name: Submodules resolved
+        run: git submodule status
+
+  # ===========================================================================
+  # 2. Secret scanning over the WHOLE history, including submodules.
+  # ===========================================================================
+  secrets:
+    name: Gitleaks (secrets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Full history: the point is to find a secret that was added and then
+          # "removed" by the next commit. A shallow clone cannot see it
+          # (R:\GPTHub\.github\workflows\ci.yml:420-423).
+          fetch-depth: 0
+
+      # WHY the binary and not gitleaks/gitleaks-action@v2: the action requires a
+      # paid GITLEAKS_LICENSE when used on an organisation repository and fails
+      # with "missing gitleaks license" WITHOUT scanning anything - a red step
+      # that protects nothing. The binary is MIT and needs no licence. The version
+      # is PINNED because new releases ship new rules, and a floating version
+      # would turn an upstream update into a red build
+      # (R:\GPTHub\.github\workflows\ci.yml:424-438).
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      # `detect` scans history; `--redact` keeps the value out of the log while
+      # still naming rule, file, line and commit - enough to fix or to justify one
+      # precise exception in .gitleaks.toml.
+      - name: Scan history for secrets
+        run: |
+          gitleaks detect --source . --config .gitleaks.toml --redact --no-banner \
+            --report-format json --report-path /tmp/gitleaks-report.json --exit-code 1
+
+      - name: Report findings without printing the secret
+        if: failure()
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          path = pathlib.Path('/tmp/gitleaks-report.json')
+          if not path.is_file():
+              raise SystemExit('no report written')
+          for item in json.loads(path.read_text() or '[]'):
+              print('gitleaks finding: rule={RuleID} file={File} line={StartLine} commit={Commit}'.format(**item))
+          PY
+
+  # ===========================================================================
+  # 3. File hygiene and the local hooks - the same command a developer runs.
+  # ===========================================================================
+  lint:
+    name: Pre-commit (all files)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # ruff/mypy are installed here so the backend local hooks actually RUN in CI
+      # instead of printing their SKIP line. Locally they may be absent; in CI they
+      # must not be, otherwise the hook that is supposed to catch broken code is a
+      # no-op where it matters most (R:\GPTHub\.github\workflows\ci.yml:41-51).
+      - name: Install the tools the local hooks use
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pre-commit==4.3.0" "ruff==0.14.1" "mypy==1.13.0" "pytest==8.2.2"
+
+      # npm ci for BOTH services, because the frontend hook skips without
+      # node_modules and a skip in CI is a hole. `--prefix` keeps the working
+      # directory unchanged for every other hook.
+      - name: Install frontend dependencies
+        run: |
+          if [ -f frontend/package-lock.json ]; then
+            npm ci --prefix frontend
+          else
+            echo "frontend/package-lock.json is absent; the eslint hook will report SKIP"
+          fi
+
+      # `env:` files are gitignored, so the compose-config hook would skip. Create
+      # them, exactly as the guards job does, so the hook performs its real check.
+      - name: Fabricate the gitignored env files
+        run: |
+          cp docker/.env.example docker/.env.dev
+          cp docker/.env.example docker/.env.prod
+
+      - name: Pre-commit
+        run: pre-commit run --all-files --show-diff-on-failure --color=always
+
+  # ===========================================================================
+  # 4. Backend - the service's own toolchain, in the interpreter the image uses.
+  # ===========================================================================
+  backend:
+    name: Backend (syntax + fatal lint + pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # 3.9 is the runtime the Dockerfile targets, not "whatever is newest":
+      # testing on a version that never runs in production hides exactly the
+      # incompatibilities (walrus-in-3.7, tomllib-in-3.10) that matter
+      # (R:\GPTHub\.github\workflows\ci.yml:217-222 makes this argument for the
+      # sidecars' pinned runtimes).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      # No `pip install -r requirements.txt` here. That file pulls torch and the
+      # ML stack - multi-gigabyte, and unavailable for the CUDA build on a
+      # runner. The checks below are chosen so that they are still real without
+      # those dependencies: syntax and the pyflakes fatal set need no imports.
+      - name: Compile every module
+        run: python -m compileall -q src
+
+      - name: Install ruff
+        run: python -m pip install "ruff==0.14.1"
+
+      # WHY ONLY THE FATAL SUBSET. The full rule set would fail on style debt that
+      # predates this harness, and a gate that is red on day one is a gate everyone
+      # learns to ignore - the failure R:\GPTHub\.github\workflows\ci.yml:41-51
+      # describes (ruff was advisory until the debt was cleared in one commit).
+      # These four rules are not style: E9 is a syntax/runtime error, F63/F7/F82
+      # are comparisons, break/continue and undefined names - i.e. code that is
+      # broken. Widening this selection is a follow-up, not a wish.
+      #
+      # --exclude "*.ipynb" keeps the exploratory notebooks out: a NameError in a
+      # cell no image ever executes is not a defect of the service, and the flag is
+      # IDENTICAL to the one in .pre-commit-config.yaml so the two gates report the
+      # same number instead of drifting by seven.
+      - name: Ruff (fatal rules only)
+        run: ruff check --select E9,F63,F7,F82 --exclude "*.ipynb" src
+
+      # `--ignore` keeps the ML test suite (if any appears later) out of the way:
+      # it needs weights and a GPU, and a test that requires those does not belong
+      # in a push-gate (docs/KNOWN_GAPS.md). `-q` keeps the log readable.
+      - name: Pytest
+        run: |
+          if [ ! -d tests ]; then
+            echo "SKIP: backend/tests/ does not exist yet (docs/KNOWN_GAPS.md)"
+            exit 0
+          fi
+          python -m pip install "pytest==8.2.2"
+          python -m pytest -q tests
+
+  # ===========================================================================
+  # 4b. ML sidecar - the contract tests that must pass with no torch and no GPU.
+  #
+  # WHY this job can exist at all: R:\GPTHub runs its sidecars' test suites in CI
+  # because each sidecar owns a small, dependency-light contract surface. The same
+  # is true here only because ml/service/app.py defers every heavy import (torch,
+  # torchvision, transformers, moviepy, ...) to the call that needs it, so the HTTP
+  # layer is importable in a bare interpreter. If that ever stops being true, this
+  # job fails and the regression is visible - which is exactly the property we want
+  # to protect, not a reason to drop the job.
+  #
+  # WHY the pinned dependencies and not a requirements file: the ML stack is
+  # multi-gigabyte and the CUDA wheels are unavailable on a runner. The contract
+  # tests need the web layer and nothing else. test_contract.py asserts that torch
+  # is NOT in sys.modules, so installing torch here would defeat the test.
+  # ===========================================================================
+  ml:
+    name: ML sidecar (contract tests, no GPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # 3.9 is what ml/docker/Dockerfile installs; the sidecar must be testable on
+      # the same minor version the image runs.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      # WHAT IS INSTALLED AND WHY IT IS EXACTLY THIS LIST. Four names, and each
+      # one is here because a test fails without it - measured in a clean venv,
+      # not assumed:
+      #
+      #   pytest            runs the suite.
+      #   fastapi           the app under test. 0.111.0 is the version the
+      #                     backend locks (backend/requirements.txt:45), so the
+      #                     two services cannot drift into different Starlette
+      #                     behaviour behind one HTTP contract.
+      #   python-multipart  makes FastAPI 0.111 accept a Form(...) declaration at
+      #                     all, and backs the multipart branch of
+      #                     /v1/embed/video. Without it the app does not import.
+      #   numpy             NOT optional, and easy to miss: ml/service/engine.py
+      #                     imports text_embedding at MODULE scope, and that
+      #                     module does `import numpy as np` at module scope
+      #                     (ml/service/text_embedding.py:32). Omitting it fails
+      #                     collection with ModuleNotFoundError: numpy before a
+      #                     single test runs. The pin matches the image
+      #                     (ml/docker/requirements.txt:30) so the array library
+      #                     is the same one that will serve production.
+      #
+      # WHAT IS LEFT TO THE RESOLVER: pydantic, starlette, anyio and httpx.
+      # They are dependencies OF fastapi (fastapi 0.111 declares httpx, and
+      # starlette's TestClient speaks over it), so pinning them here by hand
+      # would freeze a combination that pip never resolved together - the exact
+      # trap backend/docker/requirements.lock.txt warns about. If fastapi's own
+      # requirement is ever wrong, that is a fastapi bug and the pin above moves.
+      #
+      # WHAT IS DELIBERATELY ABSENT: torch, torchvision, torchaudio, transformers,
+      # moviepy. Installing them would take tens of minutes, need CUDA wheels a
+      # runner cannot use, and DEFEAT the suite: test_contract.py asserts torch is
+      # not in sys.modules after importing the app. Their absence is the
+      # precondition of the test, not a gap in it.
+      - name: Install test dependencies
+        run: >
+          python -m pip install
+          "pytest==8.2.2"
+          "fastapi==0.111.0"
+          "python-multipart==0.0.9"
+          "numpy==1.26.4"
+
+      # WHICH INVOCATION AND WHY. The sidecar owns its own import root, so CI
+      # reads it from the submodule instead of hard-coding a directory:
+      #
+      #   (a) ml/pyproject.toml declares [tool.pytest.ini_options] pythonpath.
+      #       Then the plain `python -m pytest ml/tests` below is enough: pytest
+      #       infers rootdir from the path argument (ml/tests -> ml), reads that
+      #       ini block, and the SAME declaration governs the developer's shell,
+      #       `make ml-test` and this job. This is the preferred shape.
+      #   (b) it does not (yet). Then this step exports PYTHONPATH for the module
+      #       directory it can see - ml/service when the flat modules moved there,
+      #       otherwise ml/ itself - and says which one it used.
+      #
+      # WHY not just hard-code PYTHONPATH=ml/service: the day the directory is
+      # renamed, a hard-coded workflow keeps pointing at the old path, pytest
+      # imports nothing, and the suite passes because it collected no tests. The
+      # exported fallback is printed into the log for the same reason.
+      #
+      # WHY no tomllib: this job runs on 3.9, where it does not exist (3.11+). A
+      # TOML parser dependency for one key would defeat the point of a job whose
+      # value is that it installs almost nothing; the failure being guarded
+      # against is an ABSENT key, which a regex catches.
+      - name: Resolve the sidecar import root
+        run: |
+          python - <<'PY'
+          import os, pathlib, re
+          config = pathlib.Path('ml/pyproject.toml')
+          declared = False
+          if config.is_file():
+              text = config.read_text(encoding='utf-8')
+              match = re.search(r'^\[tool\.pytest\.ini_options\]\s*$((?:\n(?!\[|$).*)*)', text, re.M)
+              declared = bool(match and re.search(r'^\s*pythonpath\s*=', match.group(1), re.M))
+          if declared:
+              print('sidecar import root: declared by ml/pyproject.toml pythonpath')
+          else:
+              for candidate in ('ml/service', 'ml'):
+                  if any(pathlib.Path(candidate).glob('*.py')):
+                      print('sidecar import root: no pyproject pythonpath, using ' + candidate)
+                      with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as handle:
+                          handle.write('PYTHONPATH=' + candidate + '\n')
+                      break
+              else:
+                  raise SystemExit('no ml/*.py and no ml/service/*.py: the sidecar'
+                                   ' checkout is missing or empty, so the contract'
+                                   ' tests would collect nothing and pass')
+          PY
+
+      # The tests run from the repository ROOT, not from ml/: engine.py reaches
+      # shared code through the sibling backend/ checkout (present because
+      # checkout uses submodules: recursive), and the gateway/health contract the
+      # suite asserts is the one compose wires up from the root.
+      - name: Contract tests
+        run: python -m pytest ml/tests -q
+
+  # ===========================================================================
+  # 5. Frontend - the static bundle the nginx image serves.
+  # ===========================================================================
+  frontend:
+    name: Frontend (build + tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `npm ci`, never `npm install`: ci installs exactly the lock file and fails
+      # if package.json and the lock disagree, which is the check we want
+      # (R:\GPTHub\.github\workflows\ci.yml:177-178).
+      - name: Install dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: npx --no-install eslint "src/**/*.{js,jsx}"
+
+      # `--watchAll=false` because watch mode never exits on a runner. CI=true also
+      # makes react-scripts treat warnings as errors in the build below, which is
+      # the behavior we want a push gate to have.
+      - name: Unit tests
+        env:
+          CI: "true"
+        run: CI=true npm test -- --watchAll=false
+
+      # The build IS the contract with the nginx image: if the bundle does not
+      # compile, the frontend container ships a stale or broken build.
+      - name: Production build
+        env:
+          CI: "true"
+          GENERATE_SOURCEMAP: "false"
+        run: npm run build
+
+  # ===========================================================================
+  # WHAT IS DELIBERATELY NOT HERE, and why.
+  #
+  # No image builds. GPTHub added them because `compose config -q` validates YAML,
+  # not that a build context resolves, and a broken context shipped
+  # (R:\GPTHub\.github\workflows\ci.yml:518-525). The same class of defect is
+  # covered here by scripts/check_dockerfile_pins.py (base images pinned, no remote
+  # ADD) plus the fact that both Dockerfiles copy from contexts this repository
+  # controls. A full build would pull torch and a CUDA base - tens of minutes per
+  # push for a check that `make build` performs locally before a deploy.
+  # ===========================================================================

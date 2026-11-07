@@ -1,0 +1,69 @@
+# =============================================================================
+# HireSnap - line-ending and binary normalisation.
+#
+# WHY every file is forced to LF: this stack runs Linux containers from a
+# repository routinely checked out on Windows (the reference checkout is at
+# R:\HireSnap). git's default core.autocrlf=true rewrites text files to CRLF on
+# checkout, and a CRLF shebang is not a subtle bug - the kernel reads the
+# interpreter as "/bin/bash\r" and the container dies with
+# "bash\r: No such file or directory" before the first line of the script runs.
+# The failures are invisible in a diff and only appear inside a container.
+# Mirror of R:\GPTHub\.gitattributes:1-6.
+# =============================================================================
+
+* text=auto eol=lf
+
+# --- scripts and Dockerfiles: strictly LF, always -------------------------
+# These are the files that EXECUTE inside a container. text=auto alone is not
+# enough: it lets a file be classified binary (making the rule a no-op) and it
+# honours the user's autocrlf for anything it cannot classify.
+# Mirror of R:\GPTHub\.gitattributes:8-12.
+*.sh            text eol=lf
+*.bash          text eol=lf
+*.template      text eol=lf
+Dockerfile      text eol=lf
+*.dockerfile    text eol=lf
+*.conf          text eol=lf
+*.yaml          text eol=lf
+*.yml           text eol=lf
+Makefile        text eol=lf
+*.py            text eol=lf
+
+# --- binaries: never touch ------------------------------------------------
+# A CRLF rewrite of a PNG does not corrupt it (git only normalises text), but
+# declaring binary stops git from ever attempting a text diff, merge or eol
+# conversion on content where that would silently change the bytes:
+# certificate/key material in particular must round-trip byte for byte or every
+# signature ever issued against it fails to verify.
+# Mirror of R:\GPTHub\.gitattributes:14-24.
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.webp   binary
+*.ico    binary
+*.pdf    binary
+*.woff   binary
+*.woff2  binary
+*.xlsx   binary
+*.pt     binary
+*.pth    binary
+*.onnx   binary
+*.bin    binary
+*.npy    binary
+*.pem    binary
+*.key    binary
+*.crt    binary
+# Note: `git check-attr` still reports "eol: lf" for these, because the
+# catch-all `* text=auto eol=lf` above sets eol on every path. It is inert:
+# git applies eol conversion only when text is set, and `binary` (a built-in
+# macro for -text -diff -merge) unsets it. Verified: these paths report
+# "text: unset / diff: unset / merge: unset". Do not "fix" the apparent
+# contradiction by adding an eol rule here - that would be the rule that
+# rewrites PEM material.
+
+# --- vendored checkpoints -------------------------------------------------
+# backend/cosmos_tokenizer is vendored source (mirror of an upstream package).
+# Marking it vendored keeps "git log"/"git diff" from attributing upstream
+# history to this repository and keeps the diff reviewable.
+backend/cosmos_tokenizer/** linguist-vendored

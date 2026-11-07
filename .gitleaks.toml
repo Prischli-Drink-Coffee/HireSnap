@@ -1,0 +1,96 @@
+# =============================================================================
+# HireSnap - secret scanner configuration (gitleaks).
+#
+# WHY the default rules stay ON: [extend] useDefault = true keeps every upstream
+# rule (AWS keys, GitHub tokens, private key blocks, generic high-entropy
+# assignments). Disabling a rule to silence one finding removes that detection
+# for every future commit, and the finding itself is then invisible. Mirror of
+# R:\GPTHub\.gitleaks.toml:1-6, where the same decision is stated: "правила
+# берём стандартные и НИ ОДНО не отключаем" - here only narrow exemptions exist,
+# each with its reason and its own line.
+#
+# The allowlist below is deliberately restricted to PLACEHOLDER VALUES that the
+# repository documents, not to paths. A path exemption hides every secret ever
+# added under that path; a value exemption hides exactly one string.
+# =============================================================================
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented placeholders only - no path is exempt anywhere in this repository."
+
+# --- placeholder values that upstream rules match structurally -------------
+# Each entry is a value that appears verbatim in documentation as an EXAMPLE of
+# the form a secret takes. The rule fires on the shape, not on the content, so
+# a documentation sample is indistinguishable from a real key to a regex.
+regexes = [
+  # docs/SECRETS.md and docker/.env.example show the shape of the container-side
+  # key path; "changeme"/"your-..." style samples used in runbook commands.
+  '''change-me''',
+  '''changeme''',
+  '''your-token''',
+  '''your-application-password''',
+  '''<your-''',
+  '''placeholder''',
+  # Compose files contain ${VAR:?message} references; the message text often
+  # names a password ("set DB__PASSWORD in docker/.env.prod"). It is a variable
+  # NAME, not a value - the actual secret is never in the file.
+  '''set DB__PASSWORD''',
+  '''set MYSQL_ROOT_PASSWORD''',
+  '''set MYSQL_PASSWORD''',
+  '''set STORAGE__SECRET_KEY''',
+]
+
+# --- paths ----------------------------------------------------------------
+# EMPTY, and it was measured rather than assumed: the scan was re-run with this
+# list emptied and produced the identical nine findings, so neither entry was
+# hiding anything. They were here as a safety net for the placeholder strings
+# above (which this file quotes) and for a future test fixture; neither is
+# needed today because no upstream rule matches a bare placeholder word.
+# A path exemption is the most dangerous line a secret scanner can hold: it
+# silences every secret ever added under that prefix, present AND future, and
+# nothing in the file explains why. If a genuine fixture is added later, pin it
+# by COMMIT (the commits = [] block below) so the exemption covers that one
+# tree, not the directory forever.
+paths = []
+
+# --- historical commits ---------------------------------------------------
+# Empty on purpose. An imported commit that carries a real secret is fixed by
+# rotating the secret and rewriting history, not by adding a hash here: the
+# hash silences the finding for that commit and everything in it, forever.
+commits = []
+
+# =============================================================================
+# SCOPE - what this configuration cannot see, stated so nobody trusts it too far.
+#
+# backend/, frontend/ and ml/ are GITLINKS. `gitleaks detect --source .` walks the
+# SUPERPROJECT's object graph, so a secret committed inside any of the three is
+# invisible here: it lives in that service's own history, which is a different
+# repository with its own root commit. Each service needs the same scan run
+# against it (the same file works, because the rules are identical):
+#     ( cd backend  && gitleaks detect --config ../.gitleaks.toml --redact )
+#     ( cd frontend && gitleaks detect --config ../.gitleaks.toml --redact )
+#     ( cd ml       && gitleaks detect --config ../.gitleaks.toml --redact )
+# ml/ is the newest of the three and the easiest to forget: it is a separate
+# checkout, so a key pasted into ml/service/settings.py would pass every
+# superproject scan. Its own .pre-commit-config.yaml installs the same gitleaks
+# rule set, which is why `make hooks` installs into all three submodules - a hook
+# that was never installed has never run.
+# This is the secret-scanning form of the rule in AGENTS.md: the superproject
+# tracks one commit per service, and no superproject-level check can see inside
+# that commit.
+#
+# MEASURED EDGE CASE, recorded because it is a false pass: on a checkout with
+# ZERO commits `gitleaks detect` prints "no leaks found" and exits 0 - it walks
+# commit history, and there is none. The pre-commit hook is the gate that still
+# works in that state (it scans the staged tree, not history), so do not read a
+# green `detect` on a brand-new repository as a clean bill of health.
+#
+# A scan of the WORKING TREE (`gitleaks dir`) is a different tool and a different
+# answer: it reads every file on disk, including files this repository ignores on
+# purpose (infra/certs/jwt-private.pem, docker/.env.prod). Those are expected to
+# match - that is what "ignored" means - and none of them can reach a commit,
+# which is why no path exemption exists for them. Use `dir` locally, before
+# sharing a tree; use `detect` for the gate.
+# =============================================================================

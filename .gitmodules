@@ -1,0 +1,12 @@
+[submodule "backend"]
+	path = backend
+	url = https://github.com/Prischli-Drink-Coffee/HireSnap.git
+	branch = backend
+[submodule "frontend"]
+	path = frontend
+	url = https://github.com/Prischli-Drink-Coffee/HireSnap.git
+	branch = frontend
+[submodule "ml"]
+	path = ml
+	url = https://github.com/Prischli-Drink-Coffee/HireSnap.git
+	branch = ml

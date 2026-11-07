@@ -1,0 +1,110 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# HireSnap — superproject ignore rules
+#
+# SCOPE WARNING, and the reason this file is short.
+# `backend/` and `frontend/` are git submodules. Git sees a submodule as a single
+# gitlink — ONE commit hash — and never descends into it. No pattern in this file
+# applies to a single path inside a submodule; `git check-ignore` proves it:
+# `backend/venv/x` is NOT ignored by this file. Each service's own `.gitignore`
+# owns its artifacts (backend/.gitignore line 2 `/venv/`, frontend/.gitignore
+# line 4 `/node_modules`).
+#
+# Mirrored from R:\GPTHub\.gitignore:3-8, where 252 lines of dead `frontend/...`
+# and `/backend/...` rules silently matched nothing for the same reason.
+# WHY the rule exists: a rule that cannot fire is worse than no rule — it reads
+# like protection while the file it names is committed on the next `git add .`.
+#
+# The rules below therefore cover exactly two things:
+#   1. paths the SUPERPROJECT itself owns (docker/, infra/, scripts/, docs/), and
+#   2. paths that exist BEFORE submodule adoption, when backend/ and frontend/
+#      are still plain directories and this file is the only ignore layer.
+# Keep it that way: anything service-internal belongs in the service repo.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Secrets. The only block where a mistake is a leak, not a mess. ───────────
+# Real values for dev and prod live beside the compose files and stay untracked.
+# docker/.env.example is the ONLY committed environment manifest; everything
+# else that starts with .env is a local copy holding real credentials.
+# Mirrors R:\GPTHub\.gitignore:20-23.
+.env
+.env.*
+.envrc
+!.env.example
+
+# ── Live stack data (bind mounts and named-volume backups), NOT cache ───────
+# These directories ARE the running stack's state: uploaded videos and .npy
+# embeddings under DATA_PATH, issued JWT/TLS material, model weights, and the
+# application log files. `rm -rf` on any of them destroys local data that exists
+# nowhere else — there is no migrations path to rebuild it (docs/KNOWN_GAPS.md).
+# They are ignored because they must never be committed, not because they are
+# disposable.
+#
+# The MySQL datadir itself is a NAMED VOLUME (docker volume `mysql_data`), not a
+# bind mount, because bind-mounting a MySQL datadir on Windows is a corruption
+# and performance hazard. The /infra/mysql_data/ rule below is therefore a
+# RESERVED GUARD: it only fires if someone switches the database to a bind mount.
+#
+# Anchored per directory so a future top-level `storage/` or `data/` source
+# folder is not swallowed by an over-broad pattern. scripts/check_no_generated_state.py
+# fails the build when any of these has staged content.
+/infra/storage/
+/infra/mysql_data/
+/infra/certs/
+/infra/models/
+/infra/logs/
+/infra/nginx/certs/
+/docker/.run-state/
+
+# Why each of the three extra guards exists:
+#   /infra/certs/   holds jwt-private.pem — committing it lets anyone mint valid
+#                   access tokens against this deployment (docs/SECRETS.md).
+#   /infra/models/  holds multi-GB, licence-bound weights and tokenizer
+#                   checkpoints, mounted read-only; they are fetched, not authored.
+#   /infra/logs/    holds runtime log output, which can quote request data and
+#                   interpolated configuration.
+
+# Runtime data roots. `--data` / DATA_PATH points inside these; the backend
+# writes uploads and embeddings here at request time.
+/data/
+/logs/
+*.log
+# Local server cache written by the pipeline (backend/.gitignore:7 names it too,
+# for the pre-adoption case).
+/urls.txt
+
+# Model weights and the vendored Cosmos tokenizer checkpoints. Multi-GB,
+# licence-bound, and mounted read-only into the `ml` profile — never source.
+src/weights
+pretrained_ckpts
+**/pretrained_ckpts/
+
+# ── Secrets material that must be generated on the host ─────────────────────
+# The backend reads RSA keys from src/certs (backend/src/database/models.py:29-30).
+# They are generated locally (docs/SECRETS.md); committing them would let anyone
+# mint valid access tokens against this deployment.
+src/certs
+**/src/certs/
+
+# ── Build output and dependencies, root level only ──────────────────────────
+node_modules/
+build/
+dist/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ── Tool state and OS noise ─────────────────────────────────────────────────
+# `.tmp-*.txt` are scratch dumps written by tooling in the repository root. They
+# contain conversation or log text, are never inputs to a build, and are large
+# enough to be committed by accident on a `git add .`.
+.tmp-*
+tmp-*
+*.tmp
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
