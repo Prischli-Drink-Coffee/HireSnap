@@ -42,7 +42,7 @@ name: hiresnap-prod
 #     every service sees every key - including the MySQL root password (an
 #     accepted tradeoff, see the API block below).
 #   * environment: below performs the TREE -> FLAT translation the application
-#     actually reads (src/database/my_connector.py:13-17, src/infra/*.py), in
+#     actually reads (service/infrastructure/database/connection.py:13-17, service/infrastructure/*.py), in
 #     exactly one place, and supplies the defaults for keys that are deliberately
 #     left EMPTY in the manifest.
 #
@@ -71,7 +71,7 @@ x-backend-env: &backend-env
   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL in docker/.env.prod}
   DATA_PATH: ${DATA_PATH:-/app/data}
 
-  # --- cache facade (src/infra/cache.py) ----------------------------------
+  # --- cache facade (service/infrastructure/cache.py) ----------------------------------
   # Empty in the manifest => follow the CACHE flag: redis when the redis
   # container is starting, in-memory LRU when it is not. A cache that points at
   # a container nobody started degrades to "every call is a miss" (logged), so
@@ -82,10 +82,10 @@ x-backend-env: &backend-env
   CACHE__PREFIX: ${CACHE__PREFIX:-hiresnap}
   CACHE__TTL: ${CACHE__TTL:-300}
 
-  # --- storage facade (src/infra/storage.py) ------------------------------
+  # --- storage facade (service/infrastructure/storage.py) ------------------------------
   # 'local' by default and NOT derived from the STORAGE flag, deliberately: the
   # application's upload path still writes through
-  # src/utils/write_file_into_server.py into DATA_PATH, while the worker side
+  # service/infrastructure/uploads.py into DATA_PATH, while the worker side
   # reads through this facade. Flipping it to s3 while the upload path stays
   # local would write uploads to a bind mount and then look for them in MinIO -
   # a split brain that fails one task at a time, days later. The MinIO container
@@ -93,12 +93,12 @@ x-backend-env: &backend-env
   # key is a one-line change, documented in docs/KNOWN_GAPS.md.
   STORAGE__BACKEND: ${STORAGE__BACKEND:-local}
 
-  # --- ml sidecar (src/services/ml_client.py) -----------------------------
+  # --- ml sidecar (service/services/ml_client.py) -----------------------------
   # ML_SERVICE_URL is the FLAT name the client reads (the manifest declares
   # ML__SERVICE_URL). The sidecar is a CORE service of this stack - it is not
   # behind a profile - so the default is the service DNS name and NOT empty.
   # The old meaning of an empty value, "run inference in the API process", is
-  # gone: the client is HTTP-only (backend/src/services/ml_client.py:65). A URL
+  # gone: the client is HTTP-only (backend/service/services/ml_client.py). A URL
   # that does not answer is a visible error on the inference routes rather than
   # a silent second copy of the CUDA stack inside the API.
   ML_SERVICE_URL: ${ML__SERVICE_URL:-http://ml:8080}
@@ -108,15 +108,15 @@ x-backend-env: &backend-env
   # client that gives up while the sidecar keeps burning the card.
   ML_SERVICE_TIMEOUT: ${ML__TIMEOUT:-900}
 
-  # --- mail facade (src/infra/mail.py) ------------------------------------
+  # --- mail facade (service/infrastructure/mail.py) ------------------------------------
   MAIL__ENABLED: ${MAIL__ENABLED:-false}
   MAIL__BACKEND: ${MAIL__BACKEND:-file}
   MAIL__HOST: ${MAIL__HOST:-}
   MAIL__PORT: ${MAIL__PORT:-}
   MAIL__FROM: ${MAIL__FROM:-no-reply@hiresnap.local}
 
-  # --- celery (src/workers/celery_app.py) ---------------------------------
-  # CELERY__ENABLED=false keeps src/services/jobs_services.py on INLINE
+  # --- celery (service/infrastructure/messaging/celery_app.py) ---------------------------------
+  # CELERY__ENABLED=false keeps service/services/jobs_services.py on INLINE
   # execution: no worker, no broker, and the API still answers. Turning it on
   # without the workers running would leave jobs 'queued' forever, so the flag
   # and the profile are derived from one another in sidecar_profiles.sh.
@@ -141,10 +141,17 @@ x-backend-volumes: &backend-volumes
   # "docker compose down -v" cannot destroy user data (AGENTS.md, "Where
   # generated state lives").
   - ../infra/storage:/app/data
-  # JWT key pair, read-only. models.py:29-30 hardcodes /app/src/certs.
-  - ../infra/certs:/app/src/certs:ro
-  # src/logging.yaml writes logs/app.log; without this mount the log dies with
-  # the container and there is no way to read a crash after the fact.
+  # JWT key pair, read-only, at a path the image does not own. The backend reads
+  # JWT_PRIVATE_KEY_PATH / JWT_PUBLIC_KEY_PATH (docker/.env.example section 5) and
+  # falls back to a path derived from service/domain/models.py's __file__ only when
+  # they are unset - so mounting into the source tree, as /app/src/certs did, tied
+  # a secret to a directory name the refactor changed. /app/secrets is not part of
+  # any package and no move can invalidate it (service/domain/models.py,
+  # infra/certs/README.md).
+  - ../infra/certs:/app/secrets/certs:ro
+  # service/configuration/logging.yaml writes logs/app.log; without this mount
+  # the log dies with the container and there is no way to read a crash after
+  # the fact.
   - ../infra/logs:/app/logs
 
 services:
@@ -190,7 +197,7 @@ services:
       # probes first (/opt/hiresnap/HireSnap.sql). It is NOT copied into the
       # image: a copy baked into an image goes stale the moment the backend
       # submodule moves (infra/mysql/init/README.md:53-63).
-      - ../backend/HireSnap.sql:/opt/hiresnap/HireSnap.sql:ro
+      - ../backend/database/HireSnap.sql:/opt/hiresnap/HireSnap.sql:ro
     # The image runs /docker-entrypoint-initdb.d ONLY when the data directory is
     # EMPTY, i.e. on the very first start. That makes the loader a documented
     # NO-OP from the second start onwards, and it is why a changed init script is
@@ -221,7 +228,7 @@ services:
       args:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
     # The env file is a settings tree (DB__HOST); the application reads flat
-    # os.environ names (src/database/my_connector.py:13-17). The translation
+    # os.environ names (service/infrastructure/database/connection.py:13-17). The translation
     # happens exactly ONCE, in the x-backend-env anchor above, on purpose: doing
     # it in the env file would duplicate every database setting, and doing it in
     # code would mean editing the application to change a deployment detail.
@@ -255,15 +262,15 @@ services:
         # sidecar into an API that never starts.
         condition: service_started
     volumes: *backend-volumes
-    # There is NO /health route in the application (server.py mounts /server,
-    # /public and /data only) and adding one is not among the allowed source
-    # patches. /server/openapi.json is the closest honest liveness probe: it
-    # answers 200 only when uvicorn is serving AND the app object - including
-    # the StaticFiles mount on DATA_PATH - was constructed successfully. If a
-    # health route is ever added, switch this to it; the gateway does not depend
-    # on the exact path, only on the container reporting healthy.
+    # GET /server/health answers {"status":"ok","service":"backend","version":...}
+    # (service/api/app.py) and is a route of its own rather than /server/openapi.json,
+    # which was the previous probe: building the OpenAPI document on every 30-second
+    # probe is real work for a liveness signal. The shape mirrors the sidecar's
+    # /health (docs/SERVICE_CONTRACTS.md 1.1) so one script can probe both. The
+    # gateway does not depend on the exact path, only on the container reporting
+    # healthy.
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${SERVER_PORT}/server/openapi.json -o /dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${SERVER_PORT}/server/health -o /dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -295,9 +302,13 @@ services:
         # a variable for that reason).
         REACT_APP_BASE_URL: ${REACT_APP_BASE_URL:-/api/}
         # Third-party (dadata.ru) suggestions token, inlined into the bundle like
-        # every REACT_APP_* value, i.e. PUBLIC. It is passed with ":-" and never
-        # with ":?": an operator without a token must still be able to build and
-        # deploy, and the requisites form degrades to "no suggestions".
+        # every REACT_APP_* value, i.e. PUBLIC. Passed with ":-" and never with
+        # ":?": an operator without a token must still be able to build and deploy.
+        # NOTHING READS IT TODAY - measured with `grep -rn process.env src/` the
+        # single hit is REACT_APP_BASE_URL; the supplier form that consumed this
+        # was dead code and was deleted with the frontend restructure. The wiring
+        # is kept so adding the lookup later needs no image change, not because a
+        # feature depends on it.
         REACT_APP_DADATA_TOKEN: ${DADATA_TOKEN:-}
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
     depends_on:
@@ -416,7 +427,7 @@ services:
   # It is a SEPARATE SERVICE with its own image and its own contract, not a
   # second copy of the API. It serves /health, /v1/capabilities,
   # /v1/embed/video, /v1/embed/text and /v1/transcribe (ml/service/app.py) and the API
-  # reaches it through backend/src/services/ml_client.py.
+  # reaches it through backend/service/services/ml_client.py.
   #
   # WHY split out at all: the ML stack is the reason the backend image is
   # gigabytes and the reason a cold start took minutes. Keeping inference in the
@@ -470,7 +481,7 @@ services:
       #
       # DATA_PATH is NOT the backend's /app/data here, deliberately. The
       # sidecar's DATA_PATH is request scratch space that is deleted right after
-      # each call (ml/service/app.py:196-214); the API's is the uploads directory. Same
+      # each call (ml/service/app.py:197-215); the API's is the uploads directory. Same
       # key, two different lifecycles, so they get two different paths and can
       # never be confused when someone 'exec's into the wrong container.
       DATA_PATH: /app/ml-scratch
@@ -510,7 +521,7 @@ services:
       - ${PRETRAINED_CKPT_DIR:-../infra/models/pretrained_ckpts}:/app/models/pretrained_ckpts:ro
       - ../infra/logs:/app/logs
       # Named volume, NOT a bind mount onto infra/storage: requests spool here
-      # before the pipeline runs (ml/service/app.py:196-214), and this is scratch, not
+      # before the pipeline runs (ml/service/app.py:197-215), and this is scratch, not
       # user data. A named volume keeps a 300 MB upload out of the container's
       # writable layer (which is what /tmp inside the container uses) and keeps
       # it out of the directory a human is supposed to be able to browse.
@@ -521,7 +532,7 @@ services:
     # host without the NVIDIA runtime is a container that cannot start at all -
     # the sidecar must come up on CPU, degraded and honest, rather than fail.
     #
-    # /health answers from ml/service/app.py:354-368 without importing torch, so it is a
+    # /health answers from ml/service/app.py:355-369 without importing torch, so it is a
     # true liveness probe: 200 means the HTTP layer is up, and a 503 from
     # /v1/capabilities is what reports "torch or weights are missing".
     healthcheck:
@@ -554,16 +565,17 @@ services:
   # --- Optional: celery workers (profile celery, CELERY=1) -----------------
   # The task topology mirrors R:\GPTHub\docker\docker-compose.yaml:636-733: one
   # worker per queue, and the queue boundary is a FAILURE DOMAIN, not a priority
-  # lane (see src/workers/celery_app.py:15-22). A maintenance task that scans the
-  # storage tree must never sit in front of a user's upload, and an embedding job
+  # lane (see service/infrastructure/messaging/celery_app.py). A maintenance task
+  # that scans the storage tree must never sit in front of a user's upload, and a job
   # that holds a GPU for minutes must not delay either.
   #
-  # Same image as the API, different command: src/workers/tasks.py imports
-  # src.services.jobs_services -> src.services.ml_client -> src.modelling, so the
-  # worker IS the API image (the platform dependencies are installed by
-  # backend/docker/Dockerfile layer 2b). A separate worker image would drift from
-  # requirements.lock.txt and then a task would run against a torch build the API
-  # never tested.
+  # Same image as the API, different command: service/infrastructure/messaging/
+  # tasks.py imports service.services.jobs_services -> service.services/ml_client,
+  # so the worker IS the API image (the platform dependencies are installed by
+  # backend/docker/Dockerfile). A separate worker image would drift from
+  # requirements.lock.txt and then a task would run against a build the API never
+  # tested. The chain deliberately stops at ml_client: it is an HTTP client, and
+  # scripts/check_ml_boundary.py fails the build if an ML library reappears here.
   celery-worker-agents:
     profiles: ["celery"]
     build:
@@ -580,14 +592,14 @@ services:
       # taking its inline path inside a worker and running the task twice.
       CELERY__ENABLED: "true"
     # --queues names ONE queue per worker, matching QUEUES in
-    # src/workers/celery_app.py:38-41. A worker subscribed to every queue would
-    # rebuild the head-of-line blocking this split exists to remove.
+    # service/infrastructure/messaging/celery_app.py. A worker subscribed to every
+    # queue would rebuild the head-of-line blocking this split exists to remove.
     #
     # --concurrency comes from the manifest because it is a host-sized decision
     # (a 2-core box cannot usefully run 4 prefork children), and the value is
     # interpolated at CONFIG time: a ${...} inside "command" is resolved by
     # compose from the env file, never from the container's own environment.
-    command: ["celery", "-A", "src.workers.celery_app", "worker",
+    command: ["celery", "-A", "service.infrastructure.messaging.celery_app", "worker",
               "--queues=agents", "--loglevel=info",
               "--concurrency=${CELERY_AGENTS_CONCURRENCY:-2}"]
     init: true
@@ -607,7 +619,7 @@ services:
     # whose process is alive but whose broker connection died is useless and
     # would pass a pgrep test.
     healthcheck:
-      test: ["CMD-SHELL", "celery -A src.workers.celery_app inspect ping -d celery@$${HOSTNAME} --timeout 10 >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "celery -A service.infrastructure.messaging.celery_app inspect ping -d celery@$${HOSTNAME} --timeout 10 >/dev/null 2>&1 || exit 1"]
       interval: 60s
       timeout: 20s
       retries: 3
@@ -633,7 +645,7 @@ services:
     environment:
       <<: *backend-env
       CELERY__ENABLED: "true"
-    command: ["celery", "-A", "src.workers.celery_app", "worker",
+    command: ["celery", "-A", "service.infrastructure.messaging.celery_app", "worker",
               "--queues=maintenance", "--loglevel=info",
               "--concurrency=${CELERY_MAINTENANCE_CONCURRENCY:-1}"]
     init: true
@@ -649,7 +661,7 @@ services:
         condition: service_started
     volumes: *backend-volumes
     healthcheck:
-      test: ["CMD-SHELL", "celery -A src.workers.celery_app inspect ping -d celery@$${HOSTNAME} --timeout 10 >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "celery -A service.infrastructure.messaging.celery_app inspect ping -d celery@$${HOSTNAME} --timeout 10 >/dev/null 2>&1 || exit 1"]
       interval: 60s
       timeout: 20s
       retries: 3
@@ -664,7 +676,7 @@ services:
   # sidecar: the worker decides WHAT to embed (storage, database, retries) and
   # the sidecar does the arithmetic. This container needs NO GPU and carries
   # no torch: ML_SERVICE_URL is set for it by the wiring block above, and
-  # backend/src/services/ml_client.py has no in-process branch, so an
+  # backend/service/services/ml_client.py has no in-process branch, so an
   # unreachable sidecar is a retryable error rather than a local import.
   celery-worker-ml:
     profiles: ["celery"]
@@ -680,7 +692,7 @@ services:
       CELERY__ENABLED: "true"
     # One child by default: two processes each holding a model copy is how a GPU
     # box runs out of VRAM at the worst moment.
-    command: ["celery", "-A", "src.workers.celery_app", "worker",
+    command: ["celery", "-A", "service.infrastructure.messaging.celery_app", "worker",
               "--queues=ml", "--loglevel=info",
               "--concurrency=${CELERY_ML_CONCURRENCY:-1}"]
     init: true
@@ -696,13 +708,13 @@ services:
         condition: service_started
     volumes: *backend-volumes
     # NO GPU reservation here any more. This worker decides WHAT to embed and
-    # posts the bytes to the sidecar (src/services/ml_client.py); the arithmetic
+    # posts the bytes to the sidecar (service/services/ml_client.py); the arithmetic
     # happens in ml, which is where the card is reserved
     # (docker-compose.gpu.yaml). Keeping a reservation here as well would make
     # this container unstartable on a host without the NVIDIA runtime for no
     # benefit at all.
     healthcheck:
-      test: ["CMD-SHELL", "celery -A src.workers.celery_app inspect ping -d celery@$${HOSTNAME} --timeout 10 >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "celery -A service.infrastructure.messaging.celery_app inspect ping -d celery@$${HOSTNAME} --timeout 10 >/dev/null 2>&1 || exit 1"]
       interval: 60s
       timeout: 20s
       retries: 3
@@ -715,7 +727,7 @@ services:
 
   # Beat decides WHEN, workers decide WHAT. Exactly one instance: two beats
   # duplicate every scheduled task, and the schedule lives in code
-  # (src/workers/beat_schedule.py), so there is no state to partition.
+  # (service/infrastructure/messaging/beat_schedule.py), so there is no state to partition.
   celery-beat:
     profiles: ["celery"]
     build:
@@ -743,7 +755,7 @@ services:
     # --pidfile: beat's liveness is "the scheduler process exists". A file check
     # is honest about exactly that and does not pretend to know whether workers
     # are consuming.
-    command: ["celery", "-A", "src.workers.celery_app", "beat", "--loglevel=info", "--pidfile=/tmp/celerybeat.pid", "--schedule=/tmp/celerybeat-schedule"]
+    command: ["celery", "-A", "service.infrastructure.messaging.celery_app", "beat", "--loglevel=info", "--pidfile=/tmp/celerybeat.pid", "--schedule=/tmp/celerybeat-schedule"]
     healthcheck:
       test: ["CMD-SHELL", "test -s /tmp/celerybeat.pid && kill -0 \"$$(cat /tmp/celerybeat.pid)\" || exit 1"]
       interval: 60s
@@ -757,7 +769,7 @@ services:
 
   # --- Optional: mail catcher (profile mail, MAIL=1) -----------------------
   # An SMTP sink with a web inbox. WHY a container and not "log the mail": the
-  # mail facade (src/infra/mail.py) has three backends, and 'smtp' is the only one
+  # mail facade (service/infrastructure/mail.py) has three backends, and 'smtp' is the only one
   # that exercises the real code path (STARTTLS negotiation, envelope, headers,
   # encoding). Without a server to accept a connection, the first production
   # regression in that path is discovered by a user who never got a password

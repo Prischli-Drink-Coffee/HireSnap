@@ -2,18 +2,19 @@
 
 - **Status:** accepted
 - **Date:** 2026-11-07
-- **Affects:** `infra/nginx/conf.d/`, `frontend/src/API/apiConsts.js` (documented, not
+- **Affects:** `infra/nginx/conf.d/`, `frontend/src/shared/api/apiConsts.js` (documented, not
   required), `docs/KNOWN_GAPS.md`
 
 ## Context
 
 The two applications disagree about where the API lives:
 
-- The frontend sends every request to `/api/...` — hardcoded as
-  `http://localhost:8080/api/` in `frontend/src/API/apiConsts.js:2` and consumed by
-  the shared axios instance (`frontend/src/API/instance.js:4-7`).
-- The backend mounts its API at `/server` — `app.mount("/server", app_server)` at
-  `backend/src/pipeline/server.py:30`.
+- The frontend sends every request to `/api/...` — originally hardcoded as
+  `http://localhost:8080/api/`, today the last fallback in
+  `frontend/src/shared/api/apiConsts.js:46` — and consumed by
+  the shared axios instance (`frontend/src/shared/api/instance.js:6-8`).
+- The backend mounts its API at `/server` — `app.mount("/server", build_server_app())`
+  at `backend/service/api/app.py:128`.
 
 Neither side is wrong in isolation; together they 404 on every call. Something must
 bridge them, and there are three places it could happen:
@@ -70,7 +71,7 @@ substitution has to be an explicit `rewrite`. Same result, one legal spelling.
 
 ## The one allowed frontend patch
 
-`frontend/src/API/apiConsts.js` is patched — by a different owner, not by this ADR's
+`frontend/src/shared/api/apiConsts.js` is patched — by a different owner, not by this ADR's
 scope — to make the base URL configurable while keeping the current value as the
 fallback. That patch does **not** change the `/api/` prefix; it changes where the prefix
 points (same origin in production instead of `localhost:8080`). The gateway rewrite
@@ -93,8 +94,8 @@ remains necessary either way.
 - Anything bypassing the gateway (a direct call to `backend:8080`) must use `/server/`.
   In dev that port is published, and the runbook says so.
 - `/data/` is **not** rewritten: the backend already serves uploads at that prefix
-  (`server.py:32`), so a rewrite there would break them. The gateway block for `/data/`
-  exists only to put API and media on one origin and avoid CORS.
+  (`backend/service/api/app.py:139`), so a rewrite there would break them. The gateway
+  block for `/data/` exists only to put API and media on one origin and avoid CORS.
 - The gateway must be the only ingress in production, or the drift becomes user-visible.
   That is why prod publishes exactly one port.
 - The rewrite applies to the prefix, not to the whole URL: query strings and fragments

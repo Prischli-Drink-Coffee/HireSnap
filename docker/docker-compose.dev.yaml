@@ -9,8 +9,9 @@
 #
 # What differs from prod, and why:
 #   * DEBUG=TRUE and INIT_DB=true come from .env.dev. DEBUG is not a preference:
-#     server.py:1076-1081 raises on anything but TRUE/FALSE and gates uvicorn's
-#     reload on it, and :1091-1094 is the ONLY place the schema is created.
+#     service/main.py raises on anything but TRUE/FALSE and gates uvicorn's
+#     reload on it, and its bootstrap_schema() is the ONLY place the schema is
+#     created.
 #   * backend source is bind-mounted, so an edit restarts the reloader instead of
 #     requiring a 10-minute image rebuild.
 #   * backend:8080 and frontend:3000 are published, because dev tooling (curl,
@@ -42,7 +43,8 @@ x-backend-env: &backend-env
   DB: ${DB__NAME:-hiresnap}
   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8088}
   DATA_PATH: ${DATA_PATH:-/app/data}
-  # Platform layer (src/infra, src/workers, src/services/jobs_services.py).
+  # Platform layer (service/infrastructure, service/infrastructure/messaging,
+  # service/services/jobs_services.py).
   # Each of these is EMPTY or false by default in the manifest on purpose: the
   # flag section (CACHE/STORAGE/MAIL/CELERY=1) is what turns an OPTIONAL sidecar
   # on, and docker/sidecar_profiles.sh exports the wiring when it does. A key
@@ -74,13 +76,32 @@ x-backend-env: &backend-env
 
 x-backend-volumes: &backend-volumes
   # Live source in dev: an edit restarts the reloader instead of costing a
-  # 10-minute image rebuild. The two file mounts below win over the directory
-  # mount for their subpaths because Compose orders mounts by target depth.
-  - ../backend/src:/app/src
-  - ../backend/env.py:/app/env.py:ro
-  - ../backend/create_sql.py:/app/create_sql.py:ro
+  # 10-minute image rebuild. The container's PYTHONPATH/WORKDIR is /app and the
+  # only importable package is service/, so ONE directory mount covers every
+  # module the image contains: the refactor collapsed the whole backend into that
+  # single package, so there is no second top-level tree left to mount beside it
+  # and the schema writer now lives at service/infrastructure/database/schema.py,
+  # inside the tree mounted below.
+  #
+  # WHY the mount is not :ro, unlike the sidecar's: uvicorn's reloader only
+  # watches paths it can stat, and __pycache__ writes must land somewhere. It is
+  # still a bind mount of a git checkout, so a container writing into it is
+  # visible to the developer - which is the point in dev and unacceptable in
+  # prod, where this anchor has no source mount at all.
+  - ../backend/service:/app/service
+  # NOT mounted any more: a bind mount of a path that no longer exists is
+  # created by Docker as an empty root-owned DIRECTORY, so the container starts,
+  # the module it was meant to supply is missing, and the only symptom is an
+  # ImportError much later. ../backend/create_sql.py used to be here for exactly
+  # that reason and was the last live example.
   - ../infra/storage:/app/data
-  - ../infra/certs:/app/src/certs:ro
+  # Read-only JWT pair. The container path is /app/secrets/certs, deliberately
+  # outside /app/service: the backend resolves it through JWT_PRIVATE_KEY_PATH /
+  # JWT_PUBLIC_KEY_PATH (docker/.env.example section 5), and the __file__-relative
+  # fallback exists only for a checkout run without those variables. Mounting into
+  # the package is what made the old /app/src/certs path break on a directory
+  # rename (infra/certs/README.md).
+  - ../infra/certs:/app/secrets/certs:ro
   # Weights, Cosmos tokenizer checkpoints and the HF cache are NOT mounted into
   # the API or the workers any more: they belong to the ml sidecar, which is the
   # only process that loads a model. Same reasoning as the prod file.
@@ -115,7 +136,7 @@ services:
       # contains init/ and execute nothing.
       - ../infra/mysql/init:/docker-entrypoint-initdb.d:ro
       # The dump, at the path infra/mysql/init/00-init.sh probes first.
-      - ../backend/HireSnap.sql:/opt/hiresnap/HireSnap.sql:ro
+      - ../backend/database/HireSnap.sql:/opt/hiresnap/HireSnap.sql:ro
     # Runs ONLY on an empty datadir (first start). On an existing volume the
     # loader is a documented no-op - which is why a developer who edits the
     # schema sees nothing happen. Dev also runs CreateSQL() on boot because
@@ -169,7 +190,7 @@ services:
       # Same probe as prod, but a far shorter start_period: the dev image has
       # the same dependencies, yet a developer waiting two minutes for "healthy"
       # on a cached image is a bug report waiting to happen.
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${SERVER_PORT}/server/openapi.json -o /dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${SERVER_PORT}/server/health -o /dev/null || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 10
@@ -196,8 +217,9 @@ services:
       # build ARG, because the bundle is already compiled (see the prod file).
       REACT_APP_BASE_URL: ${REACT_APP_BASE_URL:-http://localhost:8080/api/}
       # Runtime here, build ARG in prod: CRA recompiles on demand in the dev
-      # server, so process.env is still readable. Empty is a valid value - the
-      # requisites form then offers no suggestions.
+      # server, so process.env is still readable. Empty is a valid value.
+      # NOTHING READS IT TODAY (the supplier form that consumed it was dead code
+      # and was deleted); it stays wired so a future lookup needs no image change.
       REACT_APP_DADATA_TOKEN: ${DADATA_TOKEN:-}
       # Polling watcher: bind mounts on Windows and macOS do not deliver inotify
       # events, so without this the dev server never rebuilds on a file change.
@@ -311,7 +333,7 @@ services:
   # is not a development loop.
   #
   # Note what is NOT mounted any more: the sidecar used to import the pipeline
-  # out of backend/src, so this block carried a second bind mount into another
+  # out of the API tree, so this block carried a second bind mount into another
   # submodule. It now imports its own copy from /app/service, which means a
   # backend edit cannot break a dev sidecar and the mount list describes one
   # submodule instead of two.
@@ -413,7 +435,7 @@ services:
       # at once would race the dump replay and each other.
       CELERY__ENABLED: "true"
       WATCHFILES_FORCE_POLLING: "true"
-    command: ["celery", "-A", "src.workers.celery_app", "worker",
+    command: ["celery", "-A", "service.infrastructure.messaging.celery_app", "worker",
               "--queues=agents", "--loglevel=info",
               "--concurrency=${CELERY_AGENTS_CONCURRENCY:-1}"]
     init: true
@@ -427,7 +449,7 @@ services:
         condition: service_started
     volumes: *backend-volumes
     healthcheck:
-      test: ["CMD-SHELL", "celery -A src.workers.celery_app inspect ping -d celery@$${HOSTNAME} --timeout 10 >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "celery -A service.infrastructure.messaging.celery_app inspect ping -d celery@$${HOSTNAME} --timeout 10 >/dev/null 2>&1 || exit 1"]
       interval: 60s
       timeout: 20s
       retries: 3
@@ -451,7 +473,7 @@ services:
       INIT_DB: "false"
       CELERY__ENABLED: "true"
       WATCHFILES_FORCE_POLLING: "true"
-    command: ["celery", "-A", "src.workers.celery_app", "worker",
+    command: ["celery", "-A", "service.infrastructure.messaging.celery_app", "worker",
               "--queues=maintenance", "--loglevel=info",
               "--concurrency=${CELERY_MAINTENANCE_CONCURRENCY:-1}"]
     init: true
@@ -465,7 +487,7 @@ services:
         condition: service_started
     volumes: *backend-volumes
     healthcheck:
-      test: ["CMD-SHELL", "celery -A src.workers.celery_app inspect ping -d celery@$${HOSTNAME} --timeout 10 >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "celery -A service.infrastructure.messaging.celery_app inspect ping -d celery@$${HOSTNAME} --timeout 10 >/dev/null 2>&1 || exit 1"]
       interval: 60s
       timeout: 20s
       retries: 3
@@ -489,7 +511,7 @@ services:
       INIT_DB: "false"
       CELERY__ENABLED: "true"
       WATCHFILES_FORCE_POLLING: "true"
-    command: ["celery", "-A", "src.workers.celery_app", "worker",
+    command: ["celery", "-A", "service.infrastructure.messaging.celery_app", "worker",
               "--queues=ml", "--loglevel=info",
               "--concurrency=${CELERY_ML_CONCURRENCY:-1}"]
     init: true
@@ -505,7 +527,7 @@ services:
     # No GPU reservation: this worker only decides WHAT to embed and posts the
     # bytes to the sidecar. The card is reserved on ml (docker-compose.gpu.yaml).
     healthcheck:
-      test: ["CMD-SHELL", "celery -A src.workers.celery_app inspect ping -d celery@$${HOSTNAME} --timeout 10 >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "celery -A service.infrastructure.messaging.celery_app inspect ping -d celery@$${HOSTNAME} --timeout 10 >/dev/null 2>&1 || exit 1"]
       interval: 60s
       timeout: 20s
       retries: 3
@@ -528,7 +550,7 @@ services:
       <<: *backend-env
       INIT_DB: "false"
       CELERY__ENABLED: "true"
-    command: ["celery", "-A", "src.workers.celery_app", "beat", "--loglevel=info",
+    command: ["celery", "-A", "service.infrastructure.messaging.celery_app", "beat", "--loglevel=info",
               "--pidfile=/tmp/celerybeat.pid", "--schedule=/tmp/celerybeat-schedule"]
     init: true
     depends_on:

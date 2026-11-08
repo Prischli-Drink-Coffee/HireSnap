@@ -115,7 +115,7 @@ theatre unless the network boundary is already broken. The moment a Redis client
 exposed beyond the network, that judgment changes — add a `REDIS__PASSWORD` with `:?`
 and a reader that uses it.
 
-**The client exists; the callers do not.** `backend/src/infra/cache.py` is a complete
+**The client exists; the callers do not.** `backend/service/infrastructure/cache.py` is a complete
 facade (`get`/`set`/`get_or_set`/`invalidate_prefix`, fail-open, 30 s backoff
 after an error) selected by `CACHE__BACKEND`. With the default `memory` it is a bounded
 in-process dict; with `redis` it talks to this container on `db 1`. **No API route calls
@@ -124,15 +124,15 @@ so enabling the profile does not speed up a single request today.
 
 **What the flag does change.** `CACHE=1` starts the container *and* exports
 `CACHE__BACKEND=redis` plus `CACHE__REDIS_URL`
-(`docker/sidecar_profiles.sh:89-94`), so the facade the workers already use switches
+(`docker/sidecar_profiles.sh:129-134`), so the facade the workers already use switches
 from a per-process dict to shared state. That is the difference between a job id that only
 the process that created it can read and one any container can read — see
 [RUNBOOK.md §15.1](RUNBOOK.md#151-is-a-worker-consuming) and `jobs_services.status()`.
 
 **It is also the celery broker and result backend** (`CELERY__BROKER_URL` defaults to
-`redis://cache:6379/1` in the manifest, `docker/.env.example:298`). That is why
+`redis://cache:6379/1` in the manifest, `docker/.env.example:236`). That is why
 `CELERY=1` forces `CACHE=1` with a warning rather than starting workers with no broker
-(`docker/sidecar_profiles.sh:47-51`).
+(`docker/sidecar_profiles.sh:52-59`).
 
 **Enable when:**
 
@@ -152,12 +152,12 @@ unreachable, never to "500". The facade already treats an error as a miss; keep 
 In dev it also publishes its console on `9001`; in prod nothing is published.
 
 **Why it exists:** today uploads land in `${DATA_PATH}/<name_object>/<uuid>.<ext>`
-(`backend/src/utils/write_file_into_server.py:15-17`) on a bind mount under
+(`backend/service/infrastructure/uploads.py:15-17`) on a bind mount under
 `infra/storage/`. That is fine for one host and terrible for two: a bind mount does not
 follow a container to another machine, and the backend returns URLs built from its own
 env, so a second host would serve half the media.
 
-**The client exists; the callers do not.** `backend/src/infra/storage.py` implements
+**The client exists; the callers do not.** `backend/service/infrastructure/storage.py` implements
 `put_bytes`/`put_file`/`read_bytes`/`exists`/`delete`/`list_objects`/`presigned_url`
 behind `STORAGE__BACKEND` (`local` by default, `DATA_PATH` under the hood; `s3`
 for this container). The worker task `hiresnap.embed_candidate` already reads and writes
@@ -165,9 +165,9 @@ through it, but no API route does ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-pla
 **What the flag does and does not change.** `STORAGE=1` starts the container and
 exports nothing: `STORAGE__BACKEND` stays `local` (`docker/sidecar_profiles.sh` has no
 storage branch on purpose, and the default is pinned in
-`docker/docker-compose.yaml:88` with the reason inline at `:79-87`). This is the one
+`docker/docker-compose.yaml:94` with the reason inline at `:85-94`). This is the one
 profile whose container and whose wiring are deliberately separate: the upload path writes
-through `write_file_into_server.py` to `DATA_PATH`, while the workers read the facade, so
+through `service/infrastructure/uploads.py` to `DATA_PATH`, while the workers read the facade, so
 flipping the backend would leave half the media in a bucket and half on the bind mount.
 MinIO is therefore infrastructure you enable ahead of time, and the day the upload path
 moves behind the facade, `STORAGE__BACKEND=s3` becomes a one-line env change.
@@ -204,23 +204,23 @@ serve logins and uploads but cannot produce a single embedding.
 
 | Property | Value | Evidence |
 |----------|-------|----------|
-| Build | `context: ../ml`, `dockerfile: docker/Dockerfile` | `docker/docker-compose.yaml:442-443`, `docker/docker-compose.dev.yaml:326-327` |
+| Build | `context: ../ml`, `dockerfile: docker/Dockerfile` | `docker/docker-compose.yaml:458-459`, `docker/docker-compose.dev.yaml:348-349` |
 | Image | `nvidia/cuda:11.6.2-cudnn8-runtime-ubuntu20.04` + Python 3.9 from deadsnakes | `ml/docker/Dockerfile:14`, `:39-47` |
 | Command | `CMD ["python3", "app.py"]` — never `uvicorn app:app` | `ml/docker/Dockerfile:130` (why: `:124-129`) |
 | Workdir | `/app/service`, `PYTHONPATH=/app/service` — the modules are flat, there is no package | `ml/docker/Dockerfile:74`, `:112` |
 | User | `app` (uid/gid 999) | `ml/docker/Dockerfile:88-89`, `:113` |
-| Port | `8080` inside the network (`ML_PORT`); `EXPOSE 8080`; **published nowhere** | `ml/docker/Dockerfile:115`, `docker/.env.example:242` |
-| State | **stateless**; request scratch in `/app/ml-scratch`, nothing else to persist | `ml/service/app.py:196-214` |
-| Profile | `profiles: ["prod"]` / `["dev"]` — the core profile, not a flag | `docker/docker-compose.yaml:428`, `docker/docker-compose.dev.yaml:319` |
-| Healthcheck | image: `curl -fsS http://127.0.0.1:${ML_PORT:-8080}/health`, 30s / 10s / **start period 60s** / 5 (`ml/docker/Dockerfile:121-122`); both compose files raise the start period to **300s** | `docker/docker-compose.yaml:522-530`, `docker/docker-compose.dev.yaml:377-385` |
+| Port | `8080` inside the network (`ML_PORT`); `EXPOSE 8080`; **published nowhere** | `ml/docker/Dockerfile:115`, `docker/.env.example:256` |
+| State | **stateless**; request scratch in `/app/ml-scratch`, nothing else to persist | `ml/service/app.py:197-215` |
+| Profile | `profiles: ["prod"]` / `["dev"]` — the core profile, not a flag | `docker/docker-compose.yaml:444`, `docker/docker-compose.dev.yaml:340` |
+| Healthcheck | image: `curl -fsS http://127.0.0.1:${ML_PORT:-8080}/health`, 30s / 10s / **start period 60s** / 5 (`ml/docker/Dockerfile:121-122`); both compose files raise the start period to **300s** | `docker/docker-compose.yaml:538-546`, `docker/docker-compose.dev.yaml:399-409` |
 
 > **Compose wiring.** Both stacks build the sidecar from `../ml` with
 > `docker/Dockerfile`, which is what makes it self-contained: its Dockerfile cannot reach
 > `backend/` even by accident, and `ml/.dockerignore` decides what the daemon sees. The
-> service is given the flat `ML_*` names from [ENV.md §8.3](ENV.md#83-ml)-plus-the-four-
+> service is given the flat `ML_*` names from [ENV.md §8.3](ENV.md#83-ml) plus the four
 > sidecar-owned keys, no `DB_*`, and **no `depends_on: mysql`**. The API and all four
 > celery services get `ML_SERVICE_URL: ${ML__SERVICE_URL:-http://ml:8080}` from the
-> `x-backend-env` anchor (`docker/docker-compose.yaml:103`) and `depends_on: ml` with
+> `x-backend-env` anchor (`docker/docker-compose.yaml:104`) and `depends_on: ml` with
 > `condition: service_started`. Neither stack publishes a host port for it — the
 > canonical way in is `make ml-shell`.
 
@@ -250,7 +250,7 @@ Three properties of that contract are load-bearing for the deployment:
    `POST /v1/transcribe` read the body as `application/octet-stream` (a multipart `file`
    field is also accepted), because the sidecar has no access to the backend's storage
    mount and must not be given one. Filename metadata travels in `X-Filename`
-   (`backend/src/services/ml_client.py:265-268`).
+   (`backend/service/services/ml_client.py:265-268`).
 3. **Errors are `{"error", "detail"}` with a stable code.** The registry is closed
    (`ml/service/app.py:64-76`): `invalid_request` 422, `empty_body` 400,
    `request_too_large` 413, `unsupported_media_type` 415, `not_found` 404,
@@ -264,21 +264,21 @@ compose network and has no authentication of its own.
 
 ### 4.2 How the backend reaches it
 
-`backend/src/services/ml_client.py` is **HTTP-only**. There is no second transport and no
+`backend/service/services/ml_client.py` is **HTTP-only**. There is no second transport and no
 import of the pipeline anywhere in `backend/`:
 
 | `ML_SERVICE_URL` (manifest: `ML__SERVICE_URL`) | Behavior |
 |------------------------------------------------|----------|
 | set — the manifest ships `http://ml:8080` | POST to the sidecar |
-| unset, empty, or hand-emptied | falls back to the client default `http://127.0.0.1:8080` (`ml_client.py:65`), which **inside the API container is the API itself** — every upload then fails with `ml_service_unreachable` |
+| unset, empty, or hand-emptied | falls back to the client default `http://127.0.0.1:8080` (`backend/service/services/ml_client.py:65`), which **inside the API container is the API itself** — every upload then fails with `ml_service_unreachable` |
 
 | Property | Value | Evidence |
 |----------|-------|----------|
-| Variable | `ML__SERVICE_URL` → `ML_SERVICE_URL`, read per call | `ml_client.py:101-120` |
-| Connect / read timeout | 10 s / 900 s | `ml_client.py:59-60`, `:134-146` |
-| Errors | `MLUnavailable` / `MLRejected` / `MLContractError` | `ml_client.py:149-161` |
-| Transport report | always `"http"`; the URL can still be wrong | `ml_client.py:418-434` |
-| Only wired call site | `upload_video()` → `get_user_embedding()` | `main_services.py:204` |
+| Variable | `ML__SERVICE_URL` → `ML_SERVICE_URL`, read per call | `backend/service/services/ml_client.py:101-120` |
+| Connect / read timeout | 10 s / 900 s | `backend/service/services/ml_client.py:59-60`, `:134-146` |
+| Errors | `MLUnavailable` / `MLRejected` / `MLContractError` | `backend/service/services/ml_client.py:149-161` |
+| Transport report | always `"http"`; the URL can still be wrong | `backend/service/services/ml_client.py:418-434` |
+| Only wired call site | `upload_video()` → `get_user_embedding()` | `service/services/matching.py:202` |
 
 The 900-second read timeout is not generosity: a long video embedding runs for minutes, and
 the gateway's `proxy_read_timeout 86400s` (`infra/nginx/nginx.conf:120-122`) is sized for
@@ -302,10 +302,10 @@ See [KNOWN_GAPS.md §23](KNOWN_GAPS.md#23-the-sidecar-is-the-only-inference-path
 
 The **host** side of the two model mounts is the manifest key (`WEIGHTS_DIR`,
 `PRETRAINED_CKPT_DIR`, both relative to `docker/`); the container side is a literal in the
-`volumes:` block (`docker/docker-compose.yaml:504-505`). Nothing is mounted at `/app/data`
+`volumes:` block (`docker/docker-compose.yaml:520-521`). Nothing is mounted at `/app/data`
 in prod: the sidecar receives bytes, it never reads the upload directory.
 
-`backend/env.py` is **not** copied into the image and no dotenv file is baked in: the
+Nothing from `backend/` is copied into the image: no `env.py`, no dotenv file. The
 sidecar reads `os.environ` directly through `ml/service/settings.py`, and a dotenv file
 inside a container is how a stale local value overrides the manifest.
 
@@ -328,11 +328,11 @@ satisfy makes `up` fail. `nvidia-container-toolkit` is the requirement, and
 
 **Nothing in the API can infer in-process**, so the interesting question is not *whether*
 the sidecar is used but *which URL the client dials*. `describe_transport()` inside the API
-container answers it (`ml_client.py:418-434`):
+container answers it (`backend/service/services/ml_client.py:418-434`):
 
 ```bash
 ./docker/run.sh --dev exec backend python -c \
-  "import json;from src.services.ml_client import describe_transport;print(json.dumps(describe_transport()))"
+  "import json;from service.services.ml_client import describe_transport;print(json.dumps(describe_transport()))"
 #   {"transport": "http", "service_url": "http://ml:8080", "timeouts": [10.0, 900.0]}
 ```
 

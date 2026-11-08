@@ -18,9 +18,9 @@ consequence, and the mitigation this stack applies.
 
 **Defect.** The frontend requests `/api/...`; the backend serves `/server/...`.
 
-- `frontend/src/API/apiConsts.js:41` — the unpatched fallback,
-  `return "http://localhost:8080/api/";` (still the value in effect on localhost)
-- `backend/src/pipeline/server.py:30` — `app.mount("/server", app_server)`
+- `frontend/src/shared/api/apiConsts.js:46` — the last-resort fallback,
+  `return "http://localhost:8080/api/";` (still the value in effect on plain localhost)
+- `backend/service/api/app.py:128` — `app.mount("/server", app_server)`
 
 **Consequence.** Pointed at each other directly, every API call 404s. The bug is
 invisible in local development because the frontend's hardcoded URL points at
@@ -62,35 +62,40 @@ The video still exists and `/data/...` still serves it; only the URL in the JSON
 wrong. That is worse than a hard failure, because the upload appears to succeed.
 
 **Mitigation.** `PUBLIC_BASE_URL` is set in the env file and the two-repository patch
-(`backend/src/utils/return_url_object.py`, backward compatible: it falls back to the
-old behavior when the variable is absent) uses it. **Without the patch the fallback is
+(`backend/service/shared/urls.py`, backward compatible: it falls back to the old behavior
+when the variable is absent) uses it. **Without the patch the fallback is
 still broken in a container**, which is why `PUBLIC_BASE_URL` is documented as
 required-in-prod in [ENV.md](ENV.md) even though the unpatched code ignores it.
 
 **Residual risk.** Any code path that builds a URL itself instead of calling the helper
 still emits `0.0.0.0`. Grep for `SERVER_PORT` before adding a new one.
 
-## 3. `env.py` writes `.env` relative to the working directory
+## 3. `env.py` wrote `.env` relative to the working directory (closed)
 
-**Defect.** `Env.set_key` calls `dotenv.set_key('.env', attr, value)` — a relative path.
+**Defect, as it stood.** `Env.__setattr__` and `Env.__delattr__` called
+`dotenv.set_key('.env', ...)` / `unset_key('.env', ...)` — a **relative** path. Reading was
+always safe, because `load_dotenv` was given a path anchored to the module
+(`backend/env.py:23`); writing was not. Any process started from a directory other than
+`backend/` created a second, empty `.env` there and then never read it.
 
-```python
-set_key('.env', attr, value)
-```
+**Status: fixed in the refactor.** The two writers now resolve the same path the reader
+uses: `backend/service/configuration/env.py:50-65` calls `set_key(str(env_file()), ...)` and
+`unset_key(str(env_file()), ...)`, and `env_file()`
+(`backend/service/configuration/paths.py:49-51`) is the one helper both paths share. The
+module docstring states the old behaviour as the first of the two defects the move fixed.
+That is why `backend/tests/test_import_without_infra.py:88-93` can assert the stronger
+property: importing the application writes **no file at all** into the working directory,
+from any CWD.
 
-**Consequence.** Reading configuration is safe: `load_dotenv` with a path anchored to
-the module directory (`env.py:23`). **Writing** is not — it hits whatever `.env`
-exists in the current working directory, or creates one there. A container started with
-a different `WORKDIR` writes a stray file that is then never read.
+**Consequence today.** Nothing in the request path calls the setters, so the fix is a trap
+closed rather than a feature used: container environment variables remain the only
+configuration channel, and compose injects them. The superproject `.gitignore` still ignores
+`.env` and `.env.*` at every level, so a stray file could not be committed even if a future
+change reintroduced one.
 
-**Mitigation.** Nothing in the stack calls `set_key`. Container environment variables are
-the only configuration channel, and they are injected by compose. The superproject
-`.gitignore` ignores `.env` and `.env.*` at every level, so a stray file cannot be
-committed by accident.
-
-**Residual risk.** An application change that starts using `set_key` (e.g. a "remember my
-settings" feature) will write to an unpredictable location. Treat that as a bug in the
-change, not in the stack.
+**What would have caught it.** Nothing did — the relative write was legal Python, produced a
+readable file, and only went wrong when the process ran from an unexpected directory. The
+test above pins the whole property rather than the two call sites.
 
 ## 4. No dependency lock
 
@@ -121,15 +126,15 @@ also not the default - `backend/docker/Dockerfile:52` keeps
 `--build-arg REQUIREMENTS_FILE=requirements.lock.txt` is a deliberate operator decision,
 and the file drifts the moment `requirements.txt` changes without it.
 
-`backend/requirements_platform.txt` (celery 5.4.0, redis 5.0.8, boto3 1.35.24) is a
+`backend/requirements-platform.txt` (celery 5.4.0, redis 5.0.8, boto3 1.35.24) is a
 **third** list that neither of the other two mentions. An image that runs a worker or
-talks to redis/MinIO needs `pip install -r requirements.txt -r requirements_platform.txt`,
+talks to redis/MinIO needs `pip install -r requirements.txt -r requirements-platform.txt`,
 and nothing in the lock snapshot records that pair, so a reproducible build of a worker
 image is not yet expressible with the artifacts in the repository.
 
 One dependency is neither list names, and it does not need to be: `python-multipart`
 arrives transitively because `fastapi==0.111.0` declares it as a hard requirement, and
-`backend/src/pipeline/server.py:82-85` declares `Form(...)` parameters that raise
+`backend/service/api/routers/auth.py:20-23` declares `Form(...)` parameters that raise
 `RuntimeError: Form data requires "python-multipart" to be installed` at route definition
 when it is absent. The image is therefore correct today and fragile tomorrow: narrowing
 `requirements.txt` to an explicit audited list must add `python-multipart` back, or the
@@ -138,9 +143,9 @@ models.
 
 ## 5. No migrations
 
-**Defect.** The schema exists as `backend/HireSnap.sql`, applied by `CreateSQL`
-(`backend/create_sql.py`) or by the MySQL image's init directory. There is no Alembic,
-no version table, no downgrade path.
+**Defect.** The schema exists as `backend/database/HireSnap.sql`, applied by `CreateSQL`
+(`backend/service/infrastructure/database/schema.py`) or by the MySQL image's init
+directory. There is no Alembic, no version table, no downgrade path.
 
 **Consequence.** A schema change is a hand-edited SQL file plus a manual `ALTER` on every
 existing database. Two environments drift and nothing detects it. Rolling back a deploy
@@ -148,21 +153,29 @@ does not roll back a schema.
 
 **Mitigation.** Fresh environments get the schema from the MySQL init hook:
 `infra/mysql/init/00-init.sh` is mounted at `/docker-entrypoint-initdb.d` and applies
-`backend/HireSnap.sql` (mounted at `/opt/hiresnap/HireSnap.sql`) on the first boot of an
-empty `mysql_data` named volume. Existing volumes are handled by the documented manual
+`backend/database/HireSnap.sql` (mounted at `/opt/hiresnap/HireSnap.sql`) on the first boot
+of an empty `mysql_data` named volume. Existing volumes are handled by the documented manual
 procedure in
 [RUNBOOK.md §8.3](RUNBOOK.md#83-existing-volume-nothing-happens-automatically). Back up
 before any schema change; see [RUNBOOK.md §12](RUNBOOK.md#12-backup-and-restore).
 
 ## 6. Schema creation only happens when `DEBUG=TRUE`
 
-**Defect.**
+**Defect.** The application creates its own schema from a **mode flag**. The gate now lives
+in `service/main.py`, and it reads two keys, but the flag is still the reason it can run in
+a deployment at all:
 
 ```python
-if env.__getattr__("DEBUG") == "TRUE":
-    from create_sql import CreateSQL
-    CreateSQL().read_sql()
+# backend/service/main.py:75
+if _debug_flag(env) and os_env_flag("INIT_DB"):
+    bootstrap_schema(env)          # lazily imports CreateSQL and calls read_sql()
 ```
+
+`_debug_flag()` (`:40-47`) is a strict string comparison: `TRUE`, `FALSE`, or a
+`RuntimeError` naming the value it saw. `os_env_flag()` (`:82-86`) accepts
+`1`/`true`/`yes`/`on` in any case. The two are an **AND**, so `INIT_DB=1` alone does
+nothing and `DEBUG=TRUE` alone does nothing — the second key narrows the first, it cannot
+override it.
 
 **Consequence.** `CreateSQL.read_sql()` creates the database, executes `HireSnap.sql`,
 and bulk-loads the CSVs in the `tables/` directory under `DATA_PATH` for `embeddings`,
@@ -170,18 +183,19 @@ and bulk-loads the CSVs in the `tables/` directory under `DATA_PATH` for `embedd
 `DEBUG=FALSE` - i.e. in production - **none of that runs**. A production database that
 was never seeded by `infra/mysql/init/` starts empty and the first query 500s.
 
-**Mitigation.** `infra/mysql/init/00-init.sh` + `backend/HireSnap.sql` is the production
-path, and it runs on a fresh volume. `DEBUG` is a mode flag, **not** a schema switch;
-using it to create tables is the defect, and shipping `DEBUG=TRUE` to production to get
-tables would also enable uvicorn's reloader and turn a typo into a restart loop.
+**Mitigation.** `infra/mysql/init/00-init.sh` + `backend/database/HireSnap.sql` is the
+production path, and it runs on a fresh volume. `DEBUG` is a mode flag, **not** a schema
+switch; using it to create tables is the defect, and shipping `DEBUG=TRUE` to production to
+get tables would also enable uvicorn's reloader and turn a typo into a restart loop.
 
 ## 7. `autocast` was unconditional (fixed; the CPU path is real)
 
 **Defect, as it stood.** Two call sites opened an autocast context unconditionally -
-`backend/src/modelling/get_video_embedding.py:195` and
-`backend/src/modelling/user_embedding.py:46`, both `with torch.cuda.amp.autocast():`.
-On a host without a CUDA device that raises, so the embedding path failed instead of
-falling back to full precision.
+line 195 of `get_video_embedding.py` and line 46 of `user_embedding.py` in the (since
+deleted) `backend/src/modelling/` tree - a path that no longer exists, because the ML code
+now lives at `ml/service/` - both `with torch.cuda.amp.autocast():`. On a host without a
+CUDA device that raises, so the embedding path failed instead of falling back to full
+precision.
 
 **Status: fixed, and the fix moved with the code.** `autocast_context(device)` in
 `ml/service/video_embedding.py:170-181` is the single decision point: it returns
@@ -233,33 +247,63 @@ Full inventory in
 normalizes its *own* errors to it. Application errors are left as-is; adding one
 exception handler would fix them, and that is an application change.
 
-## 10. No health endpoint
+## 10. No health endpoint (closed: `GET /server/health` exists)
 
-**Defect.** The backend exposes no `/health`, `/ping` or `/status` route.
+**Defect, as it stood.** The backend exposed no `/health`, `/ping` or `/status` route, so
+container health checks had to use `/server/openapi.json` - a document rebuilt from every
+router on every call, run every 30 seconds for the life of the container - and the
+gateway's own `/health` proved only that nginx was alive.
 
-**Consequence.** Container health checks must use `/server/openapi.json`, and the
-gateway's own `/health` proves only that nginx is alive - it never reaches the backend.
+**Status: fixed.** `build_server_app()` now registers
+`GET /server/health` on the `/server` sub-app (`backend/service/api/app.py:88-100`,
+decorator at `:93`), returning `{"status":"ok","service":"backend","version":__version__}`
+(`:96`): three keys, no I/O, the same shape the gateway and the `ml` sidecar answer with.
+Both images probe it - `backend/docker/Dockerfile:229-230` and the compose override at
+`docker/docker-compose.yaml:272-282` - and through the gateway it is `/api/health`, because
+the `/api/` location rewrites the prefix (`infra/nginx/templates/site.conf.template:77-79`).
 
-**Mitigation.** Documented in [RUNBOOK.md §7](RUNBOOK.md#7-health) with a probe precedence
-table. The gateway serves `GET /health` at the root with a static
-`{"status":"ok","service":"gateway"}` body (`site.conf.template:60-64`); it answers
-even when the backend is down, which is the point. Adding a real `/server/health` is a
-two-line application change and is not made here.
+**What still differs.** The gateway's `GET /health` is an exact-match location at the root
+(:60-64) with a static `{"status":"ok","service":"gateway"}` body; it answers even when
+the backend is down, which is the point, and it is not a substitute for the API's probe.
+See [RUNBOOK.md §7](RUNBOOK.md#7-health) and
+[SERVICE_CONTRACTS.md §1](SERVICE_CONTRACTS.md#1-health).
 
-## 11. CORS is wide open
+## 11. CORS is open by default, and the wildcard cannot carry credentials
 
-**Defect.** `backend/src/pipeline/server.py:34-40` sets `allow_origins=["*"]` with
-credentials allowed.
+**Defect, as it stood.** `create_app()` hardcoded `allow_origins=["*"]` **with**
+`allow_credentials=True`, while `CORS_ALLOW_ORIGINS` sat in the manifest
+(`docker/.env.example`, section 4) and was read by nothing. Two separate failures: the
+deployment had no way to narrow the origin list, and the pair the middleware emitted -
+`Access-Control-Allow-Origin: *` together with `Access-Control-Allow-Credentials: true` -
+is one browsers **reject**, so a credentialed cross-origin request never worked anyway.
 
-**Consequence.** Any origin can call the API from a browser. Safe today only because the
-SPA is served same-origin through the gateway, so CORS is not what protects the API -
-the token is.
+**Status: fixed.** `_cors_settings()` (`backend/service/api/app.py:92-142`) resolves the
+key and `create_app()` splats the result into `CORSMiddleware`
+(`backend/service/api/app.py:175-183`, `**_cors_settings()` at `:182`).
 
-**Mitigation.** The gateway serves the SPA and the API from one origin, so a browser
-never needs a cross-origin request. `CORS_ALLOW_ORIGINS` is declared in the manifest
-(`docker/.env.example:96`) as the forward contract, but the application does not read it:
-`backend/src/pipeline/server.py:34-40` hardcodes `allow_origins=["*"]`. Changing that is
-an application change and is not made here.
+| `CORS_ALLOW_ORIGINS` | `allow_origins` | `allow_credentials` |
+|----------------------|-----------------|---------------------|
+| unset, blank, `*`, `["*"]`, `[]`, malformed JSON (with a warning) | `["*"]` | `False` |
+| JSON array or comma list of origins | exactly those, trimmed | `True` |
+
+**The rule that matters.** A wildcard origin is never paired with credentials, because
+the browser refuses that combination; an explicit list is, because that pairing is legal.
+This is not a tightening of the default - unset still means `*` - it is a fix for an
+illegal header pair that could never have worked.
+
+**Consequence.** Any origin can still call the API from a browser when the key is unset or
+`*`. That is survivable only because the SPA is served same-origin through the gateway, so
+CORS is not what protects the API - the Bearer token is. An explicit list is the
+configuration a real deployment should use, and the manifest ships one
+(`docker/.env.example:112`).
+
+**What would have caught it.** Nothing did: the old value was legal Python, the API
+answered same-origin requests perfectly, and the failure needed a *cross-origin credentialed*
+request to appear. `backend/tests/test_cors_settings.py` now pins the resolution table,
+including an end-to-end assertion that `create_app()` hands the resolved value to the
+middleware rather than merely computing it.
+
+See [ENV.md §3.2](ENV.md#32-cors_allow_origins--consumed-and-the-wildcardcredentials-rule).
 
 ## 12. Weights are not in the repository
 
@@ -271,8 +315,9 @@ single function is what closed the older defect, where the pipeline opened the l
 directory** while the CLI examples under `ml/service/cosmos_tokenizer/` use different names
 (`CosmosCV_f4x8x8` / `CosmosCI_f8x8`), so copying a tree out of those examples left the
 loader unable to find it. `Unet3D.pth` is the second required file, and two Hugging Face
-models are downloaded on first use. `backend/.gitignore:181` still ignores `/src/weights/`
-- a leftover from the deleted tree - and the superproject ignores `infra/models/`.
+models are downloaded on first use. `backend/.gitignore` still carries a rule for the
+retired `/src/weights/` path - a leftover from the deleted tree - and the superproject
+ignores `infra/models/`.
 
 **Consequence.** A fresh clone cannot produce a video embedding. The failure is at
 runtime, on the first request that needs a tokenizer, not at startup: `/health` is green
@@ -281,23 +326,25 @@ either way, which is why `/v1/capabilities` is the probe to alert on.
 **Mitigation.** `infra/models/weights/` and `infra/models/pretrained_ckpts/` are host
 directories bind-mounted read-only into the **`ml` container only**, at
 `/app/models/weights` and `/app/models/pretrained_ckpts`
-(`docker/docker-compose.yaml:504-505`). The API never opens a model file. For an offline
+(`docker/docker-compose.yaml:520-521`). The API never opens a model file. For an offline
 deployment, pre-seed the Hugging Face cache (`hf_cache` volume); see
 [RUNBOOK.md §9](RUNBOOK.md#9-mounted-state-certs-weights-storage-logs) and
 [SIDECARS.md §4.3](SIDECARS.md#43-mounts-and-configuration).
 
 ## 13. The platform layer is delivered but its call sites are thin
 
-**Defect.** `backend/src/infra/` (cache, storage, mail), `backend/src/workers/` (celery
-app, tasks, beat schedule) and `backend/src/services/jobs_services.py` exist and are
-tested, and the containers that host them now ship. **The API still does not call them.**
-Every request is answered from MySQL and the local filesystem, exactly as before the layer
-landed.
+**Defect.** `backend/service/infrastructure/` (cache, storage, mail),
+`backend/service/infrastructure/messaging/` (celery app, tasks, beat schedule) and
+`backend/service/services/jobs_services.py` exist and are tested, and the containers that
+host them now ship. **The API still does not call them.** Every request is answered from
+MySQL and the local filesystem, exactly as before the layer landed.
 
-- `backend/src/pipeline/server.py` has no `/server/jobs` route; grepping the module for
-  `jobs_services`, `send_now_or_later`, `get_cache` and `get_storage` returns nothing.
-- Signup (`server.py:81-95`) calls `auth_services.signup` and returns; no welcome mail
-  is sent, because no caller reaches `mail.send_now_or_later`.
+- `backend/service/api/app.py` mounts twelve routers and none of them is a `/server/jobs`
+  route; grepping the package for `send_now_or_later`, `get_cache` and `get_storage` finds
+  the facades and their tests, not a caller.
+- Signup (`backend/service/api/routers/auth.py:19-33`) calls `auth_services.signup` and
+  returns; no welcome mail is sent, because no caller reaches
+  `mail.send_now_or_later`.
 - The listing endpoints query MySQL on every request; the cache facade is never consulted.
 
 **Mitigation.** Document the dormancy instead of advertising the feature (this entry and
@@ -318,7 +365,7 @@ a 500 on the upload path once uploads use it, not a silent write to the local di
 ## 14. The sidecar is the only inference path
 
 **Defect, from the other side.** The API has no in-process inference path. There used to be
-one: `backend/src/services/ml_client.py` imported `src.modelling.*` when
+one: `backend/service/services/ml_client.py` imported the ML pipeline in-process when
 `ML__SERVICE_URL` was unset and POSTed to the sidecar when it was set. That branch is
 gone - the module is HTTP-only, with a docstring at the top saying why
 (`ml_client.py:1-43`).
@@ -327,15 +374,15 @@ gone - the module is HTTP-only, with a docstring at the top saying why
   `ML_SERVICE_URL` / `ML__SERVICE_URL`, and otherwise `DEFAULT_SERVICE_URL` =
   `http://127.0.0.1:8080` (`:65`). Nothing branches on "is it set"; `is_remote()`
   (`:123-131`) returns `True` unconditionally.
-- `backend/src/services/main_services.py:24` imports `get_user_embedding` from the client
-  and `upload_video()` calls it at `:204` - the only wired call site.
+- `backend/service/services/matching.py:22` imports `get_user_embedding` from the client
+  and `upload_video()` calls it at `:202` - the only wired call site.
 - The four celery services take the same variable and `depends_on: ml`
-  (`docker/docker-compose.yaml:103`, `:246-253`).
+  (`docker/docker-compose.yaml:104`, `:256-263`).
 
 That default is not a fallback worth having. Inside the API container,
 `127.0.0.1:8080` is the API itself, which serves no `/v1/*` route, so an emptied key
 turns every upload into `ml_service_unreachable` rather than into local inference.
-`ML__SERVICE_URL` ships **non-empty** (`http://ml:8080`, `docker/.env.example:249`) for
+`ML__SERVICE_URL` ships **non-empty** (`http://ml:8080`, `docker/.env.example:263`) for
 exactly that reason.
 
 **Consequence, and it is the accepted cost of the split.** While `ml` is down, still
@@ -367,7 +414,7 @@ retrying in a tight loop.
 part of it, and nothing reconciles them:
 
 - `backend/requirements.txt` - the API. Pinned HTTP and data block, floating tail.
-- `backend/requirements_platform.txt` (celery 5.4.0, redis 5.0.8, boto3 1.35.24) - a
+- `backend/requirements-platform.txt` (celery 5.4.0, redis 5.0.8, boto3 1.35.24) - a
   *separate* list installed only in images that run a worker or talk to Redis/MinIO.
   `backend/docker/Dockerfile:52` keeps `ARG REQUIREMENTS_FILE=requirements.txt`, so the
   platform trio is an extra `pip install` and never part of the lock snapshot.
@@ -397,23 +444,23 @@ at install time. See §4.
 body and a response shape that the sidecar does not implement, so it could never succeed
 against it:
 
-- `backend/src/workers/tasks.py` posted to `base_url.rstrip("/") + "/embed"`; the
-  sidecar serves `POST /v1/embed/video`, `/v1/embed/text` and
-  `/v1/transcribe` (`ml/service/app.py:395-427`). There is no `/embed` route, so the
-  sidecar answered 404.
+- The background task posted to `base_url.rstrip("/") + "/embed"` (the module is
+  `service/infrastructure/messaging/tasks.py` today); the sidecar serves
+  `POST /v1/embed/video`, `/v1/embed/text` and `/v1/transcribe`
+  (`ml/service/app.py:395-427`). There is no `/embed` route, so the sidecar answered 404.
 - The body was JSON `{"file_key", "path"}`; the media routes take the **bytes** as
   the request body (`application/octet-stream`, with `multipart/form-data` field
   `file` also accepted).
 - The response was read as `body["embedding"]`; the sidecar returns
   `{"vector", "dim", "model"}`.
-- The module probe looked for `src.modelling.ml_client` and `ml.client`, neither of
+- The module probe looked for `modelling.ml_client` and `ml.client`, neither of
   which exists, and fell back to `ML__BASE_URL` instead of `ML_SERVICE_URL`.
 
-**Status: fixed.** The task now goes through `backend/src/services/ml_client.py` only —
+**Status: fixed.** The task now goes through `backend/service/services/ml_client.py` only —
 the same transport the request path uses, so there is one place that knows the sidecar's
 contract:
 
-- `_ml_client()` lazily imports `src.services.ml_client` and wraps a failure in
+- `_ml_client()` lazily imports `service.services.ml_client` and wraps a failure in
   `TaskUnavailable("ml_client_unavailable: ...")`. A task cannot silently fall back to
   a transport that does not exist.
 - `_local_media_path(storage, file_key, source_path=None)` returns `(path,
@@ -433,14 +480,14 @@ already had, which is why the object store stays private.
 sidecar and no weights: a real path is not copied, a local path is not copied, an
 object-store object is materialised **with its extension**, the temporary file is removed on
 success **and** on failure, the key and the bytes are deterministic, the module actually
-imported is `src.services.ml_client`, and a blocked import raises `TaskUnavailable`.
+imported is `service.services.ml_client`, and a blocked import raises `TaskUnavailable`.
 The backend suite is 109 passed.
 
 **Residual risk.** The task is still only reachable from a code path nothing calls
 ([§13](#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)), so the fix is proven by tests
 rather than by traffic. The consumer now exists — `CELERY=1` starts
 `celery-worker-agents`, `celery-worker-maintenance`, `celery-worker-ml` and `celery-beat`
-(`docker/docker-compose.yaml:487-648`) and exports `CELERY__ENABLED=true` — but
+(`docker/docker-compose.yaml:579-768`) and exports `CELERY__ENABLED=true` — but
 `CELERY__ENABLED=true` *without* the profile still queues work with nothing to consume it,
 which is why the flag and the profile are derived from one another in
 `docker/sidecar_profiles.sh` and why the compose env anchor keeps the enabled key at
@@ -448,7 +495,7 @@ which is why the flag and the profile are derived from one another in
 
 ## 17. The schema dump is table-only; adding CREATE DATABASE would split it in two
 
-**Defect.** `backend/HireSnap.sql` contains **no** `CREATE DATABASE` and **no**
+**Defect.** `backend/database/HireSnap.sql` contains **no** `CREATE DATABASE` and **no**
 `USE` statement. All ten tables are declared `CREATE TABLE IF NOT EXISTS`, and the
 only occurrence of `HireSnap` in the file is the phpMyAdmin comment on line 21 (a
 database name that MySQL never reads). The loader passes the database name explicitly —
@@ -468,12 +515,12 @@ half the schema.
 before committing:
 
 ```bash
-grep -nE '^(CREATE DATABASE|USE )' backend/HireSnap.sql   # must print nothing
+grep -nE '^(CREATE DATABASE|USE )' backend/database/HireSnap.sql   # must print nothing
 ```
 
 and confirm the loader still passes `DB_NAME` as an argument rather than relying on the
 file (`infra/mysql/init/00-init.sh:89`). The default database name is `hiresnap` in
-the manifest (`docker/.env.example:115`), in the MySQL image (`MYSQL_DATABASE`) and
+the manifest (`docker/.env.example:131`), in the MySQL image (`MYSQL_DATABASE`) and
 in the init script's fallback chain.
 
 **Residual risk.** `lower_case_table_names` differs between a Linux container and a
@@ -481,55 +528,50 @@ Windows host, so a mixed workflow that inspects the volume with a host client ca
 tables under a differently-cased name and conclude the load failed. It did not: the
 container is the reference.
 
-## 18. `get_all_candidates()` sorts dictionaries and raises `TypeError`
+## 18. `get_all_candidates()` sorted dictionaries and raised `TypeError` (closed)
 
-**Defect.** One function sorts a list of dicts with no key function:
+**Defect, as it stood.** Two ranking functions sorted a list of dicts with no key function:
 
 ```python
-vacancy_candidates.append(sample.model_dump())   # main_services.py:283 — a dict
-vacancy_candidates.sort(reverse=True)            # main_services.py:284 — the bug
+vacancy_candidates.append(sample.model_dump())   # a dict
+vacancy_candidates.sort(reverse=True)            # the bug
 ```
 
-`dict` objects are not orderable in Python 3, so the call raises
-`TypeError: '<' not supported between instances of 'dict' and 'dict'` as soon as the
-list holds **two or more** entries. With zero or one candidate the sort is a no-op and the
-function returns normally, which is why it survives casual testing.
+`dict` objects are not orderable in Python 3, so the call raised
+`TypeError: '<' not supported between instances of 'dict' and 'dict'` as soon as the list
+held **two or more** entries. With zero or one candidate the sort was a no-op and the
+function returned normally, which is why it survived casual testing. Both functions were
+written together and never exercised with real data; the loop variable in
+`get_all_vacancies()` was even spelled `smaple` while the body read `sample.`, so that
+branch raised `NameError` before it could sort anything.
 
-- `backend/src/services/main_services.py:276-285` — `get_all_candidates(vacancy_id)`.
-- The same file has an equal bug next door: `get_all_vacancies()` at `:261-273`
-  appends `sample.model_dump()` and then calls `user_vacancies.sort(reverse=True)`
-  at `:272`, so it raises for any user with two or more vacancies.
-- The loop variable in `get_all_vacancies()` used to be spelled `smaple` while the body
-  read `sample.`, so that branch raised `NameError` before it could sort anything (the
-  rename is recorded in the code comment at `:266-268`). Both functions were clearly
-  written together and never exercised with real data.
+**Status: fixed in the package move.** The two functions live at
+`backend/service/services/matching.py:261-280` (`get_all_vacancies`) and `:283-292`
+(`get_all_candidates`), and both now sort by an explicit key:
 
-**Why no gate caught it.** The ruff configuration runs a narrow rule set; the rules that
-are enabled (undefined names, unused imports) are **syntactic**. `sort(reverse=True)` on
-a list is legal Python for any element type — the failure is a runtime type error inside a
-library method, which no linter detects and no type checker sees either, because
-`model_dump()` is annotated to return `dict` and `list.sort` accepts
-`Iterable[Any]`. mypy reports nothing on this file for the same reason.
+```python
+user_vacancies.sort(key=lambda row: row.get("distance") or 0, reverse=True)
+vacancy_candidates.sort(key=lambda row: row.get("distance") or 0, reverse=True)
+```
 
-**Consequence.** Every endpoint backed by these two functions returns 500 for real data.
-That is a pre-existing application bug, **not** something this deployment work introduced
-and **not** something it fixes: the file is application source, and the only two source
-patches this repository ships are the base URL and the media URL (see below). A stack that
-passes every healthcheck can still 500 on the candidate list — the failure is data-shaped,
-not configuration-shaped.
+`distance` is the similarity score the matching matrix writes (`decimal(6,6)` in
+`backend/database/HireSnap.sql`), so the ordering is "closest first" and the intent is
+stated rather than inferred from a comparison. The misspelled loop variable is renamed, and
+the reason is recorded in the code comment at `:266-268`.
 
-**Mitigation.** None applied. The fix direction is one argument either way: sort by an
-explicit key (`key=lambda row: row["distance"]`, or whatever field the ranking should
-use — the commented-out `C@` block below the function suggests a similarity score), or
-sort the **model instances** before calling `model_dump()` so the comparison uses
-`__lt__` on a pydantic model. The second is smaller but only correct if the model defines
-an ordering; the first states the intent. Either way the change needs a test with **two**
-rows, because one row hides the bug.
+**Why no gate caught it, and why that has not changed.** The ruff configuration runs a
+narrow rule set; the rules that are enabled (undefined names, unused imports) are
+**syntactic**. `sort(reverse=True)` on a list is legal Python for any element type - the
+failure is a runtime type error inside a library method, which no linter detects and no
+type checker sees either, because `model_dump()` is annotated to return `dict` and
+`list.sort` accepts `Iterable[Any]`. mypy reports nothing here for the same reason. There is
+still **no test with two rows**, which is the only thing that would have caught it; the
+fix is asserted by the code, not by a gate.
 
-**Residual risk.** `sort(reverse=True)` sorts by the whole dict, which would be
-`TypeError` even with key-capable elements if the keys were mixed types. Whoever fixes
-this should decide what the list is ordered *by* rather than pick the first key that
-compiles.
+**Why the entry stays.** It is the clearest example in this file of a defect that is
+invisible to every check the repository runs and fatal to real data: a stack that passed
+every healthcheck could still 500 on the candidate list. The lesson is not "sort with a
+key" - it is that a shape-only test suite reads as coverage.
 
 ## 19. Legacy repositories raised `NameError` instead of a 400 (fixed)
 
@@ -538,9 +580,9 @@ compiles.
 guard that is supposed to reject an empty payload raised `NameError` — a 500 — instead
 of the intended 400:
 
-- `backend/src/repository/candidate_vacancy_repository.py`
-- `backend/src/repository/personality_candidate_repository.py`
-- `backend/src/repository/personality_vacancy_repository.py`
+- `backend/service/repositories/candidate_vacancy_repository.py`
+- `backend/service/repositories/personality_candidate_repository.py`
+- `backend/service/repositories/personality_vacancy_repository.py`
 
 **Status: fixed.** Each module now has `from fastapi import HTTPException, status`
 (line 5 in all three) with a comment saying why the import exists, so an empty
@@ -557,7 +599,7 @@ additions. Nothing else about these modules changed.
 
 ## 20. The HTTP contract is narrower than the old function signatures
 
-**Defect.** `backend/src/services/ml_client.py` keeps the signatures the in-process
+**Defect.** `backend/service/services/ml_client.py` keeps the signatures the in-process
 implementations had, and the HTTP transport cannot honour every keyword. The differences
 are silent - the call succeeds and returns a vector - which is worse than an error:
 
@@ -653,29 +695,29 @@ Three consequences followed, and they are why this entry is kept rather than del
 An earlier version of this entry understated it, calling `ml` a mis-provisioned container.
 The sharper statement is that the service built the same backend image **and** published no
 `ML__SERVICE_URL`, so the seam the sidecar exists for -
-`backend/src/services/ml_client.py` - provably ran **in-process** in every deployed
+`backend/service/services/ml_client.py` - provably ran **in-process** in every deployed
 configuration, profile on or off.
 
 **What closed it.** The compose integration landed, and the shape is now:
 
 - `context: ../ml`, `dockerfile: docker/Dockerfile` in both files
-  (`docker/docker-compose.yaml:442-443`, `docker/docker-compose.dev.yaml:326-327`). The
+  (`docker/docker-compose.yaml:458-459`, `docker/docker-compose.dev.yaml:348-349`). The
   build context is the **submodule**, so the image cannot reach `backend/` even by accident,
   and `ml/.dockerignore` decides what the daemon sees.
 - The service is **core**, not a profile: `profiles: ["prod"]` / `["dev"]`, exactly like
   the API. There is no `ml` profile, no `ML` flag and no `ML_PUBLISH_PORT`.
 - The `DB_*` block is gone and there is no `depends_on: mysql`; the sidecar is stateless
-  and joins `default` and `internal` only (`docker/docker-compose.yaml:539-547`).
+  and joins `default` and `internal` only (`docker/docker-compose.yaml:562-563`).
 - Port `8080` inside the container and **no host port in either mode**
   (`docker/run.sh:168-171`); the way in is `make ml-shell`.
 - The API and all four celery services receive
   `ML_SERVICE_URL: ${ML__SERVICE_URL:-http://ml:8080}` from the `x-backend-env` anchor
-  (`docker/docker-compose.yaml:103`) and `depends_on: ml` with
-  `condition: service_started` (`:246-253`), so there is one service to start, not a flag
+  (`docker/docker-compose.yaml:104`) and `depends_on: ml` with
+  `condition: service_started` (`:253-263`), so there is one service to start, not a flag
   plus a variable.
 - Weights and checkpoints are mounted read-only into **this container only**, at
   `/app/models/weights` and `/app/models/pretrained_ckpts`
-  (`docker/docker-compose.yaml:504-505`); the API mounts neither.
+  (`docker/docker-compose.yaml:520-521`); the API mounts neither.
 
 **What would have caught it.** `scripts/check_compose_parity.py` compares the two stacks to
 each other, so two identical wrong blocks passed. Two changes close that:
@@ -699,7 +741,7 @@ submodule` with `failures=1`).
 
 **Two facts that belong together, because they fail in the same scenario.**
 
-**23.1 No second path.** `backend/src/services/ml_client.py` is HTTP-only
+**23.1 No second path.** `backend/service/services/ml_client.py` is HTTP-only
 (§14). The consequence is availability coupling that did not exist before the split: while
 `ml` is down, starting, or degraded, an upload fails - `503 service_unavailable` when the
 sidecar is up but cannot load a model, `MLUnavailable`/`ml_service_unreachable` when
@@ -711,7 +753,7 @@ alternative - keeping a second inference implementation in the API - is exactly 
 [ADR/0006](ADR/0006-ml-sidecar-owns-inference.md) rejects, because two implementations
 drift and the drift is silent. The operating consequence is that `ml` belongs in the same
 availability conversation as MySQL, and its 300-second start period
-(`docker/docker-compose.yaml:522-530`) is the window in which an upload can fail.
+(`docker/docker-compose.yaml:538-546`) is the window in which an upload can fail.
 
 `depends_on: ml` uses `condition: service_started`, not `service_healthy` - deliberate,
 because the health condition would block the API's own bootstrap for those 300 seconds. A
@@ -737,27 +779,42 @@ not how long the queue is, so the first symptom of saturation is a client timeou
 
 ## 24. A credential left the working tree but is still in git history
 
-**Defect.** The dadata.ru API token used by the supplier requisites form was committed as a
-literal. It is now read from the environment
-(`frontend/src/components/forms/suppliers/requisites.js` reads
-`REACT_APP_DADATA_TOKEN`, declared in the manifest at `docker/.env.example:178`), so the
-**working tree is clean** - but the token is still in `frontend`'s history, in every clone
-and in every fork of the remote.
+**Defect.** The dadata.ru client token used by the supplier requisites form was committed as
+a literal. **The literal is gone from the working tree**, and so is the form: the supplier
+tree was unreachable from `src/index.js` (86 of the frontend's 121 files were, see
+[ADR/0007](ADR/0007-sidecar-package-layout.md)) and was deleted outright rather than
+rewritten. Measured after that deletion, `grep -rn process.env frontend/src` has exactly one
+hit - `frontend/src/shared/api/apiConsts.js:16`, reading `REACT_APP_BASE_URL` - so **no code
+in the tree reads the dadata key today**, and its value is empty in the manifest
+(`docker/.env.example:192`).
 
-**Consequence.** Anyone who can read the repository history has the key. Rewriting history
-does not help on its own: the remote has it, any clone has it, and dadata has already
-issued it.
+**What survives, and where.** The token itself survives **only in `frontend`'s git history**,
+in every clone and every fork of the remote; cleaning the working tree does not reach it. The
+plumbing survives on purpose and is wired end to end: the manifest key
+(`docker/.env.example:192`) is passed as a build argument
+(`docker/docker-compose.yaml:312`, and as a runtime variable in dev at
+`docker/docker-compose.dev.yaml:223`) into `frontend/docker/Dockerfile:102-103`, which
+declares `ARG REACT_APP_DADATA_TOKEN=` and re-exports it as `ENV`. The Dockerfile comment states the
+position exactly: an empty default, a build that must never fail for a missing token, and
+wiring kept so that adding the lookup later needs no image change.
 
-**Mitigation.** Rotate the token AT dadata and put the new value in `docker/.env.dev` /
+**Consequence.** Anyone who can read the repository history has the old key. Rewriting
+history does not fix it on its own: the remote has it, any clone has it, and dadata has
+already issued it.
+
+**Mitigation.** Rotate the token AT dadata, and put the new value in `docker/.env.dev` /
 `docker/.env.prod` (never in the manifest). Rotation is the only fix that invalidates the
 leaked value; scrubbing history is optional hygiene on top of it. The same reasoning applies
 to any credential found in a submodule's history, which is why
-`docs/SECRETS.md` treats a leaked key as rotated-or-not, not as committed-or-not.
+[SECRETS.md](SECRETS.md) treats a leaked key as rotated-or-not rather than as
+committed-or-not.
 
-**Residual risk.** Until the rotation happens, the deployed value is a public one - and
-`REACT_APP_*` values are inlined into the browser bundle, so this key was always going to
-be visible to users of the SPA. It is a rate-limited public client key, which limits the
-damage to quota theft, not to secrecy.
+**Residual risk.** Until the rotation happens the old value is still valid at the issuer. And
+if the lookup is ever revived, remember what `REACT_APP_*` means: CRA inlines it into the
+browser bundle, so the value is visible to every visitor by construction. It is a
+rate-limited public client key, which bounds the damage to quota theft rather than to
+disclosure - which is also why the empty default is the normal state and not a
+misconfiguration.
 
 ## What is *not* on this list
 
@@ -765,22 +822,34 @@ Three changes to application source ship with this stack, and they are deliberat
 from the list above because they are fixed. All three are enumerated in
 [ADR/0005-source-patches.md](ADR/0005-source-patches.md), and that list is closed:
 
-1. `frontend/src/API/apiConsts.js` - the base URL becomes configurable.
-2. `backend/src/utils/return_url_object.py` - `PUBLIC_BASE_URL` is honored, with the old
+1. `frontend/src/shared/api/apiConsts.js` - the base URL becomes configurable.
+2. `backend/service/shared/urls.py` - `PUBLIC_BASE_URL` is honored, with the old
    behavior as fallback.
-3. `backend/src/repository/{candidate_vacancy,personality_candidate,personality_vacancy}_repository.py`
+3. `backend/service/repositories/{candidate_vacancy,personality_candidate,personality_vacancy}_repository.py`
    - the missing `fastapi` import that turned a 400 into a 500.
 
 All three are backwards compatible: with no new configuration they behave exactly as before.
 
-Four entries above are **closed** rather than open, and they are kept because *how* they
+Eight entries above are **closed** rather than open, and they are kept because *how* they
 failed is the useful part - each was invisible to the gates and would have surfaced first in
 production:
 
+- §3 - `Env` wrote `.env` relative to the working directory. Both writers now resolve the
+  same path as the reader (`service/configuration/env.py:50-65`), and
+  `backend/tests/test_import_without_infra.py:88-93` pins the property that matters: an
+  import writes no file at all, from any CWD.
 - §7 - unconditional autocast. Fixed in `ml/service/video_embedding.py`, and the fix moved
   with the code, which is why the CPU path is now a supported mode rather than an error.
+- §10 - the API had no probe of its own. `GET /server/health` exists now, composes probes it,
+  and `backend/tests/test_import_without_infra.py:74-85` asserts the exact body.
+- §11 - CORS was hardcoded to `['*']` **with** credentials, an illegal header pair, while
+  `CORS_ALLOW_ORIGINS` was read by nothing. `_cors_settings()`
+  (`backend/service/api/app.py:92-142`) resolves it and turns credentials off for the
+  wildcard; `backend/tests/test_cors_settings.py` pins the rule and the middleware wiring.
 - §16 - the celery ML client posted to a route the sidecar does not serve. Now routed
-  through `src.services.ml_client` and covered by `backend/tests/test_worker_ml_seam.py`.
+  through `service.services.ml_client` and covered by `backend/tests/test_worker_ml_seam.py`.
+- §18 - `get_all_candidates()` sorted dictionaries and raised `TypeError`; it sorts on the
+  distance key the way `get_all_vacancies()` already did.
 - §19 - a missing `fastapi` import that turned a 400 into a 500.
 - §22 - the `ml` service built the API image and published no URL, so the sidecar was never
   used in any deployed configuration. Now enforced by

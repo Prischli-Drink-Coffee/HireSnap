@@ -29,7 +29,8 @@ What is asserted:
   3. the database, redis, minio and HF caches are NAMED volumes in both compose
      files, not bind mounts: a bind-mounted MySQL data directory is a directory
      in the repository, and one 'docker compose down' away from being committed;
-  4. no *.sql dump other than the one committed schema (backend/HireSnap.sql) is
+  4. no *.sql dump other than the one committed schema
+      (backend/database/HireSnap.sql) is
      staged - a dump taken from a live database contains real user rows.
 
 Missing paths are not a failure: a fresh clone legitimately has no
@@ -331,9 +332,11 @@ def main():
     # --- 4: no stray SQL dumps -------------------------------------------
     code, stdout, _ = git(["ls-files", "--", "*.sql"])
     if code == 0:
-        # backend/HireSnap.sql is the committed schema; frontend/ and backend/ are
-        # submodules, so this list is normally empty or exactly that one file.
-        allowed = {"backend/HireSnap.sql"}
+        # backend/database/HireSnap.sql is the committed schema. The refactor moved
+        # it out of the backend root (where it sat beside the entry-point scripts)
+        # into database/, next to its README. backend/ is a submodule, so this list
+        # is normally empty: the superproject does not track files inside a gitlink.
+        allowed = {"backend/database/HireSnap.sql"}
         extra = [name for name in stdout.splitlines() if name not in allowed]
         if extra:
             report.warnings.append(

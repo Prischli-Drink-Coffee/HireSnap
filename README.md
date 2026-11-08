@@ -21,7 +21,7 @@ documentation are owned by the superproject and are described below.
 > five-service core (`mysql`, `backend`, `frontend`, `gateway`, `ml`). `ml/` is **not**
 > one of those profiles: it is a core service of both stacks, because the API has no
 > in-process inference path left to fall back to. Inference is one HTTP call from
-> `backend/src/services/ml_client.py`; whether the host has a GPU is a separate switch
+> `backend/service/services/ml_client.py`; whether the host has a GPU is a separate switch
 > (`GPU=1`, which merges a one-block override file). It wraps the existing application
 > code without restructuring it apart from that boundary, which
 > [ADR/0006](docs/ADR/0006-ml-sidecar-owns-inference.md) records; the application's known
@@ -35,8 +35,8 @@ documentation are owned by the superproject and are described below.
 
 | Path                    | Owned by    | What lives there |
 |-------------------------|-------------|------------------|
-| `backend/`             | submodule   | FastAPI app. Entry point `backend/src/pipeline/server.py`; helper scripts `main.sh`, `setup.sh`, `create_sql.py`. |
-| `frontend/`            | submodule   | CRA app. `npm start` / `npm run build`; API base URL in `frontend/src/API/apiConsts.js`. |
+| `backend/`             | submodule   | FastAPI app as a Python package: `service/main.py` is the entry point, `service/api/` the HTTP layer, `service/services/` the rules, `service/repositories/` the SQL, `service/infrastructure/` the swappable I/O. Schema dump `database/HireSnap.sql`; tests under `tests/`, run as `python -m pytest -q` from `backend/`. |
+| `frontend/`            | submodule   | CRA app. `npm start` / `npm run build`; `jsconfig.json` makes imports absolute from `src/`; API base URL in `frontend/src/shared/api/apiConsts.js` and the single axios client in `frontend/src/shared/api/instance.js`. |
 | `docker/`              | superproject| Stack code: `docker-compose.yaml` (prod), `docker-compose.dev.yaml` (dev), `.env.example` (the only committed manifest), `run.sh`, `build.sh`, `sync_env.py`, `sidecar_profiles.sh`, `compose_preflight.sh`. |
 | `infra/`               | superproject| Host-mounted configuration and data: `infra/nginx/` (gateway config, templates, certs), `infra/mysql/` (init SQL), `infra/storage/` (uploads, embeddings), `infra/certs/` (JWT keys). |
 | `backend/docker/`      | submodule   | Backend `Dockerfile` (build context is the repo root, `..`). |
@@ -44,7 +44,7 @@ documentation are owned by the superproject and are described below.
 | `ml/`                 | submodule   | Inference sidecar — the owner of the model code: `service/app.py`, `service/engine.py`, `service/settings.py`, the pipeline modules and `cosmos_tokenizer/`, `docker/Dockerfile`, `tests/`, and `README.md` (the canonical HTTP contract). Stateless, no database, no auth. |
 | `docs/`                | superproject| Architecture, environment reference, runbook, service contracts, sidecars, secrets, known gaps, ADRs. |
 | `scripts/`             | superproject| Cross-repo guards (`check_*.py`), run by `make guards`, pre-commit and CI, plus `adopt-submodules.sh` for turning the three checkouts into submodules and `run_guard.sh`, which picks a Python that actually starts before invoking a guard. |
-| `.github/`             | superproject| CI (`.github/workflows/ci.yml`): the six `scripts/check_*.py` guards plus `compose config -q` for both stacks, gitleaks, pre-commit, backend pytest, ml contract tests (no GPU) and the frontend build. |
+| `.github/`             | superproject| CI (`.github/workflows/ci.yml`): a loop over every `scripts/check_*.py` guard (seven today) plus `compose config -q` for both stacks, gitleaks, pre-commit, backend pytest, ml contract tests (no GPU) and the frontend build. |
 | `Makefile`             | superproject| Thin wrappers over `docker/run.sh` and `docker/build.sh`: `make env`, `make run-dev`, `make run-prod`, `make smoke`, `make guards`, `make logs`, `make down`. |
 
 ## Quickstart
@@ -81,7 +81,7 @@ Then open:
 
 `/health` is at the root, not under `/api/`: the `/api/` prefix is rewritten to
 `/server/` unconditionally, so `/api/health` would become `/server/health` and 404
-([docs/SERVICE_CONTRACTS.md](docs/SERVICE_CONTRACTS.md#13-what-exists-today--gap)).
+([docs/SERVICE_CONTRACTS.md](docs/SERVICE_CONTRACTS.md#13-where-each-health-route-actually-lives)).
 
 Production differs in exactly three ways: the compose project is `hiresnap-prod`,
 `docker/.env.prod` is used instead of `.env.dev`, and **only the gateway publishes a
@@ -110,8 +110,8 @@ command-line flag — `docker/run.sh` reads them and passes the matching `--prof
 
 | Profile | Services | What it is | Default |
 |---------|----------|------------|---------|
-| `cache` | `cache` | `redis:7.2-alpine`, internal only, no password, no published port. Read by the platform layer (`backend/src/infra/cache.py`); it is also the celery broker and result backend on **db 1**. No business call site uses it yet. | `CACHE=1` |
-| `storage` | `storage` | MinIO object store. Read by the storage facade (`backend/src/infra/storage.py`); no business call site uses it yet, and `STORAGE__BACKEND` stays `local` on purpose — flipping it would split uploads between the filesystem and the bucket. | `STORAGE=1` |
+| `cache` | `cache` | `redis:7.2-alpine`, internal only, no password, no published port. Read by the platform layer (`backend/service/infrastructure/cache.py`); it is also the celery broker and result backend on **db 1**. No business call site uses it yet. | `CACHE=1` |
+| `storage` | `storage` | MinIO object store. Read by the storage facade (`backend/service/infrastructure/storage.py`); no business call site uses it yet, and `STORAGE__BACKEND` stays `local` on purpose — flipping it would split uploads between the filesystem and the bucket. | `STORAGE=1` |
 | `celery` | `celery-worker-agents`, `celery-worker-maintenance`, `celery-worker-ml`, `celery-beat` | Four processes on the same backend image, one per queue plus a single scheduler. `CELERY=1` also forces `CACHE=1` (a warning on stderr) because the broker is Redis. | `CELERY=0` |
 | `mail` | `mailpit` | `axllent/mailpit:v1.20.5` — SMTP on `1025`, web inbox on `8025`. `MAIL=1` points the mailer at it with `STARTTLS=false`/`SSL=false`, because mailpit speaks plaintext. Dev publishes the inbox; prod publishes nothing. | `MAIL=0` |
 
@@ -120,7 +120,7 @@ command-line flag — `docker/run.sh` reads them and passes the matching `--prof
 `ml/docker/Dockerfile` with the build context set to `../ml`, so the image can only ever
 see its own submodule. It listens on **8080**, publishes no host port in either mode, sits
 on both networks and is stateless. The API has no in-process inference path left to fall
-back to: `backend/src/services/ml_client.py` posts to `ML_SERVICE_URL`, taken from
+back to: `backend/service/services/ml_client.py` posts to `ML_SERVICE_URL`, taken from
 `ML__SERVICE_URL` in the manifest (`http://ml:8080` there, and `docker/sidecar_profiles.sh`
 defaults it to the same when a deployment file leaves it empty). Why the boundary is
 drawn there is [ADR/0006](docs/ADR/0006-ml-sidecar-owns-inference.md).

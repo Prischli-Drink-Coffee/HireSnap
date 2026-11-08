@@ -12,6 +12,7 @@ consequences — including the costs we accepted.
 | [0004](0004-double-underscore-env.md) | `DB__HOST`-style keys in env files, flat names in containers | You add a variable and are unsure which name goes where |
 | [0005](0005-source-patches.md) | Five enumerated source-level changes, and the list is closed | You are about to edit application source, or you are re-applying the patches after a reset |
 | [0006](0006-ml-sidecar-owns-inference.md) | The sidecar owns the inference code; the backend keeps an HTTP client | You are about to put a GPU framework back in `backend/`, or you are wiring a new inference route |
+| [0007](0007-sidecar-package-layout.md) | One importable package per sidecar: `service/` on the backend, `app/`+`pages/`+`shared/` on the frontend | You are about to add a top-level directory, or you are looking for a module that moved out of `src/` |
 
 ## Conventions
 

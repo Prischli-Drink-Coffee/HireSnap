@@ -79,7 +79,7 @@ PYTHON ?= $(shell for c in python3 python3.13 python3.12 python3.11 python3.10 p
 
 .DEFAULT_GOAL := help
 
-.PHONY: help env build run run-dev run-prod stop down logs ps rebuild config test lint hooks guards db-shell backend-shell ml-shell ml-test smoke _require-docker _require-python _require-openssl
+.PHONY: help env build run run-dev run-prod stop down logs ps rebuild config test lint hooks guards structure db-shell backend-shell ml-shell ml-test smoke _require-docker _require-python _require-openssl
 
 # =============================================================================
 # help
@@ -102,6 +102,7 @@ help:
 	  "  make lint           pre-commit run --all-files (fails on any finding)" \
 	  "  make hooks          install the git hooks" \
 	  "  make guards         run every scripts/check_*.py guard" \
+	  "  make structure      the backend layout + ML boundary gate only (fast, no docker)" \
 	  "  make db-shell       mysql client inside the mysql container" \
 	  "  make backend-shell  bash inside the backend container" \
 	  "  make ml-shell       bash inside the ml sidecar container" \
@@ -134,7 +135,8 @@ _require-openssl:
 # contract this target relies on (docker/sync_env.py:1-27).
 #
 # WHY the JWT key pair belongs here: the backend resolves the key files AT IMPORT
-# TIME (backend/src/database/models.py:29-30) and RS256 is hardcoded (:43), so
+# TIME (backend/service/domain/models.py, the certs path is derived from
+# __file__) and RS256 is hardcoded, so
 # without the files every authenticated route fails at startup. "The environment
 # exists" therefore includes the keys. They are generated ONLY when missing:
 # rotating a live pair invalidates every issued token (infra/certs/README.md).
@@ -220,6 +222,28 @@ config: env _require-docker
 guards: _require-python
 	@set -e; failed=""; ran=0; for script in scripts/check_*.py; do [ -f "$$script" ] || continue; ran=$$((ran + 1)); printf '%s\n' "---- $$script"; $(PYTHON) "$$script" || failed="$$failed $$script"; done; if [ "$$ran" -eq 0 ]; then printf '%s\n' "guards  : ERROR no scripts/check_*.py found" >&2; exit 1; fi; if [ -n "$$failed" ]; then printf '%s\n' "guards  : FAILED$$failed" >&2; exit 1; fi; printf '%s\n' "guards  : all $$ran guard(s) passed"
 
+# WHY a separate target for the layout gate: 'make guards' runs seven checks, five
+# of which want docker (compose parity, healthcontracts) and a populated env file,
+# so a developer who only moved a module waits for all of them to answer a question
+# about the tree. check_ml_boundary.py is the guard that owns the layout - it fails
+# on an ML library inside the API, on a modelling/ or cosmos_tokenizer/ directory
+# anywhere under backend/, and on a loose .py/.sh/.bat/.sql/.txt file at the
+# backend ROOT - and that is exactly the set a refactor needs to be told about.
+#
+# WHY it also globs scripts/check_*structure*.py: the layout rules will grow (the
+# refactor created backend/database/, backend/notebooks/ and backend/docs/ at
+# once), and a target with a hard-coded file list would silently stop covering a
+# guard that was added later. The glob means a new structure guard runs the day it
+# lands, with no Makefile edit and no chance to forget one.
+# WHY every shell variable is written "$$name" and not "$name": make expands a
+# single "$" ITSELF, and a bare "$script" is read as the make variable "$s"
+# followed by the literal text "cript". The recipe below therefore used to run
+# "[ -f cript ]" and "ran=)" - a raw shell syntax error that made this target
+# unusable, while "make guards" (whose recipe was already escaped) passed. Same
+# reason the arithmetic is "$$((ran + 1))": make would otherwise eat "$((".
+structure: _require-python
+	@set -e; ran=0; failed=""; for script in scripts/check_ml_boundary.py scripts/check_*structure*.py; do [ -f "$$script" ] || continue; ran=$$((ran + 1)); printf '%s\n' "---- $$script"; $(PYTHON) "$$script" || failed="$$failed $$script"; done; if [ "$$ran" -eq 0 ]; then printf '%s\n' "structure: ERROR no layout guard found (scripts/check_ml_boundary.py is missing)" >&2; exit 1; fi; if [ -n "$$failed" ]; then printf '%s\n' "structure: FAILED$$failed" >&2; exit 1; fi; printf '%s\n' "structure: all $$ran layout guard(s) passed"
+
 # WHY no "|| true": a lint that cannot fail holds nothing (R:\GPTHub\Makefile:337-340
 # makes the same argument). When pre-commit is missing this target FAILS with the
 # install command instead of reporting a success it never verified.
@@ -280,11 +304,12 @@ test: _require-python
 # WHY the tests run from the repository ROOT and not "cd ml": pytest infers
 # rootdir from the path argument (ml/tests -> ml) and reads the sidecar's own
 # [tool.pytest.ini_options] pythonpath from ml/pyproject.toml, so the module
-# directory is declared ONCE, by the submodule that owns it. Running from ml/
-# instead would change what "the same command as CI" means and would hide that
-# backend/ has to be reachable as a sibling for the import graph. A missing
-# pytest is reported, never swallowed: a test target that reports success while
-# running zero tests is a lie.
+# directory is declared ONCE, by the submodule that owns it - by the same
+# declaration the CI job and the developer's shell read. Running from ml/ would
+# give the same result and a different command than CI, which is how the two
+# drift. (The sidecar imports nothing from backend/ any more; the sibling
+# checkout is not what makes this work.) A missing pytest is reported, never
+# swallowed: a test target that reports success while running zero tests is a lie.
 ml-test: _require-python
 	@if [ ! -d ml/tests ]; then printf '%s\n' "ml-test : SKIP ml - ml/tests/ does not exist"; elif ! $(PYTHON) -c 'import pytest' >/dev/null 2>&1; then printf '%s\n' "ml-test : SKIP ml - pytest is not importable by $(PYTHON)" "          install it:  $(PYTHON) -m pip install pytest fastapi python-multipart"; else printf '%s\n' "ml-test : contract tests (no torch, no weights, no GPU)"; $(PYTHON) -m pytest ml/tests -q || exit 1; fi
 
@@ -319,7 +344,7 @@ ml-shell: env _require-docker
 # failures that look like "the site is down" and are invisible in ps.
 #
 # WHY not /api/health: the FastAPI app mounts routers at /server, /public and a
-# static /data (backend/src/pipeline/server.py:30-32) and declares no health route
+# static /data (backend/service/api/app.py) and declares no health route
 # anywhere, so /api/health 404s through a perfect proxy. The API chain is proven
 # with /api/openapi.json, which answers only if the gateway rewrote /api/ into
 # /server/ AND the backend is serving.

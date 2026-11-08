@@ -44,62 +44,69 @@ restart loop, which is worse than the original outage.
 | `503` | `status: "down"` — only from a dependency-aware endpoint that deliberately reports failure | Restart or alert. |
 | `502` | Gateway could not reach the upstream | Upstream is down; restart the upstream, not the gateway. |
 
-### 1.3 What exists today — GAP
+### 1.3 Where each health route actually lives
 
-```
-$ grep -RIn "health" backend/src/pipeline/server.py
-(no matches)
-```
+The shape in §1.1 is now implemented twice — once by the gateway as a static body, once by
+a real route in the API — and the two sidecars answer with their own. What each one
+promises is different, and the difference is the reason this section exists.
 
-**The backend has no health route.** It mounts `/server`, `/public` and `/data`
-(`backend/src/pipeline/server.py:30-32`) and nothing else. What exists instead:
+- **`GET /health`, at the root, served by the gateway itself.** A static
+  `{"status":"ok","service":"gateway"}` (`infra/nginx/templates/site.conf.template:60-64`),
+  `access_log off`, never proxied. It answers even when the backend is down, which is the
+  point: a liveness probe that fails because a *dependency* is down restarts the wrong
+  container. It does not carry `version` — adding one would mean rendering the gateway
+  image tag into the template, and the tag is already visible in `docker compose ps`. The
+  field is specified in §1.1 so that every endpoint agrees on the shape.
+- **`GET /server/health`, served by the API.** It returns the §1.1 body with
+  `service=backend` and `version` from the application's `__version__`, and it touches no
+  database: it answers while MySQL is down, which is what makes it a liveness probe
+  rather than an availability probe. It is registered on the `/server` sub-app, not on the
+  root app, so on the compose network it is `http://backend:8080/server/health` and
+  through the gateway it is `http://<host>:8088/api/health` — the `/api/` → `/server/`
+  rewrite of §3.1 applies to it like to every other API route
+  ([ARCHITECTURE.md §3.1](ARCHITECTURE.md#31-the-api-prefix-and-the-server-mount)).
+- **`GET /health`, served by `ml`.** The sidecar answers §1.1 exactly, with
+  `service=ml`, and `status` of `ok` or `degraded` — never `down`, because a live process
+  can still answer while a model is missing. It never loads a model, never touches a GPU
+  and never reads a volume. `GET /v1/capabilities` is the probe that tells you *what* is
+  missing, and it is the one to alert on. Canonical description:
+  [ml/README.md](../ml/README.md#http-contract).
+- **`GET /health`, served by the SPA container.** `frontend/nginx.conf` answers it
+  itself, so the static container reports healthy while the API restarts.
 
-- **`GET /health`, at the root, served by the gateway itself.** It returns a static
-  `{"status":"ok","service":"gateway"}` body (`infra/nginx/templates/site.conf.template:60-64`),
-  `access_log off`, and is never proxied. It answers even when the backend is down,
-  which is the point: a liveness probe that fails because a *dependency* is down restarts
-  the wrong container.
-- It does **not** carry `version`. Adding one would mean rendering the gateway image tag
-  into the template, and the tag is already visible in `docker compose ps`. The field
-  is specified above so that any future endpoint agrees on the shape.
-- Container health checks therefore use `GET /server/openapi.json` — served by FastAPI
-  itself, so a 200 proves the app imported and the router is up. It is heavier than a real
-  health route but it is honest: it fails exactly when the app fails.
-- `/api/health` does **not** exist. `/api/` is rewritten to `/server/`, so that
-  request would become `/server/health` and 404. Use `/health` at the root.
-- **The one service that implements this shape is the ml sidecar.** `GET /health` on
-`ml/service/app.py` returns exactly `{"status","service","version"}` with `service=ml`,
-  `version=1.0.0`, and `status` of `ok` or `degraded` — never `down`, because a
-  live process can still answer while a model is missing. It never loads a model, never
-  touches a GPU and never reads a volume, so it stays cheap exactly as §1.1 requires.
-  It answers 200 in both states by design: a probe that restarted the sidecar because
-  the weights are not mounted would turn a configuration error into a crash loop.
-  `GET /v1/capabilities` is the probe that tells you *what* is missing, and it is the
-  one to alert on. Canonical description: [ml/README.md](../ml/README.md#http-contract).
-- Adding a real `/server/health` route is an application change and outside this stack's
-  mandate. If one is added it must return the shape in §1.1 and must not touch the
-  database.
+The path is spelled `/server/health` and not `/health` on the API on purpose: the gateway
+does not proxy `/health`, and a second root health URL behind a prefix that the edge
+rewrites would be a route nobody can reach. `scripts/check_api_prefix_contract.py` asserts
+that the API prefix and the mounts agree, which is what keeps this honest.
 
-> Field naming is fixed: `status`, `service`, `version`, all lowercase, all strings,
-> no nesting. Three flat fields parse in every language and every probe framework; the
+**What the container probes do.** Both compose files and the images still probe the
+service with the endpoint each one can reach — the gateway with `/health`, the API with
+`/server/openapi.json` (a 200 proves the app object, including its `StaticFiles` mount,
+was constructed), the SPA with `wget http://localhost/health`, the sidecar with its own
+`/health`. Only the sidecar's probe is a §1.1 contract check; the others are transport
+checks, and §1.4 says what each of them actually proves.
+
+> Field naming is fixed: `status`, `service`, `version`, all lowercase, all strings, no
+> nesting. Three flat fields parse in every language and every probe framework; the
 > nested variants (`{"status":{"healthy":true}}`) do not.
 
 ### 1.4 The full inventory, and what each probe actually runs
 
-Twelve services per stack. Only `ml` implements §1.1; every other probe is either a
-transport check or a process check, and knowing which is which prevents the classic
-mistake of reading a green container as a working feature.
+Twelve services per stack. Two of them implement §1.1 — `ml` and the API's
+`/server/health` — and the gateway answers a static body of the same shape. Every other
+probe is either a transport check or a process check, and knowing which is which prevents
+the classic mistake of reading a green container as a working feature.
 
 | Service | Probe | What a green result actually proves |
 |---------|-------|--------------------------------------|
 | `gateway` | `curl -fsS http://localhost/health` | nginx is up and the config parsed. The body is static (`infra/nginx/templates/site.conf.template:60-64`), so it says nothing about the backend or the database. |
-| `backend` | `curl -fsS http://127.0.0.1:$SERVER_PORT/server/openapi.json` | The FastAPI process imported, the routers mounted and uvicorn is accepting. It does **not** touch MySQL or the weights. |
+| `backend` | `curl -fsS http://127.0.0.1:$SERVER_PORT/server/openapi.json` (the image's `HEALTHCHECK`), or `curl -fsS .../server/health` for the §1.1 body | The FastAPI process imported, the routers mounted and uvicorn is accepting. Neither probe touches MySQL, and only `/server/health` proves the §1.1 shape. |
 | `frontend` | `wget -qO- http://localhost` | The static server answers with the SPA shell. It does not prove the bundle can reach the API — that is a browser-console fact. |
 | `mysql` | `mysqladmin ping -h 127.0.0.1 -u$MYSQL_USER -p$MYSQL_PASSWORD --silent` | The server accepts authenticated connections. It does not prove the schema or the seed data exist ([RUNBOOK.md §8](RUNBOOK.md#8-database-initialization)). |
 | `cache` | `redis-cli ping` | Redis answers on its own port. It does not prove the application's `CACHE__BACKEND` points here — in prod the default is `memory`. |
 | `storage` | `mc ready local` | The MinIO server is ready to serve the alias. It does not prove the bucket exists or that `STORAGE__BACKEND=s3`. |
 | `ml` | `curl -fsS http://127.0.0.1:${ML_PORT}/health` | The sidecar is up and returned `ok` or `degraded`. `degraded` is a **passing** probe: weights are a deployment fact, not a liveness fact. |
-| `celery-worker-agents` | `celery -A src.workers.celery_app inspect ping -d celery@$HOSTNAME --timeout 10` | A worker process with that nodename answered a round trip **through the broker**, so it proves both the worker and Redis. |
+| `celery-worker-agents` | `celery -A service.infrastructure.messaging.celery_app inspect ping -d celery@$HOSTNAME --timeout 10` | A worker process with that nodename answered a round trip **through the broker**, so it proves both the worker and Redis. |
 | `celery-worker-maintenance` | same `inspect ping` | Same, for the maintenance queue. |
 | `celery-worker-ml` | same `inspect ping` | Same, for the ML queue. It proves the worker is alive, not that the GPU or the weights work — the first real task is what asks that. |
 | `celery-beat` | `test -s /tmp/celerybeat.pid && kill -0 $(cat /tmp/celerybeat.pid)` | The scheduler wrote its pid file and that pid is still alive. Deliberately no broker round trip: beat's job is to emit, and a broker outage shows up in the workers' probes instead of flapping beat. |
@@ -153,9 +160,9 @@ The application returns FastAPI's default error envelope, which is:
 That is, **`detail` alone, with no `error` code.** It matches the contract for exactly
 half of the fields. The behavior is at least consistent — the application raises
 `HTTPException(status_code=404, detail="Vacancy not found")` and similar across
-`src/services/` — so clients can rely on `detail` being present and being a string.
+`backend/service/services/` — so clients can rely on `detail` being present and being a string.
 
-Observed detail strings today (from `backend/src/`):
+Observed detail strings today (from `backend/service/`):
 
 | Status | Detail strings in use |
 |--------|-----------------------|
@@ -205,8 +212,8 @@ The codes the API actually uses, and what they mean for a client:
 | `200` | Success with a body | Parse it. |
 | `201` | Created (upload endpoints) | Read the returned object id. |
 | `400` | Malformed request or a rule violation the caller can fix — also the gateway's `bad_request` | Fix the request; do not retry unchanged. |
-| `401` | Missing, expired or invalid credentials — **or** insufficient access: `jwt_bearer.py` raises `401 Have not access` when a non-admin hits an admin route | Refresh the token, then retry once. |
-| `403` | The credentials are structurally wrong (`Invalid authentication scheme.`) or the token did not verify | Do not retry; re-authenticate from scratch. |
+| `401` | Missing, expired or invalid credentials — **or** insufficient access: `backend/service/api/security.py:52` raises `401 Have not access` when a non-admin hits an admin route | Refresh the token, then retry once. |
+| `403` | The credentials are structurally wrong (`Invalid authentication scheme.`) or the token did not verify — `backend/service/api/security.py:33-42` | Do not retry; re-authenticate from scratch. |
 | `404` | The addressed entity does not exist | Do not retry. |
 | `413` | Body exceeds the gateway limit (`client_max_body_size 500m`, `infra/nginx/nginx.conf:71`) | Shrink the upload. |
 | `422` | FastAPI request-validation failure (body/query schema) | Fix the payload. Not produced by hand-written `HTTPException`s. |
@@ -225,20 +232,20 @@ surface the error. This is a documented consequence of the code, not a design go
 Timeouts nest, and the innermost deadline must fire first so that the outer layer
 reports a specific error rather than a generic timeout. What the stack actually ships:
 
-Every `nginx.conf:<line>` below is `infra/nginx/nginx.conf` (the gateway's main config); `frontend/nginx.conf` is the static-file server inside the frontend image and is not part of this path.
+Every `infra/nginx/nginx.conf` reference below is the gateway's main config; `frontend/nginx.conf` is the static-file server inside the frontend image and is not part of this path.
 
 ```
 client / SPA axios               (no timeout configured — browser default)
-   └── gateway proxy_connect_timeout    7 s      nginx.conf:120
-   └── gateway proxy_send_timeout       86400 s  nginx.conf:121
-   └── gateway proxy_read_timeout       86400 s  nginx.conf:122
+   └── gateway proxy_connect_timeout    7 s      infra/nginx/nginx.conf:120
+   └── gateway proxy_send_timeout       86400 s  infra/nginx/nginx.conf:121
+   └── gateway proxy_read_timeout       86400 s  infra/nginx/nginx.conf:122
          └── backend handler work       (no explicit budget)
                ├── MySQL query          (no explicit budget)
                └── ML transport        connect 10 s / read 900 s
                                        ML_SERVICE_CONNECT_TIMEOUT / ML_SERVICE_TIMEOUT
-                                       (docker/.env.example:243,:247)
-   └── gateway client_body_timeout      10 s     nginx.conf:72
-   └── gateway client_header_timeout    10 s     nginx.conf:73
+                                       (docker/.env.example:265,:269)
+   └── gateway client_body_timeout      10 s     infra/nginx/nginx.conf:72
+   └── gateway client_header_timeout    10 s     infra/nginx/nginx.conf:73
 ```
 
 The read and send budgets are **24 hours, not 60 seconds**, on purpose: video embedding
@@ -273,17 +280,17 @@ Rules:
    security boundary.
 4. **Health checks get a budget that fits a slow start, not the shortest one.** The
    shipped probes are, in `docker/docker-compose.yaml`: backend
-   `interval 30s / timeout 10s / retries 5 / start_period 180s` (:262-270 — 180 s is now
+   `interval 30s / timeout 10s / retries 5 / start_period 180s` (:272-282 — 180 s is now
    headroom rather than a torch import, because the API image carries no GPU framework),
-   frontend `30s / 5s / 5` (:303-308), gateway `30s / 5s / 5` (:342-350), mysql
-   `10s / 5s / 10 / 60s` (:202-207), cache `10s / 5s / 5` (:363-368), storage
-   `30s / 10s / 3` (:393-398), **ml `30s / 10s / 5 / start_period 300s`** (:522-530 —
+   frontend `30s / 5s / 5` (:315-319), gateway `30s / 5s / 5` (:354-362), mysql
+   `10s / 5s / 10 / 60s` (:210-215), cache `10s / 5s / 5` (:375-379), storage
+   `30s / 10s / 3` (:405-409), **ml `30s / 10s / 5 / start_period 300s`** (:538-546 —
    the slow starter: the first request downloads Hugging Face weights into `hf_cache`
    and then creates a CUDA context), the three celery workers
-   `60s / 20s / 3 / 60s` (:604-609, :646-651, :698-703), celery-beat
-   `60s / 10s / 3 / 60s` (:741-746) and mailpit `15s / 10s / 5 / 10s` (:778-785).
+   `60s / 20s / 3 / 60s` (:617-622, :659-664, :712-717), celery-beat
+   `60s / 10s / 3 / 60s` (:755-760) and mailpit `15s / 10s / 5 / 10s` (:792-799).
    A dev stack relaxes the backend to `interval 15s / start_period 60s`
-   (`docker/docker-compose.dev.yaml:163`, `:166`) while the sidecar keeps its 300 s.
+   (`docker/docker-compose.dev.yaml:194`, `:197`) while the sidecar keeps its 300 s.
    A probe with a 2–3 s budget would mark a healthy container dead during its very first
    start, which is why the two slow starters — the backend's MySQL wait and the
    sidecar's model load — get the loosest budgets in the stack.

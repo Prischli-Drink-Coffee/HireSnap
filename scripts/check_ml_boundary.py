@@ -17,26 +17,37 @@ can see that - ruff does not know which imports are architecturally forbidden an
 the compose guards read YAML, not Python - so the rule has to be executable.
 
 The scan uses ast, not a grep. A grep would fire on every comment that explains
-the rule (this file's own docstring, backend/src/services/ml_client.py's history)
+the rule (this file's own docstring, backend/service/services/ml_client.py's history)
 and would miss nothing else; a real import, including one nested inside a
 function - which is exactly how the in-process fallback is written - is an
 ImportFrom node and cannot hide from the parser.
 
 WHAT IS ASSERTED, for backend/
 --------------------------------
-  1. FAIL  a module under src/ imports a GPU/ML library (torch, torchvision,
+  1. FAIL  a module under service/ imports a GPU/ML library (torch, torchvision,
            torchaudio, torchmetrics, torcheval, transformers,
            sentence_transformers, moviepy, librosa, cosmos_tokenizer) or the
            deleted src.modelling package.
-  2. FAIL  backend/requirements.txt or requirements_platform.txt names one of
+  2. FAIL  backend/requirements.txt or requirements-platform.txt names one of
            those distributions - an installed dependency is how the next inline
            import gets written, and it puts torch's download size and CVE surface
            into a service that only serves HTTP.
-  3. FAIL  src/modelling/ or cosmos_tokenizer/ still exists.
-  4. WARN  src/services/ml_client.py still carries an in-process transport
+  3. FAIL  a directory named modelling/ or cosmos_tokenizer/ exists ANYWHERE
+           under backend/, not only at the two paths the move emptied. A file
+           named after the old location is the easy case; the expensive one is
+           backend/service/modelling/ quietly growing back in the new tree, and
+           a check that only knows the old paths would watch it do so.
+  4. WARN  service/services/ml_client.py still carries an in-process transport
            (a fallback that imports the ML stack locally). That fallback is the
            one path that can silently re-link the API against torch, so it must
            stay explicit and visible rather than quietly deleted from the check.
+  5. FAIL  the backend ROOT holds a loose .py/.sh/.bat/.sql/.txt file outside a
+           short documented allowlist (pyproject.toml, requirements*.txt,
+           README/LICENSE). This is the assertion that stops the pile from
+           growing back: the layout puts code in service/, scripts in scripts/,
+           the schema in database/ and assets in docs/, so a module sitting at
+           the root is a file that was never placed. It is reported by path so
+           the fix is a move, not an argument.
 
 Tests are excluded from the import scan: a test may legitimately assert that
 "importing the route module does not import torch", and the only way to write
@@ -60,6 +71,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -67,23 +79,66 @@ from pathlib import Path
 CHECK = "ml-boundary"
 ROOT = Path(__file__).resolve().parent.parent
 BACKEND = Path("backend")
-BACKEND_SRC = BACKEND / "src"
+# The ONLY importable package. The refactor replaced the src/ tree wholesale, so
+# every path in this file that used to end in src/ now ends in service/ - see the
+# module docstring for why the layout is a rule and not a preference.
+BACKEND_SRC = BACKEND / "service"
 
-# Directories whose mere existence is a violation: their content is the ML stack
-# that now lives in ml/. A list of (path, where the content belongs) so the
-# failure message can say where it went instead of only naming the offender.
-DELETED_TREES = [
-    (
-        BACKEND_SRC / "modelling",
-        "ml/service/ - the inference modules moved to the sidecar",
-    ),
-    (
-        BACKEND / "cosmos_tokenizer",
-        "ml/ - the tokenizer is a model dependency of the sidecar",
-    ),
+# Directory NAMES that must not exist anywhere under backend/, keyed by name and
+# carrying where the content belongs. Deliberately not a list of the two paths the
+# move emptied: the expensive regression is not backend/src/modelling coming back,
+# it is backend/service/modelling appearing BESIDE the new tree, and a check that
+# only knows the old location would watch that happen and report a pass.
+FORBIDDEN_DIR_NAMES = {
+    "modelling": "ml/service/ - the inference modules moved to the sidecar",
+    "cosmos_tokenizer": "ml/ - the tokenizer is a model dependency of the sidecar",
+}
+
+# Directories that are not part of the layout and would make the walk slow or
+# noisy. Pruned, never descended into.
+WALK_SKIP_DIRS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "node_modules",
+    "venv",
+}
+
+# Loose files the backend ROOT is allowed to keep. Everything else with one of the
+# extensions below belongs in a subdirectory: code in service/, entry points in
+# scripts/, the schema in database/, assets in docs/. Each entry is here because a
+# tool demands that exact path - packaging and lint configuration are read from the
+# project root, and README/LICENSE are conventions no tool can relocate - and the
+# list is kept tiny on purpose: a generous allowlist is a guard that documents the
+# mess it permits.
+ROOT_FILE_ALLOWLIST = {
+    ".dockerignore",
+    ".gitattributes",
+    ".gitignore",
+    ".pre-commit-config.yaml",
+    "LICENSE",
+    "README.md",
+    "pyproject.toml",
+}
+ROOT_FILE_PATTERNS = [
+    # requirements.txt, requirements-platform.txt / requirements_platform.txt (the
+    # separator has been spelled both ways: docs/ARCHITECTURE.md writes the hyphen
+    # and the checked-in file uses the underscore, and the Dockerfile ARGs point at
+    # whichever the file is actually called), and any future requirements-*.
+    re.compile(r"^requirements([._-][A-Za-z0-9._-]+)?\.txt$"),
+    re.compile(r"^LICENSE(\..*)?$"),
+    re.compile(r"^README(\..*)?$"),
 ]
+# Only these extensions make a root file "loose code". A .toml or a .md at the root
+# is configuration or prose; a .py, a shell script, a .bat, the schema dump or a
+# .txt is something that should have a home, and .txt is included because that is
+# how a stray note or a stray requirements copy starts.
+LOOSE_ROOT_SUFFIXES = {".py", ".sh", ".bat", ".sql", ".txt"}
 
-# Top-level module names that must not be importable from backend/src.
+# Top-level module names that must not be importable from backend/service.
 # torchmetrics and torcheval are listed even though the ticket named only torch:
 # they are torch-only packages, so importing one is the same violation with a
 # different spelling, and a guard that has to be edited the first time somebody
@@ -103,6 +158,7 @@ FORBIDDEN_MODULES = {
 
 DELETED_PACKAGES = {
     "src.modelling": "the deleted backend ML package (now ml/service/)",
+    "service.modelling": "the deleted backend ML package (now ml/service/)",
 }
 
 # Distributions that must not appear in a hand-maintained requirements file.
@@ -126,7 +182,11 @@ FORBIDDEN_DISTRIBUTIONS = {
 # fix, and failing on it would only teach people to skip the guard.
 HAND_MAINTAINED_REQUIREMENTS = [
     BACKEND / "requirements.txt",
-    BACKEND / "requirements_platform.txt",
+    # Renamed from requirements_platform.txt in the same refactor that moved
+    # src/ to service/: the hyphen is what the GPTHub layout uses, and a
+    # requirements file that the image no longer installs is a file that can
+    # carry torch for months without anybody noticing.
+    BACKEND / "requirements-platform.txt",
 ]
 GENERATED_REQUIREMENTS = [
     BACKEND / "docker" / "requirements.lock.txt",
@@ -140,6 +200,7 @@ INPROCESS_MARKERS = [
     "in-process",
     "in process",
     "src.modelling",
+    "service.modelling",
     "local fallback",
 ]
 
@@ -227,19 +288,115 @@ def rel(path):
         return str(path).replace("\\", "/")
 
 
-def deleted_tree_for(path):
-    """Return the DELETED_TREES entry containing path, or None."""
-    for relative, _reason in DELETED_TREES:
-        try:
-            path.relative_to(ROOT / relative)
-        except ValueError:
-            continue
-        return relative
+def forbidden_dir_for(path):
+    """Return the forbidden directory NAME that path sits under, or None."""
+    for part in path.parts:
+        if part in FORBIDDEN_DIR_NAMES:
+            return part
     return None
 
 
+def scan_forbidden_dirs(report):
+    """Fail on any modelling/ or cosmos_tokenizer/ directory anywhere under backend/.
+
+    WHY the walk covers the whole subtree instead of the two paths the refactor
+    emptied: the move deleted backend/src/modelling and backend/cosmos_tokenizer,
+    and checking those two paths proves only that the deletion happened. The
+    regression that costs money is the next copy - backend/service/modelling/
+    grown back beside the new tree, or an inference helper vendored under
+    backend/tests/fixtures - and a path-based check would report a pass while the
+    API links torch again. The walk is pruned of caches and virtualenvs so it stays
+    fast on a working checkout.
+    """
+    base = ROOT / BACKEND
+    if not base.is_dir():
+        report.skips.append(
+            rel(base) + " does not exist, so no deleted tree could be checked."
+            " NOT a pass."
+        )
+        return
+    found = []
+    for current, dirnames, _filenames in os.walk(base):
+        dirnames[:] = sorted(name for name in dirnames if name not in WALK_SKIP_DIRS)
+        for name in dirnames:
+            if name in FORBIDDEN_DIR_NAMES:
+                found.append(Path(current) / name)
+    if not found:
+        report.ok.append(
+            "no modelling/ or cosmos_tokenizer/ directory exists anywhere under "
+            + rel(base)
+        )
+        return
+    for path in found:
+        reason = FORBIDDEN_DIR_NAMES[path.name]
+        members = sorted(item.name for item in path.iterdir())[:4] if path.is_dir() else []
+        shown = ", ".join(members) + ("..." if len(members) >= 4 else "")
+        report.failures.append(
+            rel(path) + "/ still exists (" + shown + "). Its content belongs in "
+            + reason + ". Two copies of the inference code is worse than either one"
+            " alone: the API keeps the torch dependency and the copies drift"
+            " (docs/KNOWN_GAPS.md)"
+        )
+
+
+def scan_backend_root(report):
+    """Fail on loose .py/.sh/.bat/.sql/.txt files at the backend ROOT.
+
+    WHY this exists at all: the layout is the rule. Code lives in service/,
+    entry points in scripts/, the schema in database/, assets in docs/. A module
+    sitting at the root is a file nobody placed, it is invisible to the package
+    imports and to ruff's configured source root, and it is exactly how the old
+    tree accumulated env.py, create_sql.py, main.sh, setup.sh and a second copy
+    of the schema dump. The allowlist is short because a generous one documents
+    the mess it permits: packaging and lint configuration MUST be at the project
+    root, and README/LICENSE are conventions no tool will relocate.
+
+    Every offending path is printed in its own [FAIL] line - a message that says
+    "3 loose files" leaves the reader to guess which three, and the fix is a move
+    per file.
+    """
+    base = ROOT / BACKEND
+    if not base.is_dir():
+        report.skips.append(
+            rel(base) + " does not exist, so its root files were not checked."
+            " NOT a pass."
+        )
+        return
+    loose = []
+    for path in sorted(base.iterdir()):
+        if not path.is_file():
+            continue
+        name = path.name
+        if name in ROOT_FILE_ALLOWLIST:
+            continue
+        if any(pattern.match(name) for pattern in ROOT_FILE_PATTERNS):
+            continue
+        if path.suffix.lower() in LOOSE_ROOT_SUFFIXES:
+            loose.append(path)
+    if not loose:
+        report.ok.append(
+            "the root of " + rel(base) + " holds no loose .py/.sh/.bat/.sql/.txt"
+            " file (only the documented allowlist: project config, requirements,"
+            " README/LICENSE)"
+        )
+        return
+    for path in loose:
+        report.failures.append(
+            rel(path) + " is a loose file at the root of " + rel(base) + ". The"
+            " layout gives every kind of file a home - code in service/, entry"
+            " points in scripts/, the schema dump in database/, images and"
+            " documents in docs/ - so a root file is a file that was never placed."
+            " It is outside the package imports and outside the linters'"
+            " configured roots, which is how the old tree accumulated env.py,"
+            " create_sql.py, main.sh, setup.sh and a stale copy of the schema."
+            " Move it (or, if a tool demands that exact root path, add it to"
+            " ROOT_FILE_ALLOWLIST in scripts/check_ml_boundary.py with the reason)"
+            " (AGENTS.md, docs/PLATFORM_LAYER.md)"
+        )
+
+
 def source_files():
-    """Every .py file under backend/src, tests excluded, deterministically ordered."""
+    """Every .py under backend/service, tests excluded, deterministically ordered."""
     base = ROOT / BACKEND_SRC
     if not base.is_dir():
         return []
@@ -257,16 +414,16 @@ def source_files():
 def dotted_from_relative(level, module, file_path):
     """Resolve "from ..x import y" against the file's own package path.
 
-    backend/src/services/ml_client.py lives in package src.services, so level 1
-    (a single dot) means src.services.<module> and level 2 means src.<module>.
-    Without this, "from . import modelling" would slip past a check that only
-    looks at absolute import names.
+    backend/service/services/ml_client.py lives in package service.services, so
+    level 1 (a single dot) means service.services.<module> and level 2 means
+    service.<module>. Without this, "from . import modelling" would slip past a
+    check that only looks at absolute import names.
     """
     try:
         parts = list(file_path.relative_to(ROOT / BACKEND_SRC).parts[:-1])
     except ValueError:
         parts = []
-    package = ["src"] + parts
+    package = [BACKEND_SRC.name] + parts
     drop = level - 1
     if drop > 0:
         package = package[: len(package) - drop] if drop < len(package) else []
@@ -647,23 +804,11 @@ def main():
     args = parser.parse_args()
     report = Report()
 
-    # --- 1. deleted trees must stay deleted --------------------------------
-    for relative, reason in DELETED_TREES:
-        path = ROOT / relative
-        if not path.is_dir():
-            report.ok.append(rel(path) + "/ is gone")
-            continue
-        names = sorted(item.name for item in path.iterdir())
-        shown = ", ".join(names[:4]) + ("..." if len(names) > 4 else "")
-        report.failures.append(
-            rel(path) + "/ still exists (" + shown + "). Its content belongs in "
-            + reason + ". Two copies of the inference code is worse than either one"
-            " alone: the API keeps the torch dependency and the copies drift"
-            " (docs/KNOWN_GAPS.md)"
-        )
+    # --- 1. the deleted trees must stay deleted everywhere -----------------
+    scan_forbidden_dirs(report)
 
-    # --- 2. no ML imports under backend/src --------------------------------
-    files = [path for path in source_files() if deleted_tree_for(path) is None]
+    # --- 2. no ML imports under backend/service ----------------------------
+    files = [path for path in source_files() if forbidden_dir_for(path) is None]
     if not files:
         report.skips.append(
             rel(ROOT / BACKEND_SRC)
@@ -698,7 +843,7 @@ def main():
             report.failures.append(
                 rel(path) + ":" + str(lineno) + " imports " + dotted + " (" + reason
                 + ")" + extra + ". ML work is the sidecar's job: the API must call"
-                " its HTTP routes (backend/src/services/ml_client.py), not link the"
+                " its HTTP routes (backend/service/services/ml_client.py), not link"
                 " library. This is the boundary, not a style preference - an"
                 " in-process model turns a GPU OOM into an API outage"
                 " (docs/KNOWN_GAPS.md)"
@@ -740,6 +885,14 @@ def main():
 
     # --- 5. the in-process fallback must remain visible --------------------
     scan_inprocess_client(report)
+
+    # --- 6. the backend root is a layout, not a shelf ----------------------
+    # LAST, after the import scan, because a loose root file is also a file the
+    # import scan never reached: service/ is the only package, so anything at the
+    # root is dead weight no reviewer is looking at. Reporting it after the
+    # boundary violations keeps the summary ordered by cost - first "the API links
+    # torch again", then "somebody dropped a script at the root".
+    scan_backend_root(report)
 
     return report.emit(args.json)
 

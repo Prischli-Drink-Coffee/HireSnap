@@ -6,9 +6,9 @@ the routing comment in R:\GPTHub\infra\nginx\templates\site.conf.template:40-52)
 
   The public API path is decided in THREE files that never import each other:
 
-    frontend/src/API/apiConsts.js   requests go to  <base>/api/...
+    frontend/src/shared/api/apiConsts.js   requests go to  <base>/api/...
     infra/nginx/templates/site.conf.template  rewrites /api/(.*) -> /server/$1
-    backend/src/pipeline/server.py  app.mount("/server", app_server)
+    backend/service/api/app.py   app.mount("/server", app_server)
 
   Nothing in the codebase forces those three strings to stay consistent, and the
   failure is quiet in the worst way: nginx answers 404 for an unrouted prefix, the
@@ -18,14 +18,15 @@ the routing comment in R:\GPTHub\infra\nginx\templates\site.conf.template:40-52)
 
   This guard reads all three and refuses to let them drift. It is deliberately a
   PARSER, not an import: importing apiConsts.js would need Node and a DOM, and
-  importing server.py would drag in torch.
+  importing the FastAPI app would drag in the database, the mailer and the whole
+  service package - the guard exists to be runnable on a bare interpreter.
 
 What is asserted:
   1. the browser-facing prefix is exactly /api/ (the value in apiConsts.js and the
      default of REACT_APP_BASE_URL in the compose file must be the same string);
   2. the gateway rewrites that exact prefix to the backend mount, preserving the
      tail ($1), and the backend mount is exactly what the rewrite targets;
-  3. the backend actually mounts that path in server.py;
+  3. the backend actually mounts that path in the API app module;
   4. the gateway exposes the FastAPI documentation under the same prefix, because
      a rewrite that drops /api/docs makes Swagger UI 404 even though the API works;
   5. /data/ is proxied unchanged (the backend mounts StaticFiles at /data, so any
@@ -45,8 +46,18 @@ from pathlib import Path
 CHECK = "api-prefix-contract"
 ROOT = Path(__file__).resolve().parent.parent
 
-FRONTEND_CONSTS = Path("frontend/src/API/apiConsts.js")
-BACKEND_SERVER = Path("backend/src/pipeline/server.py")
+FRONTEND_CONSTS = Path("frontend/src/shared/api/apiConsts.js")
+# Where the mount table can live in the refactored backend. The layout puts the
+# FastAPI app in service/api/app.py and the process entry point in
+# service/main.py; a mount written in either one is the same contract, and the
+# guard reads every candidate that exists rather than betting on one. If the app
+# is split later (a root app mounting a sub-app), the mounts it needs to see are
+# still found, and a guard that silently read the wrong file would report a pass
+# for a prefix nobody serves.
+BACKEND_SERVER_CANDIDATES = [
+    Path("backend/service/api/app.py"),
+    Path("backend/service/main.py"),
+]
 NGINX_TEMPLATE = Path("infra/nginx/templates/site.conf.template")
 COMPOSE_PROD = Path("docker/docker-compose.yaml")
 
@@ -201,19 +212,25 @@ def main():
 
     # --- 3. backend mount --------------------------------------------------
     backend_mounts = []
-    server = read(BACKEND_SERVER, report, "FastAPI mount table")
-    if server is not None:
-        backend_mounts = [match.group("path") for match in MOUNT.finditer(strip_comments(server))]
-        if not backend_mounts:
-            report.failures.append(
-                str(BACKEND_SERVER) + " declares no app.mount(...) call, so the"
-                " router has no public prefix for the gateway to target"
-            )
-        else:
-            report.ok.append(
-                "backend mounts: " + ", ".join(backend_mounts)
-                + " (" + str(BACKEND_SERVER) + ")"
-            )
+    mount_sources = []
+    for candidate in BACKEND_SERVER_CANDIDATES:
+        server = read(candidate, report, "FastAPI mount table")
+        if server is None:
+            continue
+        mount_sources.append(str(candidate))
+        for match in MOUNT.finditer(strip_comments(server)):
+            if match.group("path") not in backend_mounts:
+                backend_mounts.append(match.group("path"))
+    if mount_sources and not backend_mounts:
+        report.failures.append(
+            ", ".join(mount_sources) + " declare no app.mount(...) call, so the"
+            " router has no public prefix for the gateway to target"
+        )
+    elif backend_mounts:
+        report.ok.append(
+            "backend mounts: " + ", ".join(backend_mounts)
+            + " (" + ", ".join(mount_sources) + ")"
+        )
 
     # --- 4. gateway rewrite ------------------------------------------------
     template = read(NGINX_TEMPLATE, report, "gateway routing table")

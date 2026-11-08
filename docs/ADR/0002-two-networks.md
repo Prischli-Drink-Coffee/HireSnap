@@ -12,11 +12,11 @@ Twelve containers need to talk to each other and to the outside world in differe
 |---|---|---|---|---|
 | `gateway` | always | host | `backend`, `frontend` | `default`, `internal` |
 | `frontend` | always | `gateway` | nothing | `default` |
-| `backend` | always | `gateway` | `mysql`, `ml`, and the internet (Hugging Face model downloads on first use) | `default`, `internal` |
+| `backend` | always | `gateway` | `mysql`, `ml` — and nothing else; it holds no model code | `default`, `internal` |
 | `mysql` | always | `backend` | nothing | `internal` |
 | `cache` | `cache` | `backend`, the celery workers | nothing | `internal` |
 | `storage` | `storage` | `backend`, the celery workers | nothing | `internal` |
-| `ml` | `ml` | `backend` | nothing (weights are mounted, not fetched) | `internal` |
+| `ml` | `prod`, `dev` | `backend`, the celery workers | the internet: Hugging Face weights on first use, the only downloads in the stack | `default`, `internal` |
 | `celery-worker-agents`, `celery-worker-maintenance`, `celery-worker-ml`, `celery-beat` | `celery` | nothing (they pull from Redis) | nothing | `internal` |
 | `mailpit` | `mail` | `backend`, the `agents` worker | nothing | `internal` |
 
@@ -25,17 +25,19 @@ Twelve containers need to talk to each other and to the outside world in differe
 **Two networks with different egress behavior:**
 
 - `internal` — `bridge` + `internal: true`, therefore **no route to the internet**
-  (`docker/docker-compose.yaml:703-705`). Members: `mysql`, `backend`, `gateway`,
+  (`docker/docker-compose.yaml:824-826`). Members: `mysql`, `backend`, `gateway`,
   `cache`, `storage`, `ml`, the three celery workers, `celery-beat` and `mailpit`.
-- `default` — a normal bridge with NAT egress (`:698-699`). Members: `gateway`,
-  `frontend`, `backend`.
+- `default` — a normal bridge with NAT egress (`:823-824`). Members: `gateway`,
+  `frontend`, `backend`, `ml`.
 
-Two services are dual-homed. `backend` needs egress (Hugging Face downloads on first
-use) and is reached by the gateway; `gateway` needs the host publication that only
-`default` carries and must resolve `backend`, `frontend` and `ml` by name. `frontend`
-is the only service on `default` alone — it serves static files and reaches nothing.
-Every optional service sits on `internal` only, so a profile that is switched on adds
-no new egress path (see the table above for the per-service membership).
+Three services are dual-homed. `backend` is reached by the gateway and calls `ml`, and it
+no longer needs egress of its own because the model downloads left the tree with the
+pipeline; `gateway` needs the host publication that only `default` carries and must
+resolve `backend`, `frontend` and `ml` by name; `ml` is reached by `backend` and must be
+able to download a model on a host whose cache is empty. `frontend` is the only service
+on `default` alone — it serves static files and reaches nothing. Every optional service
+sits on `internal` only, so a profile that is switched on adds no new egress path (see the
+table above for the per-service membership).
 
 ## Rationale
 
@@ -50,20 +52,22 @@ no new egress path (see the table above for the per-service membership).
    misconfiguration surfaces as a fast error in the logs rather than a 30-second stall
    inside a request.
 3. **Two networks are cheap.** Docker networks are virtual bridges; the cost is a second
-   IP per attached container. Only `backend` and `gateway` pay it, and both have to be
-   dual-homed anyway: the backend because it needs egress *and* is reached by a sibling,
-   the gateway because it carries the host publication *and* is the only route to
-   `backend`, `frontend` and `ml`.
+   IP per attached container. Only `backend`, `gateway` and `ml` pay it, and each has to
+   be dual-homed anyway: the backend because it answers the gateway *and* calls the
+   sidecar, the gateway because it carries the host publication *and* is the only route
+   to `backend`, `frontend` and `ml`, the sidecar because it is reached by the API *and*
+   fetches a model on a host whose cache is still empty.
 4. **It documents the architecture.** Reading the compose file tells you which tier a
    service belongs to. A service missing from `internal` is a bug that is visible by
    inspection, not a runtime discovery.
 
-The backend keeps egress because it downloads model weights on first use
-(`facebook/wav2vec2-large-960h-lv60-self`,
-`dima806/facial_emotions_image_detection`) and because it must be reachable from the
-gateway. In an air-gapped deployment the model cache is pre-seeded at image build time
-and the backend could move fully onto `internal` — that is a deliberate future option,
-not the default, because the default must work on a machine that has internet.
+The sidecar, not the backend, is the service that keeps egress: it downloads
+`facebook/wav2vec2-large-960h-lv60-self` and `dima806/facial_emotions_image_detection`
+on first use. The backend is dual-homed only because it must answer the gateway and call
+`ml`. In an air-gapped deployment the model cache is pre-seeded (`hf_cache` is a named
+volume, and the images can be shipped with it filled) and `ml` could move fully onto
+`internal` — a deliberate future option, not the default, because the default must work
+on a machine that has internet.
 
 ## Alternatives rejected
 
@@ -86,18 +90,18 @@ not the default, because the default must work on a machine that has internet.
   A service that needs no outgoing traffic but is missing from `internal` is a bug: the
   boundary was drawn in the wrong place.
 
-- A profile service lands on `internal` only, deliberately. `ml` exposes
-  unauthenticated endpoints (`/v1/embed/video` costs a GPU minute), so keeping it off
-  `default` means it is never reachable from a network that has a published port
-  (`docker/docker-compose.yaml:467-472`). The compose files state this per service rather
-  than relying on a default.
-- The trade-off is that `ml` cannot fetch anything at request time, so both kinds of
-  model have to arrive another way: the torch checkpoints are bind-mounted from
-  `infra/models/` (`docker/docker-compose.yaml:435-436`), and the Hugging Face models
-  arrive through the `hf_cache` named volume, which `backend` and `ml` share while only
-  `backend` has egress (`:138` and `:443`). That is the concrete reason the cache is a
-  shared volume rather than a per-container directory: it is the one channel by which a
-  no-egress sidecar can be given a model that was downloaded once.
+- `ml` is the one service whose dual attachment is load-bearing rather than incidental.
+  It exposes unauthenticated endpoints (`/v1/embed/video` costs a GPU minute), so it
+  publishes no port on either network: being on `default` lets it resolve and be resolved
+  inside the compose project, not from the host (`docker/docker-compose.yaml:562-563`).
+  The compose files state membership per service rather than relying on a default.
+- Because `ml` downloads its own weights, the two host directories are mounted into it
+  and nowhere else: the torch checkpoints from `infra/models/`
+  (`docker/docker-compose.yaml:520-521`) and the Hugging Face cache through the `hf_cache`
+  named volume, which only `ml` mounts (`:525`). Before the split the API mounted the same
+  two directories and also held the cache, because it could run the pipeline itself. With
+  the in-process path gone the API opens no model file, so the mount moved with the code
+  (`docker/docker-compose.yaml:132-137`).
 
 - `docker compose exec` into `mysql` still works — the internal network restricts
   egress, not the Docker control plane.

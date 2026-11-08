@@ -236,12 +236,20 @@ jobs:
         with:
           python-version: "3.9"
 
-      # No `pip install -r requirements.txt` here. That file pulls torch and the
-      # ML stack - multi-gigabyte, and unavailable for the CUDA build on a
-      # runner. The checks below are chosen so that they are still real without
-      # those dependencies: syntax and the pyflakes fatal set need no imports.
+      # WHY requirements.txt IS installed here (it was not, before the refactor):
+      # the old file carried the whole ML stack, so installing it on a runner
+      # meant torch and CUDA wheels. The refactor moved inference to the ml
+      # sidecar and requirements.txt is now GPU-free by construction - the file
+      # says so in its own header, and installing it is the cheapest way to prove
+      # that claim instead of trusting the comment. If a torch pin reappears,
+      # this step gets slow and the regression is visible.
+      - name: Install runtime dependencies
+        run: python -m pip install -r requirements.txt
+
+      # A syntax error in a module nothing imports yet is still a broken commit,
+      # and compileall catches it without importing anything.
       - name: Compile every module
-        run: python -m compileall -q src
+        run: python -m compileall -q service
 
       - name: Install ruff
         run: python -m pip install "ruff==0.14.1"
@@ -254,16 +262,81 @@ jobs:
       # are comparisons, break/continue and undefined names - i.e. code that is
       # broken. Widening this selection is a follow-up, not a wish.
       #
-      # --exclude "*.ipynb" keeps the exploratory notebooks out: a NameError in a
-      # cell no image ever executes is not a defect of the service, and the flag is
-      # IDENTICAL to the one in .pre-commit-config.yaml so the two gates report the
-      # same number instead of drifting by seven.
+      # The scope is `service`, the importable package. It was `src` before the
+      # refactor; the old tree is deleted, and a step still linting src would
+      # report "no files" and pass (measured: ruff exits 0 with a warning when the
+      # path holds no Python). `backend/notebooks/`, `backend/tests/` and
+      # `backend/data/` are outside the scope on purpose.
+      # WHY there is no --exclude "*.ipynb" any more: ruff 0.15 DOES parse notebook
+      # cells (measured: 7 F821 in the old backend/src/stuff/*.ipynb), and the flag
+      # existed only because those cells contributed 7 of 18 findings. The
+      # notebooks now live outside the package, so the flag has nothing to hide.
+      # This command is IDENTICAL to the one in .pre-commit-config.yaml, so the two
+      # gates cannot report different numbers.
       - name: Ruff (fatal rules only)
-        run: ruff check --select E9,F63,F7,F82 --exclude "*.ipynb" src
+        run: ruff check --select E9,F63,F7,F82 service
 
-      # `--ignore` keeps the ML test suite (if any appears later) out of the way:
-      # it needs weights and a GPU, and a test that requires those does not belong
-      # in a push-gate (docs/KNOWN_GAPS.md). `-q` keeps the log readable.
+      # THE IMPORT PROOF, and why it is a step of its own. The refactor's
+      # strongest claim is that importing the app opens no MySQL connection and
+      # pulls in no GPU framework (docs/ARCHITECTURE.md:229-232, ADR/0007).
+      # Asserting that in a comment is how it decays: the first helpful
+      # `import torch` at module scope, or a `pymysql.connect` evaluated while the
+      # module is being imported, breaks the API image - and every existing check
+      # still passes, because nothing imports the app in CI.
+      #
+      # WHAT IS PROVEN, and what is deliberately NOT:
+      #   * an import of torch/torchvision/... at import time FAILS the step. The
+      #     API image installs none of them (requirements.txt header), so this is
+      #     the deployment fact, not a style preference.
+      #   * pymysql.connect is replaced by a function that raises, so a connection
+      #     opened while importing is caught. The DRIVER ITSELF stays importable on
+      #     purpose: importing a driver opens no socket, and a check that forbade
+      #     it would fail on a design nobody called wrong.
+      #   * scripts/check_ml_boundary.py owns the static side of the same rule
+      #     (module-scope ML imports anywhere under service/), so the two agree.
+      - name: Import the app without torch and without opening MySQL
+        run: |
+          python - <<'PY'
+          import importlib.abc
+          import sys
+
+          BLOCKED = ("torch", "torchvision", "torchaudio", "transformers",
+                     "sentence_transformers", "moviepy", "librosa")
+
+
+          class Blocker(importlib.abc.MetaPathFinder):
+              """Refuses the ML stack, the way the API image does by omission."""
+
+              def find_spec(self, name, path=None, target=None):
+                  if name.split(".")[0] in BLOCKED:
+                      raise ImportError("imported " + name + " while importing the app")
+                  return None
+
+
+          class Refuse:
+              """Stands in for pymysql: any connection attempt is a failure."""
+
+              @staticmethod
+              def connect(*args, **kwargs):
+                  raise RuntimeError("a MySQL connection was opened at import time")
+
+
+          sys.meta_path.insert(0, Blocker())
+          try:
+              import pymysql
+          except ImportError:
+              pass
+          else:
+              pymysql.connect = Refuse.connect
+
+          import service.api.app as app_module
+
+          assert getattr(app_module, "app", None) is not None, "service.api.app exposes no app"
+          print("service.api.app imported; no ML import, no MySQL connection")
+          PY
+
+      # The suite is the service's own contract; it does not need a database or a
+      # GPU (docs/KNOWN_GAPS.md). `-q` keeps the log readable.
       - name: Pytest
         run: |
           if [ ! -d tests ]; then
@@ -390,10 +463,17 @@ jobs:
                                    ' tests would collect nothing and pass')
           PY
 
-      # The tests run from the repository ROOT, not from ml/: engine.py reaches
-      # shared code through the sibling backend/ checkout (present because
-      # checkout uses submodules: recursive), and the gateway/health contract the
-      # suite asserts is the one compose wires up from the root.
+      # The tests run from the repository ROOT, not from ml/. Two reasons, and the
+      # first one is the load-bearing one: ml/pyproject.toml sets testpaths and
+      # pythonpath, so pytest infers the same rootdir here as it does for
+      # `make ml-test` and for a developer in the root - one invocation, three
+      # callers. The second is that the gateway/health contract the suite asserts
+      # is the one compose wires up from the root.
+      #
+      # ml/ imports NOTHING from backend/ (measured: `grep -rn 'sys.path' ml/service`
+      # is empty and the modules import each other as bare top-level names), so
+      # this job would still pass with backend/ absent. checkout uses
+      # submodules: recursive because the OTHER jobs need it, not this one.
       - name: Contract tests
         run: python -m pytest ml/tests -q
 

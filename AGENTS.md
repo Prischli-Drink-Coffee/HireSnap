@@ -1,16 +1,27 @@
 HireSnap is a Git superproject. Product code lives in three submodules that are also
 valid standalone checkouts:
 
-- `backend/` — FastAPI application (Python 3.9) and **business logic only**. The server
-  entry point is `src/pipeline/server.py`; it mounts a `/server` FastAPI app, a `/public`
-  app, and a static `/data` directory on the root app. Persistence is raw PyMySQL against
-  MySQL (`src/database/`), business logic in `src/services/` and `src/repository/`,
-  config in `src/config.yaml` and `src/logging.yaml`. It contains **no** GPU framework:
-  inference is an HTTP call to `ml/` (`src/services/ml_client.py`), and
-  `scripts/check_ml_boundary.py` fails a commit that puts torch back in here.
-- `frontend/` — Create React App (react-scripts 5.0.1, React 18, Chakra UI). The axios
-  instance is `src/API/instance.js`; the API base URL is hardcoded in
-  `src/API/apiConsts.js`.
+- `backend/` — FastAPI application (Python 3.9) and **business logic only**, arranged as a
+  package rather than a script tree. `service/main.py` is the entry point: it configures
+  logging, optionally bootstraps the schema, and hands the ASGI callable to uvicorn
+  (`python -m service.main` from `backend/`). The app is built by
+  `service/api/app.py`, which mounts a `/server` FastAPI sub-app, an empty `/public` app
+  and a static `/data` directory on the root app; the twelve route modules live in
+  `service/api/routers/`. Rules sit in `service/services/`, SQL in
+  `service/repositories/`, swappable I/O (cache, storage, mail, database, celery) in
+  `service/infrastructure/`, configuration in `service/configuration/`, models in
+  `service/domain/` and cross-cutting helpers in `service/shared/`. Persistence is raw
+  PyMySQL against MySQL. It contains **no** GPU framework: inference is an HTTP call to
+  `ml/` (`service/services/ml_client.py`), and `scripts/check_ml_boundary.py` fails a
+  commit that puts torch back in here.
+- `frontend/` — Create React App (react-scripts 5.0.1, React 18, Chakra UI) with a
+  purpose-based tree: `src/app/` holds the router and providers, `src/pages/` the screens,
+  `src/shared/` components, hooks, utils and the one API layer, and `src/theme/` the
+  Chakra theme. `jsconfig.json` sets `baseUrl` to `src`, so imports are absolute from
+  `src/` and no file climbs with `../../../`. The axios instance is
+  `src/shared/api/instance.js` and the API base URL is resolved in
+  `src/shared/api/apiConsts.js`. The router is a **hash** router (`createHashRouter`),
+  because the bundle is static files behind nginx with no SPA fallback for deep paths.
 - `ml/` — the inference sidecar (Python 3.9, FastAPI, CUDA image) and the **owner of the
   model code**, in the flat layout the other sidecars use: `service/app.py` is the whole
   HTTP surface (`/health`, `/v1/capabilities`, `/v1/embed/video`, `/v1/embed/text`,
@@ -79,17 +90,24 @@ Backend, inside `backend/`:
   its remaining block and floats the rest, so a rebuild can still resolve different
   versions. `backend/docker/requirements.lock.txt` is a fully pinned **snapshot** of it
   (not a resolved lock: no hashes, no transitive closure) and is what the image installs
-  when `REQUIREMENTS_FILE` is overridden. `backend/requirements_platform.txt` is a
+  when `REQUIREMENTS_FILE` is overridden. `backend/requirements-platform.txt` is a
   separate, short list (celery, redis, boto3) needed only by worker or S3 images. See
   `docs/KNOWN_GAPS.md` §4 and §15.
-- `python3 src/pipeline/server.py` — run the server locally (reads `backend/.env`,
-  requires `HOST`, `SERVER_PORT`, `DEBUG`, `DB*`, `DATA_PATH`, and the JWT expiry keys).
+- `python -m service.main` — run the server locally from `backend/` (reads
+  `backend/.env` through `service/configuration/env.py`). It needs `HOST`,
+  `SERVER_PORT`, `DEBUG`, `DB__*`, `DATA_PATH`, the two JWT path keys
+  (`JWT_PRIVATE_KEY_PATH`, `JWT_PUBLIC_KEY_PATH`). `INIT_DB` makes it create the schema
+  on boot, but only when `DEBUG` is also true: the schema bootstrap is a developer
+  convenience, not a startup step. `--reload` is likewise driven by `DEBUG`.
 
 Frontend, inside `frontend/`:
 
 - `npm ci && npm start` — dev server on port 3000.
-- `npm test`, `npm run build` — unit tests (Jest via react-scripts) and the production
-  bundle. The bundle is static output in `build/`, served by nginx in the image.
+- `npm test` (Jest via react-scripts), `npm run lint` (`eslint src --ext .js,.jsx`),
+  `npm run find:unreachable` (fails if a file under `src/` imports nothing) and
+  `npm run build` — the production bundle, static output in `build/`, served by nginx
+  in the image. The build is deliberately not a lint gate: `CI=true` would turn every
+  ESLint warning into a build error.
 
 ML sidecar, inside `ml/`:
 
@@ -98,25 +116,36 @@ ML sidecar, inside `ml/`:
   nothing here reaches into `../backend/`. Run it from `ml/` (or with `ml/service` on
   `PYTHONPATH`), never from the superproject root — the old `ML_BACKEND_ROOT` shim is
   gone and `scripts/check_ml_boundary.py` fails a commit that brings it back.
-- `python -m pytest tests -q` — the contract tests, from inside `ml/`. They must pass
-  with **no** torch, no weights and no GPU: `/health` answering `degraded` is a passing
-  state, and a test that needs a CUDA device belongs in a manual check, not here.
+- `make ml-test` — the contract tests, and the form all three callers agree on: the
+  Makefile target, the CI job and the docs all run `python -m pytest ml/tests -q` from
+  the **repository root** (`Makefile:306-307`, `.github/workflows/ci.yml:471`). `cd ml &&
+  python -m pytest tests -q` gives the same result, because `ml/pyproject.toml` sets
+  `pythonpath = ["service"]` and `testpaths = ["tests"]`; running from the root is
+  preferred so `backend/tests/` fixtures cannot leak in. They must pass with **no**
+  torch, no weights and no GPU: `/health` answering `degraded` is a passing state, and a
+  test that needs a CUDA device belongs in a manual check, not here.
 - `ml/README.md` is the canonical description of the routes, the request shapes and
   the error registry. When a route changes, that file and `ml/tests/test_contract.py`
   change in the same commit as `ml/service/app.py`.
 
 ## Coding Style & Naming Conventions
 
-Python targets 3.9, four-space indentation. Keep route handlers thin — `server.py`
-should validate and delegate; queries belong in `src/repository/`, rules in
-`src/services/`. Use the existing `Env` helper (`backend/env.py`) for configuration
-instead of reading `os.environ` directly, so that behavior stays consistent with how
-the container injects values. Logging goes through `src/utils/custom_logging.py`.
+Python targets 3.9, four-space indentation. Keep route handlers thin — the modules in
+`service/api/routers/` validate the request and delegate; SQL belongs in
+`service/repositories/`, rules in `service/services/`, and swappable I/O in
+`service/infrastructure/`. A module may import downward (api → services → repositories →
+infrastructure) and never back up. Use the `Env` helper
+(`service/configuration/env.py`) for configuration instead of reading `os.environ`
+directly, so behavior stays consistent with how the container injects values, and take
+loggers from `service/configuration/logging.py` (`get_logger`) instead of calling
+`logging.getLogger` yourself.
 
 React uses function components, two-space indentation, and `.jsx` for components.
-Reuse Chakra primitives and `src/theme.js` tokens rather than hard-coded colors.
-Network calls go through `src/API/instance.js` — do not create a second axios client
-with its own base URL.
+Reuse Chakra primitives and `src/theme/theme.js` tokens rather than hard-coded colors.
+Network calls go through `src/shared/api/instance.js` and the route table in
+`src/shared/api/apiConsts.js` — do not create a second axios client with its own base
+URL. Import from the `src/` root (`shared/components/...`), never by climbing out of
+the current directory.
 
 Shell and Python files are LF-only; `.gitattributes` enforces this. A CRLF
 `#!/bin/bash` breaks container entrypoints with `bash\r: No such file or directory`.
@@ -125,9 +154,12 @@ Shell and Python files are LF-only; `.gitattributes` enforces this. A CRLF
 
 Place backend tests under `backend/tests/` as `test_*.py`. Frontend unit tests live
 beside the code as `*.test.js` (CRA convention) — `src/App.test.js` is the existing
-example. Add regression coverage when you touch auth (`src/utils/jwt_bearer.py`),
-upload handling (`src/utils/write_file_into_server.py`), or URL construction
-(`src/utils/return_url_object.py`), because those paths are shared by every screen.
+example. Add regression coverage when you touch auth (`service/api/security.py`),
+upload handling (`service/infrastructure/uploads.py`), the ML boundary
+(`service/services/ml_client.py`), or URL construction (`service/shared/urls.py`),
+because those paths are shared by every screen. Backend tests import the package, not a
+script: `conftest.py` puts `backend/` on the path, so `python -m pytest -q` from
+`backend/` is the whole command.
 
 Keep assertions deterministic: do not depend on network access, on pretrained model
 weights, or on a live MySQL instance in unit tests. Integration behavior against the
@@ -152,11 +184,13 @@ exists because the alternative silently loses work.
   relevant service test command).
 - `make guards` runs the `scripts/check_*.py` set — env-manifest parity, compose
   integrity, api-prefix contract, dockerfile pinning, healthcheck coverage, generated
-  state — and fails on the first violation it finds. `make lint` is a different gate: it
-  runs `pre-commit run --all-files`, which invokes those same guards plus the
-  formatting, YAML/JSON, gitleaks and large-file hooks. Both are required before a PR;
-  `make lint` fails loudly when `pre-commit` is not installed instead of reporting an
-  unverified success.
+  state, the ML boundary — and fails on the first violation it finds. `make structure`
+  is the cheap subset for a move inside the tree: `scripts/check_ml_boundary.py` plus any
+  `scripts/check_*structure*.py`, no docker and no env file needed. `make lint` is a
+  different gate: it runs `pre-commit run --all-files`, which invokes those same guards
+  plus the formatting, YAML/JSON, gitleaks and large-file hooks. Both are required before
+  a PR; `make lint` fails loudly when `pre-commit` is not installed instead of reporting
+  an unverified success.
 
 ## Where Generated State Lives
 
@@ -165,9 +199,9 @@ exists because the alternative silently loses work.
 | `docker/.env.dev`, `docker/.env.prod` | Local copies of the manifest with real values | Yes — regenerate with `python docker/sync_env.py --mode dev` (or `--mode prod`) |
 | named volume `mysql_data` (`mysql_data_dev` in dev) | **The database.** InnoDB data directory | **No** — and `docker compose down -v` deletes it |
 | `infra/storage/` | Uploaded videos and `.npy` embeddings (bind mount at `/app/data`) | **No** — user data |
-| `infra/certs/` | JWT RSA key pair, mounted read-only at `/app/src/certs` | **No** — all issued tokens become invalid |
+| `infra/certs/` | JWT RSA key pair, mounted read-only at `/app/secrets/certs`; `backend/service/certs/` is only the bare-checkout fallback | **No** — all issued tokens become invalid |
 | `infra/models/` | `weights/` and `pretrained_ckpts/`, mounted read-only | **No** — multi-gigabyte, licence-bound, not re-downloadable |
-| `infra/logs/` | `app.log` written by `src/logging.yaml` (bind mount at `/app/logs`) | Yes, but read it first — it is the post-mortem |
+| `infra/logs/` | `app.log` written by `service/configuration/logging.py` (bind mount at `/app/logs`) | Yes, but read it first — it is the post-mortem |
 | named volume `hf_cache` | Hugging Face model cache | Yes — re-downloaded on next use |
 | `docker/.run-state/` | Template fingerprints written by `run.sh` | Yes |
 | `frontend/build/` | CRA production bundle | Yes — rebuilt by the image |
@@ -180,4 +214,4 @@ delete your data, while `docker compose down -v` does.
 Bind mounts under `infra/` are the ones a human must be able to see (uploads) or that must
 survive a container recreate (keys, weights, logs). Everything a database engine touches
 directly lives in a named volume, because a Windows bind-mounted datadir has NTFS-over-9p
-semantics that InnoDB does not tolerate (`docker/docker-compose.yaml:47-57`).
+semantics that InnoDB does not tolerate (`docker/docker-compose.yaml:178-184`).

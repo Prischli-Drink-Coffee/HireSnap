@@ -73,17 +73,30 @@
 /urls.txt
 
 # Model weights and the vendored Cosmos tokenizer checkpoints. Multi-GB,
-# licence-bound, and mounted read-only into the `ml` profile — never source.
+# licence-bound, and mounted read-only into the ml sidecar — never source.
+#
+# SCOPE. The entries below cover the superproject's own trees - and that is
+# enough for the mounted material, because infra/models/ is protected by the
+# /infra/models/ rule above. They cannot reach inside a service checkout, since a
+# gitlink records one commit and stages no file; the authoritative lists there are
+# backend/.gitignore and ml/.gitignore. A pattern that only looks like a guard is
+# worse than none, so this says which one actually fires.
 src/weights
 pretrained_ckpts
 **/pretrained_ckpts/
 
 # ── Secrets material that must be generated on the host ─────────────────────
-# The backend reads RSA keys from src/certs (backend/src/database/models.py:29-30).
-# They are generated locally (docs/SECRETS.md); committing them would let anyone
-# mint valid access tokens against this deployment.
+# The backend reads the RSA pair through JWT_PRIVATE_KEY_PATH / JWT_PUBLIC_KEY_PATH
+# (docker/.env.example section 3), which the stack mounts from infra/certs into
+# /app/secrets/certs. Any keypair generated IN PLACE inside a service checkout -
+# the shape the fallback path (service/certs, derived from
+# service/domain/models.py's __file__) would create - must never be committed:
+# it would let anyone mint valid access tokens against this deployment. The pair
+# is generated on the host (docs/SECRETS.md).
 src/certs
 **/src/certs/
+service/certs
+**/service/certs/
 
 # ── Build output and dependencies, root level only ──────────────────────────
 node_modules/

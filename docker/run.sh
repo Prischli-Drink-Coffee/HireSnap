@@ -334,10 +334,10 @@ action_exec() {
 # The schema loader in infra/mysql/init/00-init.sh runs from
 # /docker-entrypoint-initdb.d, and the mysql image executes that directory ONLY
 # when the data directory is EMPTY - i.e. on the very first start of a fresh
-# volume. A developer who edits HireSnap.sql and re-runs 'up' therefore sees no
+# volume. A developer who edits the dump and re-runs 'up' therefore sees no
 # change and concludes the loader is broken. Say it out loud instead.
 print_schema_init_hint() {
-    log_info "schema : loaded from backend/HireSnap.sql ONLY on a fresh MySQL volume"
+    log_info "schema : loaded from backend/database/HireSnap.sql ONLY on a fresh MySQL volume"
     log_info "         (existing volume => loader is a documented no-op; see docs/RUNBOOK.md)"
     log_info "         re-initialise: dump first, then '$0 --$MODE down -v' and 'up'"
 }

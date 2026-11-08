@@ -66,7 +66,7 @@ server {
     # ---- API contract ------------------------------------------------------
     # Three pieces must agree, and check_api_prefix_contract.py asserts it:
     #   * the browser calls "<origin>/api/..." (frontend REACT_APP_BASE_URL=/api/,
-    #     backend/src/pipeline/server.py:25-32 mounts the API app at /server);
+    #     backend/service/api/app.py mounts the API app at /server);
     #   * this server strips /api/ and re-adds /server/ before proxying;
     #   * the backend therefore sees /server/users/ and answers.
     #

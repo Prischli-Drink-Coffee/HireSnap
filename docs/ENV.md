@@ -22,7 +22,7 @@ docker/.env.example ──sync_env.py --mode dev|prod──▶ docker/.env.dev |
                                         │
                                      container env
                                         │
-                     backend/env.py  load_dotenv + os.environ
+              service/configuration/env.py  load_dotenv + os.environ
                                         │
                              Env().__getattr__("DB_HOST")
 ```
@@ -45,11 +45,11 @@ Three rules follow from that chain:
    Reference: `R:\GPTHub\docker\compose_preflight.sh:10-15`, which additionally
    refuses to echo raw compose diagnostics because they can contain dotenv values.
 3. **The application has no defaults of its own.** `Env.__getattr__`
-   (`backend/env.py:30-36`) raises `AttributeError` for any missing name. A missing
+   (`backend/service/configuration/env.py:42-48`) raises `AttributeError` for any missing name. A missing
    variable is a startup crash, not a runtime surprise — which is the behavior you
    want, but it means every key below marked *required* must be present even if the
    feature is unused. **The platform layer and the sidecar are the exception, and
-   deliberately so**: `backend/src/infra/*.py`, `backend/src/workers/*.py` and
+   deliberately so**: `backend/service/infrastructure/*.py` and
    `ml/service/settings.py` read `os.environ` with a default for every key, because a
    missing `CACHE__REDIS_URL` must degrade to the in-memory backend rather than abort
    the boot. No key in that layer is ever mandatory, and §8 marks which is which.
@@ -85,39 +85,62 @@ start unless the Notes column says otherwise.
 
 | Key | Meaning | Dev | Prod | Notes |
 |-----|---------|-----|------|-------|
-| `HOST` | Bind address for uvicorn, and the host half of absolute media URLs built by `return_url_object`. | `0.0.0.0` | `0.0.0.0` | Read at `server.py:1082`, which is why it must not be `127.0.0.1` — see §3.1. |
+| `HOST` | Bind address for uvicorn, and the host half of absolute media URLs built by the URL helper. | `0.0.0.0` | `0.0.0.0` | Read in `run_server()` (`backend/service/main.py:58-69`) and passed to `uvicorn.run`, which is why it must not be `127.0.0.1` — see §3.1. |
 | `SERVER_PORT` | In-container port for uvicorn **and** the port half of those URLs. | `8080` | `8080` | Keep `8080`: the gateway upstream and the image healthcheck hardcode it. Changing the host-side publish does not change this. |
-| `DEBUG` | `"TRUE"` or `"FALSE"`, upper case, compared as a string. | `TRUE` | `FALSE` | Any other value raises `Exception("Not init debug mode in env file")` at `server.py:1081`. `TRUE` enables uvicorn reload **and** the schema-creating `CreateSQL` run. |
-| `INIT_DB` | Operator intent: "initialise the schema on start". | `false` | `false` | **Not read by the application.** The code only self-initialises when `DEBUG=TRUE` (`server.py:1091`); this key is a reviewable declaration that `run.sh` reports on and cannot override the gate. See [KNOWN_GAPS.md](KNOWN_GAPS.md#6-schema-creation-only-happens-when-debugtrue). |
-| `DATA_PATH` | Absolute directory for uploads, embeddings and `tables/` CSVs. | `/app/data` | `/app/data` | Bind-mounted from `infra/storage`. The two must agree. Used at `write_file_into_server.py:15` and `create_sql.py:19`. |
-| `PUBLIC_BASE_URL` | Externally reachable origin used for media URLs by the patched `return_url_object`. | `http://localhost:8088` | `https://<real host>` | `${PUBLIC_BASE_URL:?...}` — required at compose level. Optional to the *code*: when it is absent the helper falls back to `http://${HOST}:${SERVER_PORT}`. |
+| `DEBUG` | `"TRUE"` or `"FALSE"`, upper case, compared as a string. | `TRUE` | `FALSE` | Any other value raises `RuntimeError: DEBUG must be TRUE or FALSE, got ...` in `_debug_flag()` (`backend/service/main.py:40-47`). `TRUE` enables uvicorn reload **and** is one of the two gates on the schema-creating `CreateSQL` run. |
+| `INIT_DB` | Operator intent: "initialise the schema on start". | `false` | `false` | Read (truthy values `1`/`true`/`yes`/`on`, `os_env_flag()` at `backend/service/main.py:82-86`) but only as an **AND** with `DEBUG`: the bootstrap runs when `DEBUG=TRUE` **and** `INIT_DB` is truthy (`backend/service/main.py:72-79`). It cannot override the `DEBUG` gate. See [KNOWN_GAPS.md](KNOWN_GAPS.md#6-schema-creation-only-happens-when-debugtrue). |
+| `DATA_PATH` | Absolute directory for uploads, embeddings and `tables/` CSVs. | `/app/data` | `/app/data` | Bind-mounted from `infra/storage`. The two must agree. Used at `backend/service/infrastructure/uploads.py:15` (also `:31-35`) and `backend/service/infrastructure/database/schema.py:23`. |
+| `PUBLIC_BASE_URL` | Externally reachable origin used for media URLs by the patched URL helper (`backend/service/shared/urls.py`). | `http://localhost:8088` | `https://<real host>` | `${PUBLIC_BASE_URL:?...}` — required at compose level. Optional to the *code*: when it is absent the helper falls back to `http://${HOST}:${SERVER_PORT}`. |
 
 ### 3.1 `HOST` and `SERVER_PORT` are overloaded
 
-The unpatched `return_url_object` (`backend/src/utils/return_url_object.py:8-9`) builds
+The unpatched helper (now `backend/service/shared/urls.py:8-9`) builds
 media URLs from the same two variables uvicorn binds with. Setting `HOST=0.0.0.0` — the
 only sane bind address in a container — makes every returned media URL point at
 `http://0.0.0.0:8080/...`, which a browser cannot resolve. The stack does not paper over
 this by binding to a public address; it sets `PUBLIC_BASE_URL`, which the patched helper
-prefers (`backend/src/utils/return_url_object.py:16-21`), and keeps the unpatched
+prefers (`backend/service/shared/urls.py:16-20`), and keeps the unpatched
 `HOST:SERVER_PORT` fallback intact so a standalone checkout behaves exactly as before. This is recorded in
 [KNOWN_GAPS.md](KNOWN_GAPS.md#2-media-urls-are-built-from-the-bind-address).
 
-### 3.2 `CORS_ALLOW_ORIGINS` — declared, not consumed
+### 3.2 `CORS_ALLOW_ORIGINS` — consumed, and the wildcard/credentials rule
 
-`CORS_ALLOW_ORIGINS` is a JSON list (`["https://hiresnap.example.com"]` in the
-manifest) that records the origins this deployment intends to allow. The application
-does **not** read it: `backend/src/pipeline/server.py:34-40` passes a literal
-`allow_origins=["*"]` to `CORSMiddleware`. The key exists so that the intended policy is
-reviewable in the manifest and so that the change that makes the app read it is a
-one-line diff in the deployment file rather than an archaeology exercise. A deployment
-that needs a real origin allow-list has to patch `server.py` — see
-[KNOWN_GAPS.md](KNOWN_GAPS.md).
+`CORS_ALLOW_ORIGINS` is the one place a browser origin allow-list can be set without
+touching code. It is read by `_cors_settings()`
+(`backend/service/api/app.py:92-142`), whose return value is splatted into
+`CORSMiddleware` from `create_app()` at `backend/service/api/app.py:178-183`
+(`**_cors_settings()` at `:182`). The gateway proxies; it does not filter by `Origin`, so
+this key is the enforcement point.
 
-Because every browser request in this stack is same-origin through the gateway
-(`/` and `/api/` are the same host and port), the wildcard is not exploitable from
-the shipped frontend; it is the open-DNS-rebinding surface that the key's absence of a
-reader leaves unclosed.
+| Value | `allow_origins` | `allow_credentials` |
+|-------|-----------------|---------------------|
+| unset, blank, `*`, `["*"]` or `[]` | `["*"]` | **`False`** |
+| JSON array, e.g. `["https://a.example","https://b.example"]` | those two | `True` |
+| comma list, e.g. `https://a.example, https://b.example` | same, trimmed, empty parts dropped | `True` |
+| malformed JSON, e.g. `[not json` | `["*"]` after a `WARNING` | `False` |
+
+Two consequences follow, and both are deliberate:
+
+1. **A wildcard never carries credentials.** A browser rejects
+   `Access-Control-Allow-Origin: *` together with `Access-Control-Allow-Credentials: true`,
+   and Starlette emits both if asked. The pre-refactor code shipped exactly that illegal
+   pair, so a credentialed cross-origin request never actually worked; the resolver stops
+   pretending rather than widening anything. This application authenticates with a Bearer
+   header rather than a cookie, so the wildcard branch is survivable — it is just not the
+   branch to deploy.
+2. **An explicit list is the configuration to use.** It keeps the legal credentialed
+   pairing and it is what the manifest ships
+   (`CORS_ALLOW_ORIGINS=["https://hiresnap.example.com"]`, `docker/.env.example:112`).
+
+A malformed value degrades to the wildcard with a warning instead of raising: a typo in a
+variable must not make the API unimportable. The whole table is pinned by
+`backend/tests/test_cors_settings.py` (nine tests, including an end-to-end assertion that
+`create_app()` really hands the resolved value to `CORSMiddleware`).
+
+The manifest comment block (`docker/.env.example:99-111`) says the same thing in the place
+an operator will read it first. Background in
+[ARCHITECTURE.md §6](ARCHITECTURE.md#6-configuration-flow) and
+[KNOWN_GAPS.md §11](KNOWN_GAPS.md#11-cors-is-open-by-default-and-the-wildcard-cannot-carry-credentials).
 
 ## 4. Backend — database
 
@@ -134,7 +157,8 @@ reader leaves unclosed.
 file groups (`DB__`), the container receives flat names (`DB_HOST`), and the compose
 `environment:` block is the single place where the two meet.
 
-Read at `backend/src/database/my_connector.py:12-20` and `backend/create_sql.py:22-29`.
+Read at `backend/service/infrastructure/database/connection.py:58-65` and
+`backend/service/infrastructure/database/schema.py:22-33`.
 
 MySQL **server-side** variables, consumed by the `mysql` service rather than the app:
 
@@ -155,21 +179,21 @@ See [RUNBOOK.md §10](RUNBOOK.md#11-rotating-the-database-password).
 
 | Key | Meaning | Required | Dev | Prod |
 |-----|---------|----------|-----|------|
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | Lifetime of an access token, minutes. Parsed as `int` at import (`models.py:15`). | yes | `15` | `15` |
-| `REFRESH_TOKEN_EXPIRE_DAYS` | Lifetime of a refresh token, days. `int` at `models.py:16`. | yes | `7` | `7` |
-| `JWT_ALGORITHM` | Algorithm name documented next to the keys. The code hardcodes `"RS256"` (`models.py:43`), so this key records the contract; an HS256 value here does not change the algorithm. | yes | `RS256` | `RS256` |
-| `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH` | Mount targets inside the container, not host paths. The code resolves its own paths relative to `src/database/` (`models.py:29-30`); these two keys document the mount and must match it. | yes | `/app/src/certs/…` | same |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | Lifetime of an access token, minutes. Parsed as `int` at import (`backend/service/domain/models.py:61-63`). | yes | `15` | `15` |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | Lifetime of a refresh token, days. `int` at `backend/service/domain/models.py:64-66`. | yes | `7` | `7` |
+| `JWT_ALGORITHM` | Algorithm name documented next to the keys. **No code reads it today**: the token layer hardcodes `RS256` (`backend/service/domain/models.py:101` `algoritm: str = "RS256"`, used at `backend/service/shared/tokens.py:49` and `:73`), so an HS256 value here changes nothing. It records the contract and is a candidate for deletion. | yes | `RS256` | `RS256` |
+| `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH` | Mount targets inside the container, not host paths. These two keys **win** when set and non-empty (`backend/service/domain/models.py:37-48`); the fallback when both are unset is `backend/service/certs/`, which is what a bare checkout uses. | yes | `/app/secrets/certs/…` | same |
 
 Both are read at **import time**, not per request: an invalid value prevents the process
 from starting at all, and a change requires a container restart.
 
 The signing keys are **not** environment variables — they are files:
 
-- `infra/certs/jwt-private.pem` → `/app/src/certs/jwt-private.pem`
-- `infra/certs/jwt-public.pem` → `/app/src/certs/jwt-public.pem`
+- `infra/certs/jwt-private.pem` → `/app/secrets/certs/jwt-private.pem`
+- `infra/certs/jwt-public.pem` → `/app/secrets/certs/jwt-public.pem`
 
-Paths are resolved at `backend/src/database/models.py:29-30`; the algorithm is fixed to
-`RS256` in `models.py:43`. Generation and rotation are covered in
+Paths are resolved at `backend/service/domain/models.py:37-48`; the algorithm is fixed to
+`RS256` in the token layer. Generation and rotation are covered in
 [SECRETS.md](SECRETS.md).
 
 ## 6. Frontend
@@ -177,6 +201,7 @@ Paths are resolved at `backend/src/database/models.py:29-30`; the algorithm is f
 | Key | Meaning | Required | Dev | Prod |
 |-----|---------|----------|-----|------|
 | `REACT_APP_BASE_URL` | API base URL baked into the bundle at **build** time. | no | `/api/` | `/api/` |
+| `DADATA_TOKEN` | Reserved client token for the company-lookup autocomplete. Handed to the image as `REACT_APP_DADATA_TOKEN`. **Read by no code today** — the supplier form that used it was deleted with the dead-UI cleanup — but the plumbing is kept wired. | no | empty | empty |
 
 This one deserves an explicit warning. CRA inlines `REACT_APP_*` into the bundle **at
 build time**, so the value is frozen into the JavaScript — changing it requires a rebuild,
@@ -184,8 +209,8 @@ not a restart. A leftover `http://localhost:8080` in a production bundle would s
 user's browser to *their own machine*: the classic "works for me, broken for everyone"
 failure. That is why the manifest ships `/api/` for both modes.
 
-The patched `frontend/src/API/apiConsts.js:14-44` resolves the base URL in three steps,
-first match wins:
+The patch now lives in `frontend/src/shared/api/apiConsts.js:22-47`, which resolves the
+base URL in three steps, first match wins:
 
 1. `process.env.REACT_APP_BASE_URL`, trimmed and forced to end in exactly one `/`;
 2. `window.location.origin + "/api/"` whenever the bundle is served from a non-loopback
@@ -194,6 +219,21 @@ first match wins:
 
 So the key is live but never mandatory: an empty value falls through to the same-origin
 path. See [ADR/0003-nginx-rewrites.md](ADR/0003-nginx-rewrites.md).
+
+`DADATA_TOKEN` is the opposite case: **reserved and wired end to end, read by nothing.**
+The chain is complete — `docker/.env.example:192` declares it, the prod compose file passes
+it as the build argument `REACT_APP_DADATA_TOKEN: ${DADATA_TOKEN:-}`
+(`docker/docker-compose.yaml:312`; dev injects it as a runtime variable at
+`docker/docker-compose.dev.yaml:223`), and `frontend/docker/Dockerfile:102-103` declares
+`ARG REACT_APP_DADATA_TOKEN=` with an empty default and re-exports it as `ENV` (the
+rationale sits above it at `frontend/docker/Dockerfile:90-101`) — but no
+module reads `process.env.REACT_APP_DADATA_TOKEN`. Measured after the frontend restructure,
+`grep -rn process.env frontend/src` returns one hit, `REACT_APP_BASE_URL` in
+`frontend/src/shared/api/apiConsts.js:16`; the supplier requisites form that consumed the
+token was unreachable dead code and was deleted (`docs/KNOWN_GAPS.md` §24 keeps the history,
+because the old value is still valid at the issuer until it is rotated). The plumbing is kept
+deliberately, so reviving the lookup needs no Dockerfile or compose change; **empty is the
+normal value**, and the build must never fail for a missing token.
 
 ## 7. Gateway (nginx)
 
@@ -237,8 +277,8 @@ does not work:
    **host** requirement — a machine without `nvidia-container-toolkit` fails to start the
    container instead of starting it degraded — which is why it is opt-in and not a profile.
 - **Platform flags** are *code paths inside the API image*. They are read with
-  `os.environ.get(NAME, default)` by `backend/src/infra/*.py`,
-  `backend/src/workers/*.py` and `ml/service/settings.py`, always accept **both** the
+   `os.environ.get(NAME, default)` by `backend/service/infrastructure/*.py` and
+   `ml/service/settings.py`, always accept **both** the
   nested (`CACHE__BACKEND`) and the flat (`CACHE_BACKEND`) spelling, and every one of them
   is **optional**: a missing key falls back to a default instead of raising, which is the
   opposite of the rule in §1.
@@ -248,8 +288,8 @@ starts lying:
 
 | Layer | Wired to the request path? |
 |-------|----------------------------|
-| ML transport (`backend/src/services/ml_client.py`) | **Yes, always** — `main_services.upload_video` calls `get_user_embedding`, and the client is HTTP-only, so there is no flag to get wrong and no in-process branch to fall back to |
-| cache, storage, mail and jobs facades (`backend/src/infra/*`, `jobs_services`) | **No** — complete and tested, used by the worker tasks, but no route calls them yet ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)) |
+| ML transport (`backend/service/services/ml_client.py`) | **Yes, always** — `upload_video()` calls `get_user_embedding` (`backend/service/services/matching.py:202`), and the client is HTTP-only, so there is no flag to get wrong and no in-process branch to fall back to |
+| cache, storage, mail and jobs facades (`backend/service/infrastructure/*`, `service/services/jobs.py`) | **No** — complete and tested, used by the worker tasks, but no route calls them yet ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)) |
 
 > **Where these keys live today.** All of them are manifest keys, in sections 11-15 of
 > `docker/.env.example`: **89 keys in total, the four profile switches included** (there is
@@ -298,7 +338,7 @@ The `redis:7.2-alpine` container itself needs **no keys**: no password, no publi
 port, `--save 60 1 --loglevel=warning`, on the internal (no-egress) network only.
 
 The *client* side is configured inside the API image and inside every worker, because both
-inherit the same YAML anchor (`x-backend-env`, `docker/docker-compose.yaml:58-116`):
+inherit the same YAML anchor (`x-backend-env`, `docker/docker-compose.yaml:64-125`):
 
 | Key | Default | Effect when set |
 |-----|---------|-----------------|
@@ -343,11 +383,11 @@ The facade keys:
 
 **`STORAGE=1` starts MinIO but does not flip `STORAGE__BACKEND`, and that asymmetry
 is deliberate.** The upload path still writes through
-`src/utils/write_file_into_server.py` into `DATA_PATH`, while the worker side reads
+`backend/service/infrastructure/uploads.py` into `DATA_PATH`, while the worker side reads
 through this facade. Flipping the backend to `s3` while the upload path stays local
 would write uploads to a bind mount and then look for them in MinIO — a split brain that
 fails one task at a time, days later. The compose anchor says so at
-`docker/docker-compose.yaml:79-88`. Switching it is a one-line change, a separate
+`docker/docker-compose.yaml:94`. Switching it is a one-line change, a separate
 decision from starting the container.
 
 **What breaks without it:** nothing today — no API route calls the facade. Once one does,
@@ -371,7 +411,7 @@ place the model stack lives ([ADR/0006](ADR/0006-ml-sidecar-owns-inference.md)).
 The keys split in two, and the split is the point: the manifest keeps the **double
 underscore** nesting spelling, and the compose `environment:` block of the `ml` service is
 the single translation point to the **flat** names `ml/service/settings.py` reads
-(`docker/docker-compose.yaml:448-490`). A key that reached the sidecar as `ML__PORT` would
+(`docker/docker-compose.yaml:464-506`). A key that reached the sidecar as `ML__PORT` would
 be ignored, and the image would bind its default.
 
 | Key | Default | Meaning |
@@ -393,7 +433,7 @@ be ignored, and the image would bind its default.
 
 `WEIGHTS_DIR` and `PRETRAINED_CKPT_DIR` are **host** paths used by the compose `volumes:`
 block; the container-internal keys of the same name hold the mount targets and are
-literals in the `ml` service's `environment:` block (`docker/docker-compose.yaml:472-473`).
+literals in the `ml` service's `environment:` block (`docker/docker-compose.yaml:487-490`).
 Passing the host's relative path into the container would resolve it against the WORKDIR and
 load nothing, which is why the two spellings exist and why the mount is the only place the
 host path appears.
@@ -403,7 +443,7 @@ adds `docker/docker-compose.gpu.yaml`, whose only content is the `nvidia` device
 reservation. `GPU=0` on a CPU-only host is a working, slow deployment, not a broken one.
 
 **What breaks without it:** every upload. `ml` is the only inference path, so with the
-container down `main_services.upload_video` fails with `MLUnavailable`
+container down `upload_video()` (`backend/service/services/matching.py:202`) fails with `MLUnavailable`
 (`ml_service_unreachable`, a 503) instead of falling back to a local model. That is the
 accepted cost of the split, recorded in [KNOWN_GAPS.md §23](KNOWN_GAPS.md#23-the-sidecar-is-the-only-inference-path-and-it-serialises-gpu-work).
 The proof that a request really crossed the network is
@@ -413,7 +453,7 @@ the contract is [SIDECARS.md §4](SIDECARS.md#4-ml--inference-sidecar).
 ### 8.4 `mail`
 
 Mail is a **code path plus an optional container**. The code path is
-`backend/src/infra/mail.py`; the container is `mailpit` (an SMTP sink with a web
+`backend/service/infrastructure/mail.py`; the container is `mailpit` (an SMTP sink with a web
 inbox), which starts only under the `mail` profile. With `MAIL=0` the facade stays
 on the `file` backend, so an unconfigured stack needs no SMTP server at all.
 
@@ -444,7 +484,7 @@ traffic in.
 
 Celery is a code path **and** four containers. Under the `celery` profile compose starts
 `celery-worker-agents`, `celery-worker-maintenance`, `celery-worker-ml` and a
-single `celery-beat` (`docker/docker-compose.yaml:562-761`). The workers run the same
+single `celery-beat` (`docker/docker-compose.yaml:579-768`). The workers run the same
 image as the API — the YAML anchor gives them the same environment and the same mounts, so
 a task reads the same uploads and certificates as the process that queued it — and they
 differ only in `--queues` and `--concurrency`. **No worker takes a GPU reservation**, not
@@ -464,10 +504,11 @@ is why the `celery` profile works on a CPU-only host.
 | `CELERY_ML_CONCURRENCY` | `1` | Children of the `ml` worker; each child can hold a GPU |
 
 The concurrency numbers differ per queue because **a queue boundary is a failure domain,
-not a priority lane** (`backend/src/workers/celery_app.py:15-22`): a maintenance sweep
-that walks the storage tree must never sit in front of a user's upload, and an embedding
-job that holds a GPU for minutes must not delay either. The `ml` worker keeps `1`
-child for the same reason the sidecar runs `workers=1` — one GPU, one queue of work.
+not a priority lane** — `backend/service/infrastructure/messaging/celery_app.py`
+documents the queue split: a maintenance sweep that walks the storage tree must never sit
+in front of a user's upload, and an embedding job that holds a GPU for minutes must not
+delay either. The `ml` worker keeps `1` child for the same reason the sidecar runs
+`workers=1` — one GPU, one queue of work.
 
 **What breaks without it:** nothing, and enabling `CELERY__ENABLED=true` with no worker
 makes work *worse*, not better — tasks are queued and never consumed. That is why the
@@ -530,7 +571,7 @@ The manifest is the contract, so here is the whole of it in one place, grouped e
 | CORS (4) | 1 | `CORS_ALLOW_ORIGINS` |
 | database (5, 6) | 9 | `DB__HOST`, `DB__PORT`, `DB__USER`, `DB__PASSWORD`, `DB__NAME`, `MYSQL_ROOT_PASSWORD`, `MYSQL_DATABASE`, `MYSQL_USER`, `MYSQL_PASSWORD` |
 | storage facade and MinIO (7) | 9 | `STORAGE__ENDPOINT`, `STORAGE__ACCESS_KEY`, `STORAGE__SECRET_KEY`, `STORAGE__BUCKET`, `STORAGE__SECURE`, `STORAGE__BACKEND`, `STORAGE__PREFIX`, `STORAGE__REGION`, `STORAGE__PRESIGN_TTL` |
-| frontend (8) | 2 | `REACT_APP_BASE_URL`, `DADATA_TOKEN` |
+| frontend (8) | 2 | `REACT_APP_BASE_URL`, `DADATA_TOKEN` (reserved: wired manifest → compose build arg → `frontend/docker/Dockerfile:102-103`, but read by no code today; empty is normal — see §6 and [KNOWN_GAPS.md §24](KNOWN_GAPS.md#24-a-credential-left-the-working-tree-but-is-still-in-git-history)) |
 | gateway (9) | 3 | `APP_DOMAIN`, `NGINX_PUBLISH_HTTP`, `NGINX_PUBLISH_HTTPS` |
 | profile switches (10) | 4 | `CACHE`, `STORAGE`, `CELERY`, `MAIL` |
 | cache facade (11) | 7 | `CACHE__BACKEND`, `CACHE__REDIS_URL`, `CACHE__PREFIX`, `CACHE__TTL`, `CACHE__MAX_ENTRIES`, `CACHE__TIMEOUT`, `CACHE__RETRY_BACKOFF` |
@@ -553,15 +594,26 @@ Two rules bite when you edit that file, and neither is enforced by a guard:
    `_first_env` helper looks up several spellings (`CACHE__BACKEND` first, then
    `CACHE_BACKEND`) and compose passing the double-underscore form as a plain environment
    variable is already valid. The single point where any of this is decided is
-   `docker/docker-compose.yaml` (`x-backend-env` at `:64-124` for the API and the workers,
-   and the `ml` service's own block at `:448-490`, which does flatten). No Python module
+   `docker/docker-compose.yaml` (`x-backend-env` at `:64-125` for the API and the workers,
+   and the `ml` service's own block at `:464-506`, which does flatten). No Python module
    rewrites a name, and `ml/service/settings.py` reads flat names only. Adding a key means
    adding it in both the manifest and the block that passes it, or the container never sees it.
 
-Keys that exist but that no code reads — `JWT_*_KEY_PATH`, `JWT_ALGORITHM`,
-`CORS_ALLOW_ORIGINS`, `STORAGE__ENDPOINT`/`BUCKET`/`SECURE`, `WEIGHTS_DIR`,
-`PRETRAINED_CKPT_DIR`, `INIT_DB`, `NGINX_*` — are either a mount target, a forward
-contract or a value the image/build consumes; each is marked in its section above.
+Almost every key in that table now has a reader. The short list that does **not** is:
+
+- `JWT_ALGORITHM` — the token layer hardcodes `RS256`
+  (`backend/service/domain/models.py:101`, used at `backend/service/shared/tokens.py:49`);
+  the key documents the contract and nothing reads it.
+- `APP_DOMAIN`, `NGINX_PUBLISH_HTTP`, `NGINX_PUBLISH_HTTPS` — consumed by compose when it
+  interpolates `infra/nginx/templates/site.conf.template` and the published ports, never by
+  Python.
+
+Everything that used to sit on that list has acquired a reader, and this is the part that
+had rotted: `CORS_ALLOW_ORIGINS` is read by `_cors_settings()` (§3.2), `STORAGE__*` by
+`backend/service/infrastructure/storage.py:440-454`, `WEIGHTS_DIR` / `PRETRAINED_CKPT_DIR` /
+`HF_HOME` by the sidecar (§8.3), `INIT_DB` by the startup gate
+(`backend/service/main.py:75`), and `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH` by
+`backend/service/domain/models.py:86-88`. Every section above marks its own keys.
 
 ## 10. Validating your env file
 

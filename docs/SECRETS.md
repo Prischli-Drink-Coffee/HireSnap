@@ -8,7 +8,7 @@ exist) and [RUNBOOK.md](RUNBOOK.md) (operational procedures).
 
 | Secret | Form | Where it lives | Committed? | Rotatable without data loss |
 |--------|------|----------------|-----------|------------------------------|
-| JWT private key | file `infra/certs/jwt-private.pem` | host, mounted into the backend at `/app/src/certs` | **never** | Yes — invalidates all issued tokens |
+| JWT private key | file `infra/certs/jwt-private.pem` | host, mounted into the backend at `/app/secrets/certs` | **never** | Yes — invalidates all issued tokens |
 | JWT public key | file `infra/certs/jwt-public.pem` | same | **never** | Yes, together with the private key |
 | Application DB password | env `DB__PASSWORD` / `DB_PASSWORD` | `docker/.env.dev`, `.env.prod` | **never** | Yes, with `ALTER USER` (see §4) |
 | MySQL root password | env `MYSQL_ROOT_PASSWORD` | same | **never** | Yes, `ALTER USER 'root'@'%'` |
@@ -39,25 +39,35 @@ Three subtleties, each of which has bitten a real repository:
    wrote it.
 2. **Ignore rules do not reach into submodules.** `R:\GPTHub\.gitignore:3-8` states
    this explicitly: the root repo tracks `backend` and `frontend` as gitlinks, so their
-   files are filtered by *their own* `.gitignore` — `backend/.gitignore:181-182` ignores
-   `/src/weights/` and `/src/certs/`. A root rule protects root files only.
+   files are filtered by *their own* `.gitignore` — `backend/.gitignore:181-182` still
+   lists the retired `/src/weights/` and `/src/certs/` paths, because a rule can only
+   protect what it names. A root rule protects root files only.
 3. **Keys are files, not variables.** `infra/certs/` is ignored as a directory because
    the key material is written by `make env` and must never enter git; the directory
    itself may be committed with a `.gitkeep` if you want the mount point to exist.
 
 ## 3. JWT keys (RS256)
 
-The backend signs and verifies tokens with an RSA key pair resolved **at import time**:
+The backend signs and verifies tokens with an RSA key pair whose **path** is resolved when
+the model is constructed, in one function (`backend/service/domain/models.py:37-48`):
 
 ```python
-# backend/src/database/models.py:29-30
-_private_key_content = Path(__file__).resolve().parent.parent / "certs" / "jwt-private.pem"
-_public_key_content  = Path(__file__).resolve().parent.parent / "certs" / "jwt-public.pem"
+def _key_path(variable: str, filename: str):
+    raw = os.environ.get(variable)          # JWT_PRIVATE_KEY_PATH wins
+    if raw and raw.strip():
+        return Path(raw.strip())
+    return CERTS_DIR / filename             # backend/service/certs on a bare checkout
 ```
 
-and the algorithm is fixed to `RS256` (`models.py:43`). The filenames are therefore
-part of the contract: a key named `private.pem` is simply not found, and the failure
-appears as an authentication error on every guarded route rather than as a startup error.
+The path is returned unresolved on purpose: a missing key must not be an import error, it
+must be an error on the first route that signs a token. In the container the environment
+variable decides — `.env` sets both to `/app/secrets/certs/*.pem` and the compose files
+mount `infra/certs` there — while a bare checkout with no `.env` falls through to
+`CERTS_DIR` (`backend/service/configuration/paths.py:40`).
+
+The algorithm is fixed to `RS256` in the token layer. The filenames are part of the
+contract: a key named `private.pem` is simply not found, and the failure appears as an
+authentication error on every guarded route rather than as a startup error.
 
 ### 3.1 Generating a pair
 
@@ -84,7 +94,7 @@ tokens. Key generation is a **deployment** step, executed once, by a human or by
 
 | Host | Container | Mode |
 |------|-----------|------|
-| `infra/certs` | `/app/src/certs` | read-only |
+| `infra/certs` | `/app/secrets/certs` | read-only |
 
 Read-only is not decoration: the application never needs to write keys, and a read-only
 mount turns a path bug into a loud `EROFS` instead of silent key corruption.
@@ -110,7 +120,7 @@ Two names hold the same value, and they are honored by **different mechanisms**:
 | Key | Read by | When it takes effect |
 |-----|---------|----------------------|
 | `MYSQL_ROOT_PASSWORD`, `MYSQL_USER`, `MYSQL_PASSWORD` | the MySQL image's entrypoint | **only** on first boot, when the `mysql_data` named volume is empty |
-| `DB__PASSWORD` → `DB_PASSWORD` | the application, via `backend/src/database/my_connector.py:12-20` | every time the backend connects |
+| `DB__PASSWORD` → `DB_PASSWORD` | the application, via `backend/service/infrastructure/database/connection.py:58-65` | every time the backend connects |
 
 That asymmetry is the most common operational mistake in this stack: editing
 `MYSQL_PASSWORD` on a live volume does nothing, while `DB__PASSWORD` does change, and
@@ -203,7 +213,8 @@ Rules of thumb:
   `FRONTEND_PUBLISH_PORT` — ports.
 - `DATA_PATH` — a path inside the container.
 - `DEBUG` — a mode flag, though it is security-relevant: `TRUE` enables uvicorn
-  reload **and** the schema-creating `CreateSQL` run (`server.py:1091-1094`). Never
+  `reload` **and** is the first half of the gate on the schema-creating `CreateSQL`
+  run (`backend/service/main.py:72-79`, `:40-47`; the second half is `INIT_DB`). Never
   ship `TRUE` to production; it is treated as an environment mistake, not a secret.
 - The content of `infra/storage/` — user data, protected by being ignored in git and by
   filesystem permissions, not by being a credential. It still must not be committed:

@@ -3,7 +3,8 @@
 #
 # Mounted into the mysql container's /docker-entrypoint-initdb.d/ (the compose
 # file, owned by the docker teammate, must place it there and mount
-# backend/HireSnap.sql read-only - see init/README.md for the exact contract).
+# backend/database/HireSnap.sql read-only - see init/README.md for the exact
+# contract).
 #
 # WHY the schema is not mounted into /docker-entrypoint-initdb.d directly:
 # MySQL's entrypoint feeds every *.sql file straight into the client. This dump
@@ -37,7 +38,8 @@ if [ -z "$SCHEMA_PATH" ]; then
     echo "[init] FATAL: schema dump not found. Looked for:"
     echo "[init]   \${SCHEMA_FILE}, /opt/hiresnap/HireSnap.sql,"
     echo "[init]   /docker-entrypoint-initdb.d/HireSnap.sql, /schema/HireSnap.sql"
-    echo "[init] The dump lives in the repository at backend/HireSnap.sql; mount it"
+    echo "[init] The dump lives in the repository at backend/database/HireSnap.sql;"
+    echo "[init] mount it"
     echo "[init] read-only and/or set SCHEMA_FILE. See infra/mysql/init/README.md."
     exit 1
 fi

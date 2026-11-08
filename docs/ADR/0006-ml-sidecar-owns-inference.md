@@ -115,4 +115,29 @@ modules under `ml/service/`, in the layout the GPTHub sidecar uses:
   and the shim, and the reason this ADR exists is that the shim was the defect.
 - A change to the route surface now needs three edits in one commit: `ml/service/app.py`,
   `ml/README.md` and `ml/tests/test_contract.py`, plus the client's expectations in
-  `backend/src/services/ml_client.py` when the payload shape moves.
+  `backend/service/services/ml_client.py` when the payload shape moves.
+
+## Addendum — the backend package moved afterwards
+
+This ADR was accepted before the backend was reorganised. Nothing in its decision
+changes; one path in it does. [ADR/0007](0007-sidecar-package-layout.md) moved
+`backend/src/` to `backend/service/` and gave the API a `create_app()` that imports with no
+MySQL, no `.env` and no GPU. The consequences for this ADR are mechanical:
+
+- The HTTP client this ADR keeps is now `backend/service/services/ml_client.py` (was
+  `backend/src/services/ml_client.py`). Its behaviour is unchanged: HTTP only, no in-process
+  branch, `ML_SERVICE_URL` unset meaning `http://127.0.0.1:8080`.
+- The guard that makes the boundary executable is unchanged in name and purpose
+  (`scripts/check_ml_boundary.py`); its backend-side rule now reads `backend/service/`. The
+  `src.modelling` / `backend/cosmos_tokenizer/` trees this ADR deleted must not reappear
+  anywhere under `backend/`, and the guard fails the commit if they do.
+- The tests that assert the boundary is real moved with the package.
+  `backend/tests/test_ml_client.py:174-202` starts a fresh interpreter, imports
+  `service.services.ml_client` and asserts that neither `torch` nor `src.modelling` reached
+  `sys.modules` and that `service_url()` still falls back to `http://127.0.0.1:8080`; the
+  test immediately after it parses the client's own AST, so a re-added import is caught on
+  the line rather than in the graph. `backend/tests/test_import_without_infra.py:74-93`
+  covers the other half for the app object: a subprocess from a temporary directory with
+  every `DB_*` and `MYSQL_*` variable stripped must import `service.api.app`, answer
+  `GET /server/health` with the documented body, hold no open MySQL socket and write no
+  file into the working directory.

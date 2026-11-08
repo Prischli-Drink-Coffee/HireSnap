@@ -211,6 +211,14 @@ repos:
       # WHY `cd backend` rather than passing paths: ruff and mypy take their
       # configuration from the closest pyproject.toml/ruff.toml, which lives in
       # the service (R:\GPTHub\.pre-commit-config.yaml:113-117).
+      #
+      # WHY the scope is `service` and no longer `src`: the backend was refactored
+      # into one importable package (backend/service/, ADR/0007) and the old
+      # backend/src/ tree is deleted, so a hook still pointing at src would check
+      # nothing the day the refactor lands and report success. The guard below
+      # SKIPs loudly while that directory is still absent in this checkout, which
+      # is the honest reading of "the tree this hook describes is not here yet".
+      # It is a SKIP and not a pass: nothing was checked, and the message says so.
       # WHY the FATAL SELECTION and not `ruff check .`: the full default rule set
       # reports 208 findings on this tree (181 auto-fixable) that predate the
       # harness - unused imports, bare f-strings, legacy formatting. A gate that is
@@ -221,16 +229,17 @@ repos:
       # E9 / F63 / F7 / F82 are NOT style: they are syntax errors, broken
       # comparisons, break/continue outside a loop, and - the one that bites here -
       # UNDEFINED NAMES, i.e. a NameError waiting for the first request that takes
-      # that branch. `src` and not `.` keeps the vendored cosmos_tokenizer tree
-      # out, and the CI step runs the SAME command with the SAME flag so the two
-      # gates can never disagree.
-      # WHY --exclude "*.ipynb": ruff parses notebook cells, so the exploratory
-      # notebooks under src/stuff/ report undefined names in cells nobody imports
-      # (KNN.ipynb, generate_data_embeddings.ipynb). Those findings cannot reach a
-      # request - the image never executes a notebook - and mixing them into this
-      # gate would train the reader to skim its output past the eleven real
-      # undefined names in importable modules. The exclusion hides no servable
-      # code: the same run still fails on every .py finding.
+      # that branch. `service` and not `.` keeps backend/notebooks/, backend/data/
+      # and the tests out of the lint, and the CI step runs the SAME command so the
+      # two gates can never disagree.
+      # WHY there is no longer an --exclude "*.ipynb": ruff 0.15 does parse
+      # notebook cells (measured: 7 F821 in backend/src/stuff/*.ipynb), and that
+      # flag existed only because 7 of the 18 findings came from notebooks nobody
+      # imports. The refactor moves exploration to backend/notebooks/, which is
+      # OUTSIDE the package, so the flag has nothing left to exclude. If a notebook
+      # ever reappears under service/ the gate will fail - correctly: an unexecuted
+      # notebook inside the importable package is exactly the dead weight the
+      # layout rule (scripts/check_ml_boundary.py) exists to keep out.
       # `ruff format --check` is deliberately NOT here: it would reformat 90 of 106
       # files, which is a separate decision with its own commit.
       - id: backend-ruff
@@ -238,7 +247,8 @@ repos:
         entry: >-
           bash -lc 'cd backend || exit 2;
           command -v ruff >/dev/null 2>&1 || { echo "SKIP backend ruff: ruff is not on PATH (install: python -m pip install ruff)"; exit 0; };
-          ruff check --select E9,F63,F7,F82 --exclude "*.ipynb" src'
+          [ -d service ] || { echo "SKIP backend ruff: backend/service/ is absent (the package refactor has not landed in this checkout) - nothing was checked"; exit 0; };
+          ruff check --select E9,F63,F7,F82 service'
         language: system
         pass_filenames: false
         always_run: true
@@ -250,6 +260,16 @@ repos:
       # The scope below is the code this deployment actually added (sidecar
       # fallbacks, the Celery app, the jobs service): it is small enough to be
       # clean, so a finding there is actionable and a green run means something.
+      # The paths were retargeted with the package refactor (src/infra ->
+      # service/infrastructure, src/workers -> service/infrastructure/messaging,
+      # src/services/jobs_services.py -> the jobs service module). Deliberately
+      # NOT widened to service/domain or service/api: those are the legacy modules
+      # this scope exists to stay out of, and a green run must keep meaning the
+      # deployment code is clean rather than that the backlog shrank.
+      # The optional half of the scope is RESOLVED AT RUN TIME and the resolved
+      # list is printed, because mypy exits 2 on a path that does not exist: a
+      # hard-coded path would either fail forever after a rename or be dropped
+      # here and kept in CI, and the two gates would then check different trees.
       # --follow-imports=silent stops mypy from re-checking the legacy tree that
       # these modules import; --disable-error-code=import-untyped stops "library
       # stubs not installed for torch/pandas/celery" from failing a check that has
@@ -259,7 +279,12 @@ repos:
         entry: >-
           bash -lc 'cd backend || exit 2;
           command -v mypy >/dev/null 2>&1 || { echo "SKIP backend mypy: mypy is not on PATH (install: python -m pip install mypy)"; exit 0; };
-          mypy --follow-imports=silent --disable-error-code=import-untyped src/infra src/workers src/services/jobs_services.py'
+          [ -d service/infrastructure ] || { echo "SKIP backend mypy: backend/service/infrastructure is absent (the package refactor has not landed in this checkout) - nothing was checked"; exit 0; };
+          scope=service/infrastructure;
+          for candidate in service/services/jobs.py service/services/jobs_services.py; do
+          if [ -e "$candidate" ]; then scope="$scope $candidate"; fi; done;
+          echo "backend mypy scope: $scope";
+          mypy --follow-imports=silent --disable-error-code=import-untyped $scope'
         language: system
         pass_filenames: false
         always_run: true
@@ -267,13 +292,50 @@ repos:
       # WHY the tests/ guard first: without it `pytest -q tests` exits 4
       # ("file or directory not found") and the hook fails on the ABSENCE of a
       # directory that this repository has not created yet, not on a defect.
+      # WHY the hook picks its own interpreter instead of calling bare `pytest`:
+      # the `pytest` on PATH belongs to whatever global interpreter is first, and
+      # that one frequently has pytest but NOT the application's runtime deps.
+      # Importing service.api.app pulls pymysql
+      # (service/infrastructure/database/connection.py:29), so the suite then dies
+      # during COLLECTION with ModuleNotFoundError - a fact about the host,
+      # reported as if it were a defect in the code, which is exactly the
+      # false-failure class the Makefile's PYTHON probe already exists to avoid
+      # (Makefile:63-78). The loop below finds an interpreter that can import
+      # pytest AND the runtime deps, then runs the suite through it with `-m`,
+      # which is also how CI invokes it (.github/workflows/ci.yml backend job).
+      #
+      # WHY it SKIPs, loudly, when none qualifies: a container-only checkout with
+      # no Python deps must not block a docs commit - but the message states that
+      # NOTHING was verified and names the exact command, so a green hook is never
+      # mistaken for a green suite.
       - id: backend-pytest-critical
         name: backend - pytest
         entry: >-
           bash -lc 'cd backend || exit 2;
           [ -d tests ] || { echo "SKIP backend pytest: backend/tests/ does not exist yet (docs/KNOWN_GAPS.md)"; exit 0; };
-          command -v pytest >/dev/null 2>&1 || { echo "SKIP backend pytest: pytest is not on PATH"; exit 0; };
-          pytest -q tests'
+          probe="import pytest, pymysql, fastapi, numpy";
+          chosen="";
+          # Repo-root virtualenvs first, whatever they are called (.venv,
+          # .venv-refactor, venv): a checkout that has one has already paid the
+          # install cost, and its interpreter is the one the developer runs tests
+          # with. `ls -d` is safe with no matches because of the 2>/dev/null.
+          toplevel="$(git rev-parse --show-toplevel 2>/dev/null)";
+          local_venvs="";
+          for venv in "$toplevel"/.venv* "$toplevel"/venv* ../.venv* ../venv*; do
+          [ -d "$venv" ] || continue;
+          for exe in "$venv/Scripts/python.exe" "$venv/bin/python"; do
+          [ -x "$exe" ] && local_venvs="$local_venvs $exe"; done; done;
+          for candidate in "$HIRESNAP_PYTHON" $local_venvs python3 python3.13 python3.12 python3.11 python3.10 python3.9 python; do
+          [ -n "$candidate" ] || continue;
+          "$candidate" -c "$probe" >/dev/null 2>&1 || continue;
+          chosen="$candidate"; break; done;
+          if [ -z "$chosen" ]; then
+          echo "SKIP backend pytest: no interpreter on PATH can import pytest + pymysql + fastapi + numpy.";
+          echo "     NOTHING was verified. Run the suite where they exist:";
+          echo "     cd backend && python -m pytest -q   (or set HIRESNAP_PYTHON=/path/to/python)";
+          exit 0; fi;
+          echo "backend pytest interpreter: $chosen";
+          "$chosen" -m pytest -q tests'
         language: system
         pass_filenames: false
         always_run: true

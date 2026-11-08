@@ -14,7 +14,7 @@ The stack has exactly two deployment shapes:
 | Published ports | gateway only | gateway, backend, frontend |
 | Backend `DEBUG` | `FALSE` | `TRUE` |
 | Frontend | static bundle in nginx | CRA dev server with hot reload |
-| Source mounts | none | `backend/src`, `frontend/src` |
+| Source mounts | none | `backend/service`, `frontend/src` |
 | Secrets | every secret uses `${VAR:?...}` | placeholders tolerated |
 
 Docker Compose supports two ways to express this: one base file plus override files
@@ -46,7 +46,7 @@ is no base file to layer onto, and no `extends:`.
    which people do not run before editing.
 4. **Compose project isolation is explicit.** Each file declares its own `name:`
    (`hiresnap-prod` at `docker-compose.yaml:24`, `hiresnap-dev` at
-   `docker-compose.dev.yaml:23`), and `docker/run.sh` passes `-p $PROJECT_NAME` on every
+   `docker-compose.dev.yaml:24`), and `docker/run.sh` passes `-p $PROJECT_NAME` on every
    invocation, where `PROJECT_NAME` comes from the env file itself. Two files make the
    project name visible in one line at the top of each; an overridden project name would
    have to be wrong in two places before containers, networks or volumes could collide

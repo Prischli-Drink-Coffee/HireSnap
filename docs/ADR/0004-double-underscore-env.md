@@ -6,9 +6,9 @@
 
 ## Context
 
-The backend reads flat environment names. `backend/env.py` resolves them with
-`Env.__getattr__` and raises `AttributeError` for anything missing
-(`backend/env.py:30-36`); the names actually consumed are `HOST`, `SERVER_PORT`,
+The backend reads flat environment names. `backend/service/configuration/env.py` resolves
+them with `Env.__getattr__` and raises `AttributeError` for anything missing
+(`backend/service/configuration/env.py:42-48`); the names actually consumed are `HOST`, `SERVER_PORT`,
 `DEBUG`, `DATA_PATH`, `PUBLIC_BASE_URL`, `ACCESS_TOKEN_EXPIRE_MINUTES`,
 `REFRESH_TOKEN_EXPIRE_DAYS`, and the five database variables `DB`, `DB_HOST`,
 `DB_PORT`, `DB_USER`, `DB_PASSWORD`.
@@ -45,7 +45,7 @@ environment:
   DB: ${DB__NAME:-hiresnap}
 ```
 
-That is `docker/docker-compose.yaml:107-111` (the dev file carries the same block).
+That is `docker/docker-compose.yaml:66-70` (the dev file carries the same block).
 Every other key in `docker/.env.example` is already flat — `HOST`, `SERVER_PORT`,
 `DEBUG`, `PUBLIC_BASE_URL`, `REACT_APP_BASE_URL`, `APP_DOMAIN` — and is passed
 through unchanged, because a translation line that maps `SERVER_PORT` to
@@ -107,7 +107,8 @@ its cost.
   group anything in a diff.
 - **Renaming the application's variables to `DB__HOST`.** An application change touching
   every read site for a cosmetic gain, and it would break the backend's standalone
-  deployment, which reads flat names from its own `.env` (`backend/env.py`).
+  deployment, which reads flat names from its own `.env`
+  (`backend/service/configuration/env.py`).
 
 ## Consequences
 

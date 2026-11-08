@@ -2,8 +2,9 @@
 
 - **Status:** accepted
 - **Date:** 2026-11-07
-- **Affects:** `frontend/src/API/apiConsts.js`, `backend/src/utils/return_url_object.py`,
-  `backend/src/repository/{candidate_vacancy,personality_candidate,personality_vacancy}_repository.py`
+- **Affects:** `frontend/src/shared/api/apiConsts.js`, `backend/service/shared/urls.py`,
+  `backend/service/repositories/{candidate_vacancy,personality_candidate,personality_vacancy}_repository.py`
+  — the paths as they read after [ADR/0007](0007-sidecar-package-layout.md) moved both trees
 
 ## Context
 
@@ -28,10 +29,10 @@ this work.
 
 | File | Change | Compatibility |
 |------|--------|---------------|
-| `frontend/src/API/apiConsts.js` | Precedence: `REACT_APP_BASE_URL` → same-origin `/api/` when the host is not loopback → the original `http://localhost:8080/api/` | With no new variable and a `localhost` browser, behavior is byte-identical |
-| `backend/src/utils/return_url_object.py` | Prefer a non-empty `PUBLIC_BASE_URL` (trailing slashes stripped), else the original `HOST`:`SERVER_PORT` expression | Unset variable reproduces the old output exactly |
-| `backend/src/repository/candidate_vacancy_repository.py` | Add `from fastapi import HTTPException, status` | No behavior change where the guard already worked |
-| `backend/src/repository/personality_candidate_repository.py`, `.../personality_vacancy_repository.py` | Same one-line import | Same |
+| `frontend/src/shared/api/apiConsts.js` | Precedence: `REACT_APP_BASE_URL` → same-origin `/api/` when the host is not loopback → the original `http://localhost:8080/api/` | With no new variable and a `localhost` browser, behavior is byte-identical |
+| `backend/service/shared/urls.py` | Prefer a non-empty `PUBLIC_BASE_URL` (trailing slashes stripped), else the original `HOST`:`SERVER_PORT` expression | Unset variable reproduces the old output exactly |
+| `backend/service/repositories/candidate_vacancy_repository.py` | Add `from fastapi import HTTPException, status` | No behavior change where the guard already worked |
+| `backend/service/repositories/personality_candidate_repository.py`, `.../personality_vacancy_repository.py` | Same one-line import | Same |
 
 ## Rationale
 
@@ -63,7 +64,7 @@ this work.
 
 ## Consequences
 
-- The six edited files are ordinary commits inside `backend/` and `frontend/`, landed
+- The five edited files are ordinary commits inside `backend/` and `frontend/`, landed
   before the first superproject commit. The superproject's `git status` therefore shows a
   clean tree and only the three gitlinks; any future re-application of these patches is a
   fresh commit in the owning submodule followed by a pointer bump, per

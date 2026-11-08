@@ -42,7 +42,7 @@ which are deliberately left alone.
                      ┌──────────────────▼──┐      ┌────▼─────────────────┐
                      │ mysql               │      │ bind mounts (host)   │
                      │ mysql:5.7.44 :3306  │      │ infra/storage  → DATA_PATH
-                     │ (internal network)  │      │ infra/certs    → src/certs
+                     │ (internal network)  │      │ infra/certs    → secrets/certs
                      │ datadir: named vol. │      │ infra/logs     → logs
                      └─────────────────────┘      └──────────────────────┘
                                         │
@@ -175,6 +175,94 @@ difference is not only port publication: dev also mounts source for live reload 
 runs the CRA dev server instead of the static bundle. See
 [ADR/0001-two-compose-files.md](ADR/0001-two-compose-files.md).
 
+## 1.2 Package layout
+
+Both application checkouts are laid out the same way, because they are the same kind of
+thing: a service with one importable entry point, its own dependency list, its own image
+and its own tests. The shape is documented where the process can see it — the module
+docstring of `backend/service/__init__.py` names each directory and what belongs in it —
+and the parts a machine can check are split between two gates.
+`backend/tests/test_backend_structure.py` asserts the tree: one package at the backend root,
+no loose module beside it, every layer directory present, no import of the retired `src.*`
+namespace, every router module on disk actually mounted by `service/api/app.py`, and no data
+layer importing a business or HTTP one. `scripts/check_ml_boundary.py` asserts the GPU
+boundary from outside the suite — no ML library under `backend/service/`, none named in
+either requirements file, and no `modelling/` or `cosmos_tokenizer/` directory anywhere under
+`backend/` — and repeats the root-file rule, which is why `make structure` can answer both
+questions without Docker or a populated env file
+([ADR/0007](ADR/0007-sidecar-package-layout.md)).
+
+```
+backend/
+├── service/            the importable package; `python -m service.main` is the process
+│   ├── __init__.py     __version__ plus the docstring that states the layout rule
+│   ├── main.py         entry point: bootstrap (DEBUG and INIT_DB), then uvicorn.run(reload=DEBUG)
+│   ├── api/            app.py (`create_app`, `GET /server/health`), security.py,
+│   │                   routers/ — twelve modules, they validate and delegate
+│   ├── configuration/  env.py, logging.py, logging.yaml, paths.py
+│   ├── domain/         models.py — the value objects the layers pass to each other
+│   ├── infrastructure/ cache.py, storage.py, mail.py, uploads.py;
+│   │                   database/ (connection.py, schema.py), messaging/ (celery_app.py,
+│   │                   tasks.py, beat_schedule.py)
+│   ├── repositories/   one module per aggregate; SQL lives here and nowhere else
+│   ├── services/       one module per vertical: matching.py, ml_client.py, jobs_services.py, ...
+│   └── shared/         hashing, tokens, validation, urls, debug — no dependencies on the rest
+├── database/           HireSnap.sql — the dump the MySQL init hook and schema.py apply
+├── docker/             Dockerfile and requirements.lock.txt
+├── docs/               PLATFORM_LAYER.md and images/ (the README's assets)
+├── notebooks/          exploration; imported by nothing and copied into no image
+├── tests/              conftest.py, manual/pipeline_smoke.py and eight test modules; the
+│                       suite runs as `python -m pytest -q` from backend/
+├── requirements.txt    runtime pins, GPU-free
+└── requirements-platform.txt  celery, redis, boto3 — installed into the same image
+```
+
+```
+frontend/
+├── src/
+│   ├── index.js        CRA entry
+│   ├── App.js          the top-level view; Layout.jsx is the shell it renders
+│   ├── app/            router.jsx (routes) and providers.jsx (Chakra, cookies, theme)
+│   ├── pages/          auth/, candidate/, employer/, notFound/ — one Page.jsx per route
+│   ├── shared/         api/ (apiConsts.js, instance.js, services/), auth/, components/,
+│   │                   hooks/, utils/, assets/
+│   ├── theme/          theme.js — the Chakra tokens every component reads
+│   └── styles/         index.css, App.css
+├── public/             index.html, favicon, manifest
+├── jsconfig.json       compilerOptions.baseUrl = "src" — imports are absolute from src/
+├── docker/Dockerfile   base / dev / builder / runtime
+├── nginx.conf          /health plus the SPA fallback
+└── package.json        start, build, test, lint, find:unreachable, eject
+```
+
+**The layering rule, in one direction only:** `api/` validates a request and delegates,
+`services/` holds the business rules, `repositories/` holds the SQL, `infrastructure/`
+holds the swappable I/O (cache, storage, mail, database, messaging). A module may import
+the layer below it and nothing above; `shared/` and `domain/` are leaves that import
+neither. `configuration/` is read once at the edge of the process, which is why importing
+`service.api.app:app` constructs an app object without connecting to MySQL, without
+reading a `.env` file and without pulling in a GPU framework — a property
+`backend/tests/test_import_without_infra.py` exercises rather than hopes for, since it
+does exactly that in a fresh interpreter, from a temporary working directory, with every
+`DB_*` and `MYSQL_*` variable stripped, and one `scripts/check_ml_boundary.py` keeps true
+for the GPU half.
+
+Two consequences an operator notices:
+
+- **The import root is the checkout, not the package.** `python -m service.main` from
+  `backend/` (the image runs it from `/app` with `PYTHONPATH=/app`) is the only supported
+  invocation. There is no `sys.path` edit anywhere, so a module that is not importable from
+  the checkout root is a bug, not a missing `PYTHONPATH`.
+- **The frontend has no relative climb.** `jsconfig.json` puts `src/` on the module path, so
+  a component imports `shared/api/instance` and `pages/auth/SignInPage` — never
+  `../../API/instance`. Moving a file is then a rename plus the imports the compiler
+  names, not a hunt for `../`.
+
+The mirror is the reference stack at `R:/GPTHub`: a sidecar there is an importable package
+with thin routers, a services layer and infrastructure behind it, and its tests assert the
+tree. Why this shape and what it cost — including the four alternatives that were rejected
+— is [ADR/0007](ADR/0007-sidecar-package-layout.md).
+
 ## 2. Networks
 
 Two Docker networks with deliberately different egress behavior:
@@ -213,18 +301,18 @@ without answering or serving a request is the opposite bug.
 This is the single most important thing to understand about the stack, because the
 frontend and the backend disagree about the prefix:
 
-- The frontend sends every request to a base URL that ends in `/api/`. From the patched
-  `frontend/src/API/apiConsts.js:14-44` it is `REACT_APP_BASE_URL` when set, otherwise
-  `window.location.origin + "/api/"` on any non-loopback host, otherwise the original
-  hardcoded `http://localhost:8080/api/`. The axios instance consumes it at
-  `frontend/src/API/instance.js:4-7`.
-- The backend mounts its API app at `/server` and its static files at `/data`:
-  `backend/src/pipeline/server.py:30-32`.
+- The frontend sends every request to a base URL that ends in `/api/`. One module
+  resolves it, `frontend/src/shared/api/apiConsts.js:22-47`: `REACT_APP_BASE_URL` when
+  set, otherwise `window.location.origin + "/api/"` on any non-loopback host, otherwise
+  `http://localhost:8080/api/` (`:46`). The axios instance consumes it at
+  `frontend/src/shared/api/instance.js:6-8`, and it is the only client in the app.
+- The backend mounts its API app at `/server` and its static files at `/data` in one
+  factory, `backend/service/api/app.py:118-141`.
 
 ```python
-app.mount("/server", app_server)   # server.py:30
-app.mount("/public", app_public)   # server.py:31
-app.mount("/data", StaticFiles(...))  # server.py:32
+app.mount("/server", build_server_app())   # service/api/app.py:128
+app.mount("/public", build_public_app())   # :129
+app.mount("/data", StaticFiles(directory=str(uploads)))  # :139
 ```
 
 So a browser request to `/api/vacancies/` would 404 against the backend unless
@@ -273,7 +361,7 @@ gateway :80
   │  3. apply client_max_body_size 500m (video uploads)
   ▼
 backend :8080  (uvicorn, single process, no worker pool)
-  │  4. FastAPI router → src/services/*.py → src/repository/*.py
+  │  4. FastAPI router → service/services/*.py → service/repositories/*.py
   │  5. PyMySQL connects to mysql:3306 on the internal network
   ▼
 mysql :3306
@@ -288,7 +376,7 @@ response bubbles back up; JSON bodies are returned verbatim
 |------|--------------|-----------|-------|
 | `/` (everything else) | — | `frontend:80` | The CRA bundle. Missing files fall back to `index.html` so client-side routes work on refresh. |
 | `/api/...` | `/server/...` | `backend:8080` | API calls. |
-| `/data/...` | — | `backend:8080` | Static uploads, from `StaticFiles(directory=DATA_PATH)` at `server.py:32`. |
+| `/data/...` | — | `backend:8080` | Static uploads, from `StaticFiles(directory=data_dir())` at `service/api/app.py:139`. |
 | `/health` | — | gateway itself | Static `{"status":"ok","service":"gateway"}` (site.conf.template:60-64). |
 
 `/data/` is **not** rewritten: the backend already serves it at that exact prefix.
@@ -296,13 +384,17 @@ It exists in the gateway config only so that a single origin can serve API and m
 that matters because the SPA is served from the same host, and cross-origin media URLs
 would otherwise need CORS.
 
-`/health` sits at the root, not under `/api/`, and is never proxied. It is the only
-health endpoint in the stack; the backend has none (see
-[SERVICE_CONTRACTS.md](SERVICE_CONTRACTS.md#13-what-exists-today--gap)).
+`/health` on the gateway sits at the root, not under `/api/`, and is never proxied: it
+answers `{"status":"ok","service":"gateway"}` from a static nginx location and proves
+nginx is alive without touching a dependency. Three other health routes exist and each is
+probed separately: the API's `GET /server/health` (reached as `/api/health`), the
+sidecar's `/health`, and the SPA container's `/health`. See
+[SERVICE_CONTRACTS.md](SERVICE_CONTRACTS.md#13-where-each-health-route-actually-lives) for
+which process answers which, and §7 of [RUNBOOK.md](RUNBOOK.md#7-health) for the probes.
 
 ### 3.4 Why URLs in JSON bodies are absolute, and what changed
 
-The original `backend/src/utils/return_url_object.py:6-9` built a URL for a stored
+The original helper (now `backend/service/shared/urls.py:8-13`) built a URL for a stored
 file from the process's own bind address:
 
 ```python
@@ -313,7 +405,7 @@ def return_url_object(url: str):
 ```
 
 Inside a container that emits `http://0.0.0.0:8080/...`, which no browser can
-resolve. The shipped patch (`backend/src/utils/return_url_object.py:16-21`) prefers a
+resolve. The shipped patch (`backend/service/shared/urls.py:16-20`) prefers a
 non-empty `PUBLIC_BASE_URL`, strips its trailing slashes, and falls back to the
 original `HOST:SERVER_PORT` expression when the variable is unset or empty — so a
 standalone checkout that never sets it behaves exactly as before. Set
@@ -326,15 +418,15 @@ configuration. See [ENV.md](ENV.md#31-host-and-server_port-are-overloaded) and
 Embedding is the one operation that can take minutes instead of milliseconds, and it is the
 one thing the API does not do itself. `ml/` owns the pipeline: frame extraction, the Cosmos
 tokenizer, UNet3D, wav2vec2 and the sentence transformer all live in `ml/service/`, behind
-five HTTP routes. The backend keeps `backend/src/services/ml_client.py`, which is an HTTP
+five HTTP routes. The backend keeps `backend/service/services/ml_client.py`, which is an HTTP
 client and nothing else — `ML_SERVICE_URL` unset means `http://127.0.0.1:8080`, never
 "import torch and do it here".
 
 ```
-upload_video()                       backend/src/services/main_services.py:204
+upload_video()                       service/services/matching.py:202
   │  get_user_embedding(media_path)
   ▼
-backend/src/services/ml_client.py    HTTP-only: no torch, no model, no fallback
+service/services/ml_client.py        HTTP-only: no torch, no model, no fallback
   │
   │  POST /v1/embed/video   (bytes in, JSON out)
   │  connect timeout 10 s / read timeout 900 s
@@ -347,7 +439,7 @@ ml:8080   (core service, both stacks)  ── GPU (or CPU with GPU=0), weights, 
 Three consequences of the boundary, each of which used to be different:
 
 1. **There is no in-process branch.** The API cannot import the pipeline even by accident:
-   `scripts/check_ml_boundary.py` fails the commit if a module under `backend/src/` imports
+   `scripts/check_ml_boundary.py` fails the commit if a module under `backend/service/` imports
    `torch`, `transformers`, `sentence_transformers`, `moviepy`, `librosa`,
    `cosmos_tokenizer` or the deleted `src.modelling` package, and it fails if
    `backend/requirements.txt` names one of those distributions. Before the split the
@@ -361,7 +453,9 @@ Three consequences of the boundary, each of which used to be different:
    what business logic needs (`numpy`, `pandas`, `scikit-learn` for candidate-vacancy
    matching) and drops `torch`, `torchmetrics`, `torcheval`, `transformers`, `moviepy`,
    `librosa`, `opencv-python`, `faiss-cpu` and `sentence_transformers`, which are now
-   `ml/`'s dependencies alone. `backend/src/pipeline/train.py` is deleted with them.
+   `ml/`'s dependencies alone; the trees that used them (`backend/src/modelling/` and
+   `backend/cosmos_tokenizer/`, both removed before the `service/` package landed) are
+   deleted rather than dormant.
 
 | Property | Before (in-process) | Now (HTTP to `ml`) |
 |----------|---------------------|--------------------|
@@ -397,7 +491,7 @@ backend route (does not exist yet)
   │
   ▼  celery broker (same redis, db 1)
 celery-worker-agents | -maintenance | -ml   (profile celery)
-  │  src/workers/tasks.py dispatch()
+  │  service/infrastructure/messaging/tasks.py dispatch()
   ▼
 status read back through jobs_services.status(job_id)
 ```
@@ -416,7 +510,7 @@ Three properties decide whether this path is worth enabling:
    manifest default — no worker and no beat process exist and every `dispatch()` executes
    inline: the pre-platform behaviour. `CELERY=1` starts
    `celery-worker-agents`, `celery-worker-maintenance`, `celery-worker-ml` and a
-   single `celery-beat` (`docker/docker-compose.yaml:487-648`) **and** exports
+   single `celery-beat` (`docker/docker-compose.yaml:579-768`) **and** exports
    `CELERY__ENABLED=true`, forcing `CACHE=1` with it because a worker without a broker
    is a retry loop, not a queue (`docker/sidecar_profiles.sh:47-51`).
 
@@ -429,9 +523,9 @@ the sidecars is [SIDECARS.md](SIDECARS.md); the missing call sites are
 
 | Container path | Host location | Content | Backup? |
 |----------------|---------------|---------|---------|
-| `/var/lib/mysql` | **named volume** `mysql_data` (dev: `mysql_data_dev`) | The database. Populated from `backend/HireSnap.sql` only when the volume is empty — see §5. | Yes — it is the only copy, and `down -v` deletes it |
+| `/var/lib/mysql` | **named volume** `mysql_data` (dev: `mysql_data_dev`) | The database. Populated from `backend/database/HireSnap.sql` only when the volume is empty — see §5. | Yes — it is the only copy, and `down -v` deletes it |
 | `$DATA_PATH` (default `/app/data`) | `infra/storage/` | Uploaded videos, generated `.npy` embeddings, CSV seed tables under `tables/` | Yes |
-| `/app/src/certs` | `infra/certs/` | `jwt-private.pem`, `jwt-public.pem` — read at `backend/src/database/models.py:29-30` | Yes, or regenerate |
+| `/app/secrets/certs` | `infra/certs/` | `jwt-private.pem`, `jwt-public.pem` — path from `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH`, falling back to `service/certs` on a bare checkout (`backend/service/domain/models.py:37-48`) | Yes, or regenerate |
 | `/app/models/weights` | `infra/models/weights/` | `Unet3D.pth`. A read-only mount in **`ml` only** | No, re-downloadable |
 | `/app/models/pretrained_ckpts` | `infra/models/pretrained_ckpts/` | Cosmos tokenizer checkpoints — `Cosmos-Tokenizer-CV4x8x8/{encoder,decoder}.jit`. A read-only mount in **`ml` only** | No, re-downloadable |
 | `/app/logs` | `infra/logs/` | Log files written by the application logger, plus `mail_outbox.log` when the `file` mail backend is in use | No |
@@ -442,9 +536,9 @@ the sidecars is [SIDECARS.md](SIDECARS.md); the missing call sites are
 | `/etc/nginx/conf.d` | `infra/nginx/conf.d/` | Gateway routes (rendered from `templates/site.conf.template`) | In git |
 | `/docker-entrypoint-initdb.d` | `infra/mysql/init/` | `00-init.sh`, executed **once**, on an empty datadir | In git |
 
-`DATA_PATH` is read through `backend/env.py` and used by
-`backend/src/utils/write_file_into_server.py:15-17` for uploads and
-`backend/create_sql.py:19` for the `tables/` CSV directory. Pointing it at a bind mount
+`DATA_PATH` is read through `backend/service/configuration/env.py` and used by
+`backend/service/infrastructure/uploads.py:15-17` for uploads and
+`backend/service/infrastructure/database/schema.py:19-23` for the `tables/` CSV directory. Pointing it at a bind mount
 is what keeps uploads when the container is recreated.
 
 **The models are mounted once now, into `ml`, and nowhere else.** Before the split the same
@@ -471,36 +565,37 @@ The named volumes survive `down` too — but not `down -v`, and not
 There are two independent init mechanisms, and only one of them is reliable:
 
 1. **MySQL image init** — the compose files mount `infra/mysql/init/` at
-   `/docker-entrypoint-initdb.d` (docker-compose.yaml:64) and `backend/HireSnap.sql` at
-   `/opt/hiresnap/HireSnap.sql`, read-only (:69; the dev file does the same at :52 and
-   :54). The image runs everything in that directory **once, when the datadir volume is
+   `/docker-entrypoint-initdb.d` (docker-compose.yaml:195) and
+   `backend/database/HireSnap.sql` at `/opt/hiresnap/HireSnap.sql`, read-only (:200; the
+   dev file does the same at :137 and :139). The image runs everything in that directory **once, when the datadir volume is
    empty**: `00-init.sh` locates the dump (`/opt/hiresnap/HireSnap.sql` first) and applies
    it. On an existing volume nothing runs; that is standard MySQL behavior, not a bug.
    If the dump cannot be found the script exits non-zero and no schema is created — it
    fails loudly rather than silently.
-2. **Application init** — `backend/src/pipeline/server.py:1091` runs `CreateSQL` only
-   when `DEBUG == "TRUE"`:
+2. **Application init** — `backend/service/main.py:72-79` runs `CreateSQL` only when
+   `DEBUG` is exactly `TRUE` **and** `INIT_DB` is a truthy value (`1`, `true`, `yes`,
+   `on` — `service/main.py:82-86`):
 
    ```python
-   if env.__getattr__("DEBUG") == "TRUE":
-       from create_sql import CreateSQL
-       create_sql = CreateSQL()
-       create_sql.read_sql()
+   if _debug_flag(env) and os_env_flag("INIT_DB"):
+       bootstrap_schema(env)
    ```
 
-   `CreateSQL.read_sql()` (`backend/create_sql.py:57-120`) executes `HireSnap.sql`
+   `CreateSQL.read_sql()` (`backend/service/infrastructure/database/schema.py:57-124`) executes `HireSnap.sql`
    against the server and then bulk-inserts every CSV in `$DATA_PATH/tables/`.
 
 Consequences you must plan for:
 
-- In production `DEBUG=FALSE`, so the application **never** creates or migrates its
-  schema. The schema must come from the init script (fresh volume), or from a manual
-  `python3 create_sql.py` / `mysql < backend/HireSnap.sql` on an existing one — see
+- In production `DEBUG=FALSE` (and `INIT_DB` is unset), so the application **never**
+  creates or migrates its schema. The schema must come from the init script (fresh
+  volume), or from a manual `python -m service.infrastructure.database.schema` /
+  `mysql < backend/database/HireSnap.sql` on an existing one — see
   [RUNBOOK.md §7.3](RUNBOOK.md#83-existing-volume-nothing-happens-automatically).
-- There are no migrations. Changing a table means editing `HireSnap.sql` and applying
-  it by hand to an existing database.
-- `create_sql.py` connects **without** a database name and issues
-  `CREATE DATABASE IF NOT EXISTS`, so the database name comes from `DB`.
+- There are no migrations. Changing a table means editing `database/HireSnap.sql` and
+  applying it by hand to an existing database.
+- The loader connects **without** a database name and issues
+  `CREATE DATABASE IF NOT EXISTS`, so the database name comes from `DB`
+  (`service/infrastructure/database/schema.py:26-33`, `:80-81`).
 - Re-initialising means destroying the volume (`down -v`), which also destroys the
   data. There is no in-place reset.
 
@@ -517,7 +612,7 @@ compose interpolation        ${DB__HOST} → DB_HOST inside the container
         │ environment:
         ▼
 container env                flat KEY=VALUE (no double underscore)
-        │ backend/env.py load_dotenv / os.environ
+        │ service/configuration/env.py load_dotenv / os.environ
         ▼
 application                  Env().__getattr__("DB_HOST")
 ```
@@ -535,16 +630,34 @@ Rationale and the cost of the translation layer in
 [ADR/0004-double-underscore-env.md](ADR/0004-double-underscore-env.md).
 
 Every backend variable the application reads is required — `Env.__getattr__` raises
-`AttributeError` when a name is missing (`backend/env.py:30-36`), so a typo fails at
-startup, not at request time. That rule covers the original application only. The platform
-layer and the sidecar use **`os.environ` with a default for every key**
-(`backend/src/infra/*.py`, `backend/src/workers/*.py`, `ml/service/settings.py`), which
-is the opposite convention and deliberately so: a missing `CACHE__REDIS_URL` must
-degrade to the in-memory backend, not abort the boot. A key that exists in the manifest and
-that no code reads (`JWT_*_KEY_PATH`, `JWT_ALGORITHM`, `CORS_ALLOW_ORIGINS`,
-`STORAGE__ENDPOINT`/`BUCKET`/`SECURE`, `WEIGHTS_DIR`, `PRETRAINED_CKPT_DIR`,
-`INIT_DB`, `NGINX_*`) is either a mount target, a forward contract or a value the
-compose file interpolates. [ENV.md](ENV.md) marks each one; the full catalogue is there.
+`AttributeError` when a name is missing (`backend/service/configuration/env.py:42-48`), so a
+typo fails at startup, not at request time. That rule covers the original application only.
+The platform layer and the sidecar use **`os.environ` with a default for every key**
+(`backend/service/infrastructure/*.py`, `ml/service/settings.py`), which is the opposite
+convention and deliberately so: a missing `CACHE__REDIS_URL` must degrade to the in-memory
+backend, not abort the boot. `CORS_ALLOW_ORIGINS` sits in this second camp and is read by
+`_cors_settings()` (`backend/service/api/app.py:92-142`), splatted into `CORSMiddleware` at
+`:175-183`; its one rule — a wildcard origin is never paired with credentials, because
+browsers reject that pair — is [ENV.md §3.2](ENV.md#32-cors_allow_origins--consumed-and-the-wildcardcredentials-rule).
+
+A manifest key that **no Python module reads** is now a short and shrinking list, and each
+member is honest about why it is there:
+
+- `JWT_ALGORITHM` — the token layer hardcodes `RS256`
+  (`backend/service/domain/models.py:101`, used at `backend/service/shared/tokens.py:49`), so
+  the key records the contract and nothing more. It is the only genuine candidate for
+  deletion in the manifest.
+- `APP_DOMAIN`, `NGINX_PUBLISH_HTTP`, `NGINX_PUBLISH_HTTPS` — interpolated by compose into
+  the nginx template (`infra/nginx/templates/site.conf.template`), never into Python.
+
+Everything that used to be on such a list has since acquired a reader: `CORS_ALLOW_ORIGINS`
+by the resolver above, `STORAGE__*` by `build_storage`
+(`backend/service/infrastructure/storage.py:440-454`), `WEIGHTS_DIR` and
+`PRETRAINED_CKPT_DIR` and `HF_HOME` by the sidecar's settings
+(`ml/service/settings.py:140`, `:157`, `:186-204`), `INIT_DB` by the schema gate
+(`backend/service/main.py:75`), and `JWT_PRIVATE_KEY_PATH`/`JWT_PUBLIC_KEY_PATH` by the key
+resolver (`backend/service/domain/models.py:86-88`). [ENV.md](ENV.md) marks every key; the
+full catalogue is there.
 
 ## 7. Failure domains
 
@@ -558,8 +671,8 @@ compose file interpolates. [ENV.md](ENV.md) marks each one; the full catalogue i
 | `ml` on a CPU-only host | The container starts and `/health` answers; the video path raises `service_unavailable` because `autocast` needs CUDA ([KNOWN_GAPS.md §7](KNOWN_GAPS.md#7-autocast-was-unconditional-fixed-the-cpu-path-is-real)). | Set `GPU=0` so the GPU override is not applied, and treat the sidecar as text-only; do not read a green healthcheck as a working pipeline. |
 | `cache` | With `CACHE__BACKEND=redis` and the container down, cache reads miss (fail-open, one warning) and job state is unreachable, so `jobs_services.status()` answers `unknown`. No API route reads the cache today, so request traffic is unaffected; `CELERY=1` without a cache is the case that hurts, because the workers then have no broker. | The facade already treats a miss as a miss; keep the cache off the critical path. `CELERY=1` forces `CACHE=1` (`docker/sidecar_profiles.sh:47-51`). |
 | `storage` | Once a route uses it: `StorageError` and a 500 on the upload path (fail-closed). Today no API route uses it, so a broken bucket costs nothing yet — the worker task is the one caller. | Do not enable `STORAGE__BACKEND=s3` without the pinning test; a fallback to the local disk would hide a broken bucket. |
-| `celery` worker | Tasks stay `queued` (or the broker refuses the submission and `dispatch()` falls back inline with `fallback_reason`). With `CELERY=0`, the default, every dispatch runs inline and no worker exists. | `celery -A src.workers.celery_app inspect active` and `... inspect ping`; see [RUNBOOK.md §15](RUNBOOK.md#15-operating-the-optional-profiles). |
-| Missing `infra/certs` | **Every** authenticated route fails: `AuthJWT.__init__` resolves the key paths at import time (`models.py:29-30`) and `decode_jwt` cannot verify. | `make env` generates them; see [SECRETS.md](SECRETS.md). |
+| `celery` worker | Tasks stay `queued` (or the broker refuses the submission and `dispatch()` falls back inline with `fallback_reason`). With `CELERY=0`, the default, every dispatch runs inline and no worker exists. | `celery -A service.infrastructure.messaging.celery_app inspect active` and `... inspect ping`; see [RUNBOOK.md §15](RUNBOOK.md#15-operating-the-optional-profiles). |
+| Missing `infra/certs` | **Every** authenticated route fails, but not at import: `AuthJWT` resolves the pair from `JWT_*_KEY_PATH` with `service/certs` as the packaged fallback (`backend/service/domain/models.py:37-48`, `:85-88`), and `decode_jwt` cannot verify what the missing key would have signed. | `make env` generates them; see [SECRETS.md](SECRETS.md). |
 | Missing `infra/models` | The embedding path breaks **at first use**, in `ml` — the only container that mounts it now. Startup and `/health` are unaffected. | Mount is read-only; `/v1/capabilities` names the missing file. See [KNOWN_GAPS.md §12](KNOWN_GAPS.md#12-weights-are-not-in-the-repository). |
 
 The last two rows are the ones that surprise people: both failures are **lazy**. A stack
@@ -588,11 +701,13 @@ unable to embed a single video.
   HTTP request still waits for the vector (§3.5). The `jobs` contract that would make it
   asynchronous is shipped and dormant ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)).
 - No application-level migration. See [KNOWN_GAPS.md](KNOWN_GAPS.md#5-no-migrations).
-- **No source restructuring of `backend/` or `frontend/`.** They remain standalone
-  repositories with their own history, and the superproject only records which commit of
-  each is deployed. The one exception is the opposite direction: the ML pipeline was
-  *removed* from `backend/` into its own repository, because keeping it there forced every
-  deployment to install a CUDA stack to serve a REST API
+- **No shared build for the three services.** Each submodule still builds independently
+  from its own Dockerfile against its own requirements file; the superproject records one
+  commit per service and nothing more. The one structural change made here is inside
+  `backend/` — `src/` became the `service/` package and the frontend dropped 86
+  unreachable files ([ADR/0007](ADR/0007-sidecar-package-layout.md)) — and the one removal
+  is the ML pipeline, which left for its own repository because keeping it here forced
+  every deployment to install a CUDA stack to serve a REST API
   ([ADR/0006](ADR/0006-ml-sidecar-owns-inference.md)).
 - No routing of `ml` through the gateway. The sidecar has no authentication and
   `infra/nginx/templates/site.conf.template` has no location block for it, so it is never
@@ -601,7 +716,7 @@ unable to embed a single video.
   container (`make ml-shell`). Exposing it as a public route would mean adding both an
   auth check and a location block, and nothing yet needs it.
 - **No second copy of the inference code.** The invariant that makes the split stay split
-  is enforced, not documented: no Python module under `backend/src/` may import a GPU
+  is enforced, not documented: no Python module under `backend/service/` may import a GPU
   framework (`torch`, `torchvision`, `torchmetrics`, `torcheval`, `transformers`,
   `sentence_transformers`, `moviepy`, `librosa`, `cosmos_tokenizer`) or the deleted
   `src.modelling` package, and `backend/requirements.txt` may not name those

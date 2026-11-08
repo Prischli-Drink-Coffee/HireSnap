@@ -68,7 +68,7 @@ PLACEHOLDER = re.compile(
 )
 
 # A value that names a file rather than holding a secret. Checked before the
-# entropy heuristic so that JWT_PRIVATE_KEY_PATH=/app/src/certs/jwt-private.pem
+# entropy heuristic so that JWT_PRIVATE_KEY_PATH=/app/secrets/certs/jwt-private.pem
 # is not reported as a leaked password.
 PATH_EXT = re.compile(r"\.(?:pem|key|crt|cer|pub|p12|pfx|jks|json|ya?ml|toml|ini|conf|env|sql|gz|zip|txt)$", re.IGNORECASE)
 
