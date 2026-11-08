@@ -256,16 +256,27 @@ guards: _require-python
 # guard that was added later. The glob means a new structure guard runs the day it
 # lands, with no Makefile edit and no chance to forget one.
 #
-# WHY the two SUBMODULE layout guards are named here and not globbed: they live
-# outside this repository (backend/ and ml/ are separate checkouts), so a glob over
-# scripts/ can never see them, and the names are a contract the submodules owe this
-# target. backend/scripts/check_backend_layout.py asserts the vertical-slice shape
-# (service/services/<domain>/{domain,application,persistence,presentation}) and
-# ml/scripts/check_ml_service_layout.py asserts the sidecar's flat layout; both are
-# stdlib-only by design, so this target still needs no docker, no env file and no
-# service dependencies - that is what makes it the right command to run after a
-# module move. A guard that is absent (a checkout without --recursive) prints SKIP
-# and does not fail the target; one that is present and fails does.
+# WHY the SUBMODULE guards are named here and not globbed: they live outside this
+# repository (backend/ and ml/ are separate checkouts), so a glob over scripts/ can
+# never see them, and the names are a contract the submodules owe this target.
+# backend/scripts/check_backend_layout.py asserts the vertical-slice shape
+# (service/services/<domain>/{domain,application,persistence,presentation}),
+# backend/scripts/check_module_complexity.py ratchets module size and cyclomatic
+# complexity against backend/scripts/complexity_baseline.json, and
+# ml/scripts/check_ml_service_layout.py asserts the sidecar's flat layout and its size
+# ceilings; all three are stdlib-only by design, so this target still needs no docker,
+# no env file and no service dependencies - that is what makes it the right command to
+# run after a module move. A guard that is absent (a checkout without --recursive)
+# prints SKIP and does not fail the target; one that is present and fails does.
+#
+# WHY the complexity ratchet is wired HERE and not into 'guards' a second time: the
+# question it answers - "did this module grow past what we already accepted" - is the
+# same question a move asks, and a developer who is mid-refactor runs 'make structure',
+# not the seven-check suite that wants docker and a populated env file. It is not
+# therefore unenforced: the pre-commit hook 'guard - backend vertical-slice layout' and
+# the backend CI job both run it on every commit, so a commit cannot carry new debt
+# past either gate. Repeating the call in 'guards' would only make the expensive
+# target slower for developers who run both.
 #
 # WHY they run through scripts/run_guard.sh and not $(PYTHON): the same reason the
 # guards target does - that script is the repository's one answer to "which
@@ -280,7 +291,7 @@ guards: _require-python
 # reason the arithmetic is "$$((ran + 1))": make would otherwise eat "$((".
 structure: _require-python
 	@set -e; ran=0; failed=""; for script in scripts/check_ml_boundary.py scripts/check_*structure*.py; do [ -f "$$script" ] || continue; ran=$$((ran + 1)); printf '%s\n' "---- $$script"; $(PYTHON) "$$script" || failed="$$failed $$script"; done; if [ "$$ran" -eq 0 ]; then printf '%s\n' "structure: ERROR no layout guard found (scripts/check_ml_boundary.py is missing)" >&2; exit 1; fi; if [ -n "$$failed" ]; then printf '%s\n' "structure: FAILED$$failed" >&2; exit 1; fi; printf '%s\n' "structure: all $$ran layout guard(s) passed"
-	@set -e; ran=0; failed=""; for script in backend/scripts/check_backend_layout.py ml/scripts/check_ml_service_layout.py; do if [ ! -f "$$script" ]; then printf '%s\n' "structure: SKIP $$script - the submodule layout guard is not in this checkout"; continue; fi; ran=$$((ran + 1)); printf '%s\n' "---- $$script"; bash scripts/run_guard.sh "$$script" || failed="$$failed $$script"; done; if [ -n "$$failed" ]; then printf '%s\n' "structure: FAILED (submodule layout guards)$$failed" >&2; exit 1; fi; printf '%s\n' "structure: $$ran submodule layout guard(s) passed"
+	@set -e; ran=0; failed=""; for script in backend/scripts/check_backend_layout.py backend/scripts/check_module_complexity.py ml/scripts/check_ml_service_layout.py; do if [ ! -f "$$script" ]; then printf '%s\n' "structure: SKIP $$script - the submodule guard is not in this checkout (nothing was checked)"; continue; fi; ran=$$((ran + 1)); printf '%s\n' "---- $$script"; bash scripts/run_guard.sh "$$script" || failed="$$failed $$script"; done; if [ -n "$$failed" ]; then printf '%s\n' "structure: FAILED (submodule guards)$$failed" >&2; exit 1; fi; printf '%s\n' "structure: $$ran submodule guard(s) passed"
 
 # WHY no "|| true": a lint that cannot fail holds nothing (R:\GPTHub\Makefile:337-340
 # makes the same argument). When pre-commit is missing this target FAILS with the
@@ -350,9 +361,15 @@ test: _require-python
 # twice in a row without the second run inheriting the first one's format.
 #
 # WHY the threshold is not passed here: it lives in pyproject.toml
-# ([tool.coverage.report] fail_under = 65), so this target, CI and a developer's
-# own command all read ONE number instead of three that drift. Measured: 65.32%
-# on Python 3.9 (the CI interpreter) with branch coverage on.
+# ([tool.coverage.report] fail_under = 90), so this target, CI and a developer's
+# own command all read ONE number instead of three that drift. Measured: 94.42%
+# on Python 3.9 (the CI interpreter) with branch coverage on, so the floor sits a
+# few points BELOW it: a floor one point under the current number turns every
+# honest refactor into a demand for a new test, and a gate that has to be
+# negotiated gets bypassed. It was 65 when the gate landed, 73 after the slice and
+# deployment-module tests, 76 after the settings/schema/JWT/entry-point/connection/
+# composition/S3 tests, and 90 after the router/task/mail/cache/storage/jobs/
+# matching contract tests - the floor follows the tests, never the other way round.
 coverage: _require-python
 	@if [ ! -d backend/tests ]; then printf '%s\n' "coverage: SKIP backend - backend/tests/ does not exist"; elif ! $(PYTHON) -c 'import coverage' >/dev/null 2>&1; then printf '%s\n' "coverage: SKIP backend - coverage is not importable by $(PYTHON)" "          install it:  $(PYTHON) -m pip install coverage"; else printf '%s\n' "coverage: backend branch coverage (floor from backend/pyproject.toml)"; ( cd backend && $(PYTHON) -m coverage run --branch --source=service --rcfile=pyproject.toml -m pytest -q && $(PYTHON) -m coverage report --rcfile=pyproject.toml ) || exit 1; fi
 

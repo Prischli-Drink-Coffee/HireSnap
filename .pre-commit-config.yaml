@@ -172,6 +172,14 @@ repos:
       # enforced at the same moment as the cross-repo ones instead of in a CI job
       # nobody watches.
       #
+      # WHY check_module_complexity.py rides in the same hook: it is the third
+      # stdlib-only guard the backend ships, and the shape rule and the size rule fail
+      # for the same reason at the same moment - a module that became the place where
+      # everything happens is the one that outgrew both its slice and its ceilings. A
+      # second hook would also mean a second interpreter probe and a second line in
+      # every output; one loop over the submodules' guards keeps the cost and the
+      # reporting in one place.
+      #
       # WHY absent is a SKIP: the file lives in the backend gitlink, so a clone
       # without submodules does not have it, and run_guard.sh exits 2 on a missing
       # script (it cannot tell "typo" from "not checked out"). The -f test makes
@@ -182,6 +190,7 @@ repos:
         name: guard - backend vertical-slice layout
         entry: >-
           bash -lc 'for guard in backend/scripts/check_backend_layout.py
+          backend/scripts/check_module_complexity.py
           ml/scripts/check_ml_service_layout.py; do
           if [ ! -f "$guard" ]; then
           echo "SKIP $guard: not in this checkout (the submodule is absent or the guard has not landed) - nothing was checked"; continue; fi;

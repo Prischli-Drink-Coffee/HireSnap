@@ -909,22 +909,32 @@ The docstring says so in the code itself (`matching_service.py:222-227`: *"KNOWN
 PRESERVED ON PURPOSE ... Fixing it changes stored data, which is a migration"*), so a reader
 who finds the loop is told why it is still there rather than assuming it was missed.
 
-**Why it is invisible today.** Nothing calls the function. It has no route of its own - the
-four `inference` routes call `upload_video`, `upload_vacancy`, `get_all_vacancies` and
-`get_all_candidates` - and a tree-wide search finds exactly one occurrence of the name, its
-own `def` at `matching_service.py:216`. So the wrong rows were never written by this
-deployment; the defect is a trap for whoever wires the pipeline back up, which is the
-reason it is recorded here rather than silently fixed or silently dropped.
+**Why it is invisible in production.** No route calls the function. It has no route of its
+own - the four `inference` routes call `upload_video`, `upload_vacancy`, `get_all_vacancies`
+and `get_all_candidates` - so this deployment never wrote a wrong row; the defect is a trap
+for whoever wires the pipeline back up, which is why it is recorded here rather than silently
+fixed or silently dropped. Outside `tests/`, a tree-wide search finds exactly one occurrence
+of the name: its own `def` at `matching_service.py:216`.
 
 **Mitigation.** Fix it in the same change that gives the function a caller, together with
 the backfill for rows already written by the old `main_services.py`: the pair is one
 migration and one loop. Until then the honest statement is that the link table cannot be
 trusted if it has any rows in it, and a fresh database has none.
 
-**What would have caught it.** Nothing in the tree does. It is not a syntax error, it is not
-a type error (`j` is an `int` and `personalities[j]` type-checks), and no test exercises the
-function. ruff and mypy are both clean on it, which is the same lesson as §18 from the other
-side: a shape-only suite reads as coverage.
+**Pinned by a test, not merely described.**
+`backend/tests/test_slices_application.py::test_similarity_stores_the_personality_the_score_belongs_to`
+(`:861-921`) states the correct expectation - a vacancy that scores against OCEAN column 0
+must be stored against `personalities[0]` - and is marked `xfail(strict=True)` with a reason
+naming this section (`:861-869`). Two consequences worth knowing: the suite is green **on** the
+bug rather than blind to it, and `strict=True` turns an unexpected pass into a failure, so
+fixing the loop and deleting the marker have to happen in the same commit.
+
+**What would have caught it originally.** Nothing in the tree did. It is not a syntax error,
+it is not a type error (`j` is an `int` and `personalities[j]` type-checks), and until the
+slice move no test exercised the function at all. ruff and mypy are both clean on it, which is
+the same lesson as §18 from the other side: a shape-only suite reads as coverage. What changed
+is that the gap is now asserted from the outside - an xfail is a recorded expectation, not a
+green tick.
 
 ## 27. The `jobs` slice has no HTTP route, on purpose
 
@@ -987,6 +997,361 @@ end-to-end test of these four routes still needs MySQL and the sidecar, so it be
 integration suite (`backend/tests/integration/pipeline_smoke.py`, behind
 `HIRESNAP_INTEGRATION=1`), not to the unit run.
 
+## 29. Stored notebook output, and a schema sketch that lied
+
+**Two pieces of repository weight, removed in the same change.** Neither was a bug in the
+running system; both made the checkout say something that is not true.
+
+### 29.1 The notebooks carried their outputs, and one of them looked like a checkpoint
+
+All seven notebooks under `backend/notebooks/` were committed with their cell outputs
+attached. `KNN.ipynb` was 252,841 bytes - the single largest Python-adjacent file in the
+submodule - and the overwhelming majority of that was base64 PNG output: cluster scatter
+plots from a run against a database that no longer exists. A reader scanning the tree for
+`torch`-sized blobs found that file and had to open it to learn it was a picture.
+
+Every stored output and every `execution_count` was cleared. Source cells are untouched.
+Measured: 336,307 bytes -> 40,909 bytes in total, and `KNN.ipynb` 252,841 -> 13,152.
+The seven files now parse with zero outputs and zero execution counts.
+
+**Why it matters beyond the bytes.** An output is a snapshot of one machine's run - it is
+stale the day after it is committed, it cannot be reviewed as a diff, and it is the one part
+of a notebook that a reviewer learns to skip. A notebook whose outputs are cleared is a
+document; one with outputs is a screenshot of a terminal nobody can reproduce. The cost is
+that a reader no longer sees the expected result inline, which is why the same numbers
+belong in prose (this file, the docs under `backend/docs/`) rather than in a cell's
+`display_data`.
+
+**What would have caught it.** Nothing did. No linter opens a `.ipynb`, the large-file hook
+in `.pre-commit-config.yaml` caps at 512 KB so a 253 KB notebook passes, and `git` stores it
+as one opaque blob. The habit that catches it is checking `git status` after opening a
+notebook in Jupyter at all - merely executing and saving rewrites the outputs.
+
+### 29.2 `backend/docs/images/SQL.txt` was a schema sketch that contradicted the schema
+
+`backend/docs/images/SQL.txt` (2,543 bytes, in the same directory as the README's
+presentation assets) held a hand-written sketch of the tables, and it was **wrong**: it
+declared a single-value `ENUM('candidate, employer')` - one string, not two values - where
+`backend/database/HireSnap.sql:134` has the two-value `enum('candidate','employer')` the code
+actually writes. A reader who
+trusted the sketch over the dump would conclude the column cannot hold two roles.
+
+It was referenced by no file in the repository, in any extension. Deleted rather than
+corrected: `backend/database/HireSnap.sql` is the schema of record, it is the file the MySQL
+init mount reads (`docker/docker-compose.yaml:200`), and a second, unreferenced description
+of the same tables can only drift. The nine remaining files in `backend/docs/images/` are the
+README's presentation assets (PDF, PPTX, SVG, PNG) and they stay.
+
+### 29.3 The 14 MB is a deliberate, documented cost
+
+`backend/docs/images/` holds ~15.2 MiB in nine files, of which `HireSnap.pdf` is 10.3 MB and
+`HireSnap.pptx` 3.4 MB. They live **inside a gitlink**, so every clone of the superproject
+that runs `git submodule update` downloads them, and they are duplicated in every fork. That
+is recorded here as a known cost rather than an oversight: they are the product's
+presentation material, they are the images `backend/README.md` embeds, and moving them to an
+external host would break the README in an offline checkout. The alternative - Git LFS - was
+not taken because it turns a `git clone` into a two-step operation for every contributor and
+adds a server-side dependency the project does not otherwise have.
+
+**If this ever needs to shrink**, the order is: move the two large binaries to a release
+asset and link them, keep the SVGs (they are ~1.1 MB together and render in the README), and
+leave the rest. Do not reach for history rewriting to reclaim the space: the blobs stay in
+every existing clone regardless.
+
+## 30. `Invalid authentication scheme.` is dead code
+
+**Defect, as it stands.** `JWTBearer.__call__` has three rejection branches
+(`backend/service/api/security.py:25-44`). The first one compares the scheme:
+
+```python
+# backend/service/api/security.py:32-36
+if credentials:
+    if not credentials.scheme == "Bearer":
+        ex = HTTPException(status_code=403, detail="Invalid authentication scheme.")
+        log.exception(ex)
+        raise ex
+```
+
+It cannot run. `super().__call__(request)` on line 31 is Starlette's
+`HTTPBearer`, which already rejects a non-bearer scheme - with
+`403 Invalid authentication credentials` when `auto_error=True`, and by
+returning `None` (which falls through to this class's own
+`403 Invalid authorization code.`) when it is off. Line 32's `if credentials:` is
+only true after the scheme has been accepted, so the body of the branch is unreachable in
+both modes.
+
+**Why it survives review.** It reads as defence in depth, and it is the kind of code a
+reviewer skims and approves precisely *because* it is checking something. The message was
+also quoted in `docs/SERVICE_CONTRACTS.md` as a 403 a client can receive - it said so until
+this pass corrected it - which made the branch self-documenting without ever being exercised.
+
+**Status: documented, not fixed.** Changing it means either deleting a branch (a no-op for
+every client) or reordering the scheme check ahead of `super()`, which would change the
+403 body a non-bearer request gets today. The second is a wire-contract change, so it is a
+decision rather than a tidy-up - the same rule as `ConflictError` being a 404 (§9).
+
+**What caught it.** `backend/tests/test_security_jwt.py:71-86` asserts the message a
+client *actually* receives in both modes and says `REPORTED, NOT FIXED` in its docstring.
+Nothing in the suite could have found it by accident: the branch has no observable effect.
+
+## 31. A non-admin on an admin route gets `403`, not `401`
+
+**Defect, as it stands.** The admin check raises inside the function's own exception
+handler, so the raise is immediately swallowed by it:
+
+```python
+# backend/service/api/security.py:46-60, condensed
+try:
+    payload = decode_jwt(jwtoken)
+    if self.access_level == 1 and payload.get("sub") != "admin":
+        raise HTTPException(status_code=401, detail="Have not access")   # :52
+except Exception as ex:          # :55 - catches the line above
+    payload = None               # :57
+return bool(payload)             # :60 -> False
+```
+
+`False` makes `__call__` render `403 Invalid token or expired token.`
+(`:37-40`), so a level-1 route answers `403` to a logged-in non-admin and to an
+expired token alike. There are **17** level-1 dependency sites across nine router modules
+(measured by grepping `JWTBearer(access_level=1)`), including
+`users_api.py:107`, `files_api.py:91` and `candidate_vacancies_api.py:101`.
+
+**Why it survives review.** An expired token *should* be a 403 here, so the common case
+looks right. The wrong case - a valid token with the wrong role - is indistinguishable from
+it at the client, and nothing in the tree tests an admin route end to end.
+
+**Consequence for clients.** "Not an admin" cannot be told apart from "session expired". A
+SPA cannot decide between *re-authenticate* and *you are in the wrong account*, so it has to
+do the safe thing (re-authenticate) and the user sees a sign-in page they cannot get past.
+An operator reading the log sees the whole traceback, because `log.exception(ex)` runs
+before the re-raise; the client sees nothing of it.
+
+**Why it is not fixed here.** The narrow fix is one line - move the admin check after the
+`try`, or catch `HTTPException` and re-raise. Both change the status a client
+receives for a whole class of callers, which is a contract change.
+
+**Pinned as-is.** `backend/tests/test_security_jwt.py:123-137` asserts the 403 and its
+docstring records why the 401 is unreachable. Fixing the code has to change that test in the
+same commit, which is the point.
+
+## 32. A missing dump leaves a half-created database and the process still exits 0
+
+**Defect, as it stands.** `CreateSQL.read_sql()` wraps its whole body in
+`except Exception` and only logs:
+
+```python
+# backend/service/infrastructure/database/schema.py:128-131
+except Exception as ex:
+    log.warning("Error during SQL script execution", exc_info=ex)
+finally:
+    self.connection.close()
+```
+
+By the time that fires, two statements have already committed: `CREATE DATABASE IF NOT
+EXISTS` (`:87`) and `USE` (`:88`). A dump that is missing, unreadable or
+truncated therefore leaves an empty database behind, plus whatever earlier statements in the
+dump succeeded, and the caller has no way to know: `read_sql()` returns `None` either
+way, `main()` returns 0, and uvicorn then starts against a schema that is not there.
+
+**Why it survives review.** Every statement in the dump is itself wrapped in
+`except pymysql.MySQLError` (`:99-104`) on purpose - that is what lets the dump be
+re-applied to a schema that already has half the tables, where "table exists" is an error on
+every line. The outer handler was written in the same spirit ("the bootstrap is a convenience,
+do not crash the server over it"), but the two are not the same case: a rejected DDL statement
+is expected, a missing file is not.
+
+**Consequence.** The first symptom is an API that boots, answers `/server/health` with
+`200`, and then 500s on the first query against a table that was never created. The log line
+is at `WARNING` level among uvicorn's output, so it is easy to miss on a first run - and
+a first run is exactly when the bootstrap matters.
+
+**What would change it.** Distinguish the two failures: let the file-open error propagate (or
+exit non-zero), keep the per-statement tolerance. The bootstrap is the one code path in the
+tree whose job is to fail loudly, and it is the one that swallows.
+
+**Pinned.** `backend/tests/test_schema_bootstrap.py:302-320` asserts what is *correct*
+about this path - the connection is closed even when the dump is missing - and says
+"DOCUMENTED, NOT ENDORSED" in its docstring rather than treating the silence as behaviour.
+
+## 33. The dump is split on `;` with `str.split`
+
+**Defect, as it stands.** `read_sql()` turns the SQL file into statements with a string
+split (`backend/service/infrastructure/database/schema.py:95`):
+
+```python
+statements = [stmt.strip() for stmt in sql_script.split(";") if stmt.strip()]
+```
+
+That cannot tell a statement terminator from a semicolon inside a quoted value. A row like
+`'open; part time'` in the dump would be cut in half, and the two halves would be executed
+as two broken statements - the first of which fails silently under §32's per-statement
+handler.
+
+**Measured today: safe.** `backend/database/HireSnap.sql` splits into exactly 50
+statements, none contains an escaped quote (`\'`), none contains `;;`, and every one
+has balanced single quotes. The full `ENUM('candidate','employer')` form is used rather
+than a comma-joined string (`:134`), which is one reason the dump has stayed
+splitter-friendly.
+
+**Why the fix is not a SQL parser.** A real splitter is a parser, and a parser in a developer
+convenience script would be more code than the rest of the file. The cheaper invariant is that
+the dump stays simple, so the guard is a test on the *dump* rather than on the splitter:
+`backend/tests/test_schema_bootstrap.py:322-337` asserts the statement count, the balanced
+quotes and the absence of `\'` and `;;`. A future dump that breaks the assumption
+fails there instead of halfway through a bootstrap.
+
+**Residual risk.** The invariant is on the schema of record, not on the CSV seed path, which
+uses parameterised `executemany` (`:107-124`) and is immune. So the exposure is only
+ever a hand-edited dump.
+
+## 34. The log path in the YAML is relative to the working directory
+
+**Defect, as it stands.** Two places decide where `app.log` goes, and they disagree in
+form:
+
+- `backend/service/configuration/logging.yaml:11` says `filename: 'logs/app.log'` -
+  a **relative** path, resolved by `logging.FileHandler` against the process CWD.
+- `backend/service/configuration/paths.py:74-76` exposes `logs_dir()` =
+  `BACKEND_ROOT / "logs"`, an **absolute** path, and
+  `service/configuration/logging.py:43-46` uses it.
+
+The YAML is not templated from `paths.py`, and the YAML is what actually configures the
+process: `main.run_server()` loads it with `dictConfig` (`service/main.py:59-60`) and
+passes the same file to `uvicorn.run(log_config=...)` (`:66`).
+
+**Why it has not bitten.** In the image `WORKDIR` is `/app` and the backend root is also
+`/app`, so `logs/app.log` and `/app/logs/app.log` are the same file, and
+`infra/logs` is mounted at `/app/logs`. The two definitions agree by coincidence of
+layout, not by construction.
+
+**Consequence.** Start the server from any other directory - `cd / && python -m service.main`
+or a systemd unit without `WorkingDirectory` - and the application's own log lands in
+`backend/logs/app.log` (via the absolute path) while uvicorn's file handler creates a second
+`logs/` tree under the CWD. Two files, neither complete, and the post-mortem reads half a
+story. A read-only CWD is also the difference between "file logging disabled" and a working
+log.
+
+**What would change it.** One templated placeholder, or dropping the file handler from the YAML
+and letting `setup_logging()` own the file - the second is a code change and would
+re-open whether uvicorn's own records reach the file at all.
+
+## 35. Every boolean except `DEBUG` can be typo'd into "off"
+
+**Defect, as it stands.** `DEBUG` is parsed strictly: `service/main.py:39-46` accepts
+`TRUE` or `FALSE` and raises `RuntimeError("DEBUG must be TRUE or FALSE, got ...")`
+for anything else. Nothing else in the tree is that careful. `settings.py:57-62` is the
+shared flag parser:
+
+```python
+# backend/service/settings.py:57-62
+def _flag(*names, default=False):
+    raw = _first(*names, default="")
+    if not raw:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+```
+
+`INIT_DB=ture` or `MAIL__ENABLED=tru` is therefore silently `False` - the same value
+as `false`, with no warning. The platform facades clone the same set
+(`infrastructure/cache.py:49`, `storage.py:44`, `mail.py:46`, and a fifth copy in
+`infrastructure/messaging/celery_app.py:75`), so `CELERY__ENABLED=ture` leaves the
+workers idle while the API does the work inline.
+
+**Where it is *not* silent.** A misspelled **backend name** does warn and fall back:
+`CACHE__BACKEND=redys` logs `cache status=unknown_backend value=redys action=using` and
+uses memory (`cache.py:483-486`), with the same pattern in `storage.py:471-473` and
+`mail.py:296-298`. Numbers are forgiving too, deliberately (`settings.py:65-73` falls
+back on `ValueError`). Booleans are the only class that fails silently in the "off"
+direction.
+
+**Consequence.** The failure is invisible in the worst way: the stack starts, health is green,
+and one optional feature is quietly absent. `MAIL=1` with a typo in `MAIL__ENABLED` gives
+a mailer that writes nothing; `CELERY=1` with a typo gives inline execution inside the
+request thread, which is exactly the latency the profile was turned on to avoid.
+
+**What would change it.** Treat an unparseable boolean as an error - the `DEBUG` rule
+applied to the rest - or log a warning when a non-empty value does not match the truthy set.
+Either is a behaviour change for a stack that is expected to start, which is why the strict
+parser was only ever applied to the one key whose ambiguity is dangerous.
+
+## 36. `fastapi` is still imported from `service/shared/`
+
+**Defect, as it stands.** [ADR/0008](ADR/0008-vertical-slice-services.md) moved the HTTP mapping
+to the edge: application and domain modules raise `ServiceError` and no framework reaches
+the middle of the tree. `service/shared/validation.py` is clean - its docstring says so
+explicitly ("WHY no fastapi here any more") and it raises `ConflictError` at `:41` and
+`:54`. One shared module is not:
+
+```python
+# backend/service/shared/tokens.py:23-24, :114-126
+from fastapi import HTTPException, status
+from fastapi.security import HTTPBearer
+
+http_bearer = HTTPBearer()
+...
+raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Invalid token type ...")
+```
+
+Three legacy repositories do the same, and those are recorded as source patches in
+[ADR/0005](ADR/0005-source-patches.md): `candidate_vacancy_repository.py:3-6`,
+`personality_candidate_repository.py:3-6` and `personality_vacancy_repository.py:3-6` -
+each imports `HTTPException` to raise a 400 where the old code did, so the layer keeps a
+framework dependency its siblings do not.
+
+**Why no gate catches it.** The boundary suite asserts the framework-free rule for a
+slice's `presentation/` (rule 2), for `application/` (rule 3) and for a `domain/` that exists
+(rule 4), and `backend/scripts/check_backend_layout.py` rule 7 asserts that `models/` and
+`shared/` do not import *upward* into `service.api` or `service.services`. Neither says
+anything about a third-party framework: `fastapi` is not an upward import, so the shape
+checks are silent and the module keeps a dependency its siblings do not have. `tokens.py` is
+a token *codec*, and a codec that cannot be imported without starlette cannot be reused by a
+worker, a CLI or a test that does not install the API stack.
+
+**Why it is not fixed here.** `validate_token_type()` raising `HTTPException` is how the
+sign-in flow produces its 401 detail, and two tests assert that shape directly:
+`backend/tests/test_security_jwt.py:216-227` (the message names both token types in repr
+form) and `backend/tests/test_slices_application.py:750-762` (an application-layer test
+catching a `fastapi` exception, and saying in its docstring that this is deliberate).
+Moving it to `UnauthorizedError` changes which handler renders it - correct, but a
+contract-adjacent change that belongs with a route test rather than a docs pass.
+
+## 37. The employer vacancy route accepts a vacancy and stores nothing
+
+**Not a stub a refactor introduced - the feature is half-built and honest about it.**
+`POST /upload_vacancy/inference/employer` validates four form fields and then returns a fixed
+body:
+
+```python
+# backend/service/services/matching/application/matching_service.py:343-353
+def upload_vacancy(self, name, description, salary, skill):
+    """... the form posts text and the pipeline needs an embedding the
+    employer has not produced ..."""
+    log.info("vacancy received but not persisted: name=%r salary=%r", name, salary)
+    return {"message": "test"}
+```
+
+**What that means for a user.** The form succeeds, the toast says "request sent", and the
+vacancy does not appear in `GET /vacancies/`. The frontend says so in two places rather
+than hiding it: `frontend/src/shared/api/services/vacancyService.js:22-31` warns that the
+route is a stub and explicitly says *not* to "fix" it by switching to `POST /vacancies/`
+(that would skip the embedding the recommendation routes need), and
+`frontend/src/features/vacancies/components/VacancyCreateForm.jsx:8-16` explains why the
+success toast is worded "request sent" rather than "vacancy added".
+
+**What implementing it needs.** The bridge already exists and has no caller:
+`backend/service/infrastructure/ml_sidecar.py:383-398` can embed a string through the
+sidecar's `/v1/embed/text`, and its docstring says as much - *"No call site uses this yet
+... the first caller that needs text embeddings (the vacancy side of the ranking) should not
+have to re-derive it."* So the work is: embed the vacancy text, persist the vacancy and its
+vector in one transaction, and give the ranking a vacancy embedding to compare against.
+
+**Why it is recorded rather than done.** It is a feature, not a defect in the move: the old
+module returned the same literal. Doing it here would mean a new call path, a schema question
+(where does a vacancy embedding live) and a contract change, in a refactor whose whole claim
+is that the wire behaviour did not move. The honest state is written down so the next reader
+does not mistake it for a regression.
+
 ## What is *not* on this list
 
 Three changes to application source ship with this stack, and they are deliberately excluded
@@ -1030,16 +1395,45 @@ production:
   answered `NameError`. ruff's F821 found it; the `Depends` wiring makes a recurrence an
   import error rather than a 500.
 
-Five entries are new in this revision. §23 (one inference path, serialised GPU work),
+Six entries are new since the slice refactor. §23 (one inference path, serialised GPU work),
 §24 (a credential rotated at the issuer, still in history) and §25 (the vertical slices are a
 package boundary, not a domain model - raw-SQL repositories, no transaction boundary, shared
 entity models) are about the *shape* of the tree rather than a bug. §26 (the personality-vacancy
-link is written against the stale index) and §27 (`jobs` has no route, on purpose) are the two
-the slice move made worth writing down: one is a real defect preserved because fixing it is a
-migration, the other is a deliberate absence the layout guard names at
-`backend/scripts/check_backend_layout.py:121`. All five are listed here rather than closed
-because nothing about them is fixed or fixable by a test: they are the deliberate stopping
-point of the refactor that [ADR/0008](ADR/0008-vertical-slice-services.md) records.
+link is written against the stale index) and §27 (`jobs` has no route, on purpose) are the
+two the slice move made worth writing down: one is a real defect preserved because fixing it is
+a migration, the other is a deliberate absence the layout guard names at
+`backend/scripts/check_backend_layout.py:121`. §29 is a third kind again: notebook output that
+looked like a checkpoint and a schema sketch that contradicted the schema, both removed from the
+checkout rather than from the running system. None of the six is a bug a test could turn green:
+they are the deliberate stopping point of the refactor that
+[ADR/0008](ADR/0008-vertical-slice-services.md) records.
+
+Eight more were documented in the same read-through that produced the ratchet and the coverage
+floor, and they are a different kind again - each is a real defect in code that the refactor
+moved without changing, so the behaviour is exactly what it was before the move:
+
+- §30 and §31 are the two auth quirks. A dead branch that reads like protection, and a 401 that
+  a client can never receive because the function's own handler swallows it.
+- §32, §33 and §34 are the bootstrap and its logging: a swallowed dump error, a splitter that
+  assumes no semicolons in string literals, and a log path that is relative in the YAML and
+  absolute in the helper.
+- §35 is the flag parser: every boolean except `DEBUG` turns a typo into "off" silently.
+- §36 is the one `shared/` module that still imports `fastapi`, plus the three legacy
+  repositories that do the same as recorded source patches.
+- §37 is the employer vacancy route: it validates, answers, and stores nothing - honestly, and
+  with the frontend saying so.
+
+All eight are *documented, not fixed*, and in every case for the same reason: the narrow fix is
+a one-line change that alters something a client can observe - a status, a message, a file
+that suddenly exists or does not - and a refactor whose claim is "the wire behaviour did not
+move" is the wrong commit to change it in. Six of the eight are pinned by a test that asserts
+the behaviour as it is and says so in its docstring: `test_security_jwt.py:71-86` (§30),
+`test_security_jwt.py:123-137` (§31), `test_schema_bootstrap.py:302-320` (§32),
+`test_schema_bootstrap.py:322-337` (§33, and only on the input - the dump - not on the
+outcome), `test_main_entrypoint.py:219-233` (§34) and `test_settings.py:255-265` (§35).
+§36 is pinned indirectly: the tests it names assert the current exception shape rather than the
+import. §37 is the one with no test at all - no route test posts a vacancy and checks that
+nothing was stored - which is part of why it is still open.
 
 Everything else is documented here rather than patched, so that the next reader can tell
 "the stack works around this" from "the stack is broken here".

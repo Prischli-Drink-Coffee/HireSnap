@@ -53,11 +53,14 @@ action, so no action can accidentally run against a different project or env fil
 
 > **`make` targets.** The root `Makefile` is a thin wrapper over exactly these
 > scripts: `make env`, `make build`, `make run-dev`, `make run-prod`, `make logs`,
-> `make down`, `make ps`, `make smoke`, `make guards`, `make test` and
-> `make config`. Every target shells into `docker/run.sh` or `docker/build.sh` rather
-> than calling compose itself, so a command typed by hand and a command run through
-> `make` cannot diverge. The direct script form is used throughout this runbook because
-> it works on a machine with no `make`, and because it makes the flags visible.
+> `make down`, `make ps`, `make smoke`, `make config` and `make guards`. Every one of
+> those shells into `docker/run.sh` or `docker/build.sh` rather than calling compose
+> itself, so a command typed by hand and a command run through `make` cannot diverge.
+> A second group answers the local gates without touching Docker: `make test`,
+> `make ml-test`, `make lint`, `make structure` and `make coverage` (branch coverage of
+> `backend/service/` against the floor in `backend/pyproject.toml` - §16.1). The direct
+> script form is used throughout this runbook because it works on a machine with no
+> `make`, and because it makes the flags visible.
 
 ## 2. Prerequisites
 
@@ -849,7 +852,10 @@ swallowed by design: mail is never allowed to fail a request.
 ## 16. The backend's own gates, and the contract snapshot
 
 Two commands answer "is the backend tree still what the docs say it is", and neither needs
-Docker, an env file or a running stack:
+Docker, an env file or a running stack. Three more cover the measurable half of the same
+question - how much of the tree a test has ever executed (§16.1), what the public contract
+currently is (§16.2), and whether a module grew past what the tree already accepts
+(§16.3):
 
 ```bash
 cd backend
@@ -867,19 +873,77 @@ under `service/services/`, a directory under it that has any layer has `applicat
 `ROUTERS` tuple, the retired `service/domain/`, `service/repositories/` and
 `service/api/routers/` stay gone, `models/` and `shared/` import no upward layer, and there is
 exactly one pytest configuration. The GPU boundary is the other guard, not this one. From the
-superproject root `make structure` runs both in one command (`Makefile:280-282`). That target is
-honest about absence in two different ways, and the difference matters: the superproject half
-errors when **no** layout guard is present (`scripts/check_ml_boundary.py` missing), while the
-submodule half prints `SKIP` for a `backend/scripts/check_backend_layout.py` that is not in this
-checkout — a checkout made without `--recursive` lacks the file, and a missing file is a missing
-prerequisite, not a broken tree.
+superproject root `make structure` runs four of them in one command (`Makefile:292-294`):
+one superproject guard (`scripts/check_ml_boundary.py`, plus any
+`scripts/check_*structure*.py` added later, because that half globs) and three submodule
+guards (`backend/scripts/check_backend_layout.py`,
+`backend/scripts/check_module_complexity.py`,
+`ml/scripts/check_ml_service_layout.py`). That target is honest about absence in two
+different ways, and the difference matters: the superproject half errors when **no**
+layout guard is present (`scripts/check_ml_boundary.py` missing), while the submodule half
+prints `SKIP` for a guard that is not in this checkout — a checkout made without
+`--recursive` lacks the file, and a missing file is a missing prerequisite, not a broken
+tree.
 
 Use the repository's own interpreter if you have one — the tests need the application's
 dependencies, and a bare `python` on Windows is often the Microsoft Store stub that exits 49
 (§10). On this workstation that is
 `R:/HireSnap/.venv-refactor/Scripts/python.exe -m pytest -q` from `backend/`.
 
-### 16.1 Regenerating the OpenAPI contract snapshot
+### 16.1 The coverage floor - and why it is not `pytest --cov`
+
+`make coverage` measures branch coverage of `backend/service/` and fails below the floor.
+The number lives in exactly one place, `backend/pyproject.toml`
+(`[tool.coverage.run]` at `:111-113` with `source = ["service"]` and `branch = true`;
+`[tool.coverage.report]` at `:115-117`; `fail_under = 90` at `:129`), so the Makefile target
+(`Makefile:370-371`), the CI step (`.github/workflows/ci.yml:437-445`) and a developer's own
+command cannot drift apart.
+
+```bash
+make coverage                            # branch coverage of service/, floor from pyproject.toml
+cd backend && python -m coverage run --branch --source=service --rcfile=pyproject.toml -m pytest -q
+cd backend && python -m coverage report --rcfile=pyproject.toml
+```
+
+**The floor is 90 and the measurement is 94.42%**, taken on the interpreter that counts:
+Python 3.9 with `requirements.txt` only, the way the CI job runs it
+(`.github/workflows/ci.yml:237` installs that interpreter, `:443` installs `coverage==7.16.2`).
+The 3.10 refactor venv measures a fraction more, 94.44%, because a few stdlib-only branches differ
+between the two pythons.
+
+The floor deliberately sits several points **below** the measurement rather than one point below
+it. A floor one point under the current number turns every honest refactor - a branch deleted
+because it was unreachable, two helpers merged into one - into a demand for a new test to hold an
+arbitrary constant, and a gate that has to be negotiated is a gate people pass with
+`--no-verify`. Far below it stops protecting anything. 90% is the point where deleting a real
+test file still fails the build while a refactor does not. Raise it in the same commit that adds
+the coverage, never ahead of it; the history is in the same comment block - 46% when the suite
+first ran (every application and persistence module sat at zero while the routers answered), 65
+when the gate landed, 73 with the slice and deployment-module tests, 76 with the settings,
+schema-bootstrap, JWT, entry-point, connection-recovery, composition and S3 tests, and 90 with the
+router, task, mail, cache, storage, job-service and matching-pipeline contract tests that carried
+the tree to 94%.
+
+**Why the CLI and not `pytest --cov`.** pytest-cov resolves its configuration from
+`.coveragerc` by default and ignores `pyproject.toml`, so `pytest --cov` silently records
+*statement* data despite `branch = true`; the next run that does read `pyproject.toml` then dies
+with `Can't combine statement coverage data with branch data`. That was measured on this host,
+twice, in both directions. `coverage run --rcfile=pyproject.toml` has one entry point and an
+explicit configuration file, so the number is a property of the code rather than of which file
+got discovered.
+
+**Why branch coverage.** Half of this tree's rules *are* the error branch - a 404 that no test
+ever triggers is untested work that a line-coverage number happily counts as covered.
+
+The suite has exactly one **skip** and one **xfail**, and both are intentional. The skip is
+`tests/test_service_boundary.py:302` — no slice has a `domain/` layer, and the rule says so
+rather than passing vacuously. The xfail is the preserved defect of
+[KNOWN_GAPS.md](KNOWN_GAPS.md#26-the-personality-vacancy-link-is-written-against-the-wrong-personality)
+and its `strict=True` marker means an unexpected pass fails the run, so the fix and the marker
+removal land together. No pass count is quoted here on purpose: it changes with every test and
+would be stale within a day.
+
+### 16.2 Regenerating the OpenAPI contract snapshot
 
 The public shape of the API is recorded in
 `backend/tests/snapshots/critical_endpoint_openapi.json`: the paths, the methods, the
@@ -900,3 +964,56 @@ The snapshot is deliberately partial — it covers the endpoints the SPA calls a
 health route, not the whole generated document — because a full dump changes on every
 description edit and would be re-accepted reflexively. [SERVICE_CONTRACTS.md §5](SERVICE_CONTRACTS.md#5-versioning)
 states the same rule from the client's side.
+
+### 16.3 The complexity ratchet - ceilings, and a baseline that may only shrink
+
+`backend/scripts/check_module_complexity.py` measures five numbers over
+`backend/service/` and compares each against a ceiling
+(`backend/scripts/check_module_complexity.py:1-65`, defaults at `:651-655`):
+
+| Measurement | Ceiling | Worst in the tree today |
+|---|---|---|
+| Lines in one file | 750 | `service/infrastructure/messaging/tasks.py`, 555 |
+| Lines in one function | 250 | `read_sql` in `service/infrastructure/database/schema.py`, 70 |
+| Cyclomatic complexity of one function | 70 | the same `read_sql`, 15 |
+| Import fan-out of one module (only under `service/services`) | 120 | `matching_service`, 11 |
+| Import fan-in of one module (only under `service/services`) | 160 | `candidate_vacancy_repository`, 1 |
+
+```bash
+cd backend && python scripts/check_module_complexity.py
+make structure        # runs it from the root, with the other layout guards
+```
+
+**It is a ratchet, not a wall** (`check_module_complexity.py:39-50`). Five behaviours,
+and the asymmetry between them is the whole point:
+
+- a module over a ceiling that is **not** in the baseline fails as a *new* violation;
+- one that is in the baseline but has **grown** fails with `debt grew, was N`;
+- one that shrank, or no longer appears, is **printed for removal** from
+  `backend/scripts/complexity_baseline.json` and does **not** fail the run — paying debt
+  off must never be blocked by the ledger that recorded it;
+- the baseline carries no line numbers, only module keys, so moving a function around
+  inside a file does not invalidate an entry and does not need a rewrite;
+- the baseline is empty today (`backend/scripts/complexity_baseline.json`, note
+  `_note_2026-11-08_initial`): every module is under all five ceilings, so the file exists
+  as the shape a future exception has to take, not as deferred debt.
+
+**Why a ratchet rather than either extreme.** A hard ceiling with no baseline blocks the
+one commit that legitimately has to grow something (and gets deleted or raised instead); no
+guard at all lets a 2,000-line module arrive one 40-line addition at a time. Recording
+accepted debt lets the tree grow only where a person decided it had to, and the removal
+print keeps the ledger from becoming permanent.
+
+**Three wiring points**, so nobody has to guess which one is real: `make structure`'s
+submodule half (`Makefile:294`), the pre-commit hook `guard - backend vertical-slice
+layout` (`.pre-commit-config.yaml:189-200`), and a dedicated step in the backend CI job
+(`.github/workflows/ci.yml:290`). It is deliberately **not** a second call inside
+`make guards`: the question it answers — did this module grow past what we already
+accepted — is the question a module move asks, and a developer mid-move runs
+`make structure`, not `make guards` (seven superproject checks plus the two submodule
+layout guards) which wants Docker and a populated env file.
+
+The sidecar measures the same three size ceilings over `ml/service/` in
+`ml/scripts/check_ml_service_layout.py` (`:36-44`), but as a plain ceiling rather than a
+ratchet: no measurement there is near a limit, so a recorded-debt file would only be a
+second place to look.

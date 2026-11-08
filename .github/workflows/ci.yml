@@ -276,6 +276,26 @@ jobs:
           fi
           python backend/scripts/check_backend_layout.py
 
+      # WHY a ratchet and not a limit: a plain ceiling would either be loose enough to
+      # accept anything or red on the day it is switched on, and a gate that starts red
+      # teaches people to pass --no-verify (the argument the ruff step above makes about
+      # style debt). This one fails only on NEW debt or on debt that GREW past the value
+      # recorded in backend/scripts/complexity_baseline.json, so the accepted level is a
+      # file a reviewer sees in the diff instead of a number buried in the checker.
+      # WHY it runs in the backend job and not in lint: it is a property of this tree,
+      # it needs nothing installed (stdlib, ast only), and putting it here means it runs
+      # before ruff is installed - so its failure can never be mistaken for a broken
+      # toolchain. Same reason the layout guard above sits here.
+      # WHY the absence is a visible SKIP: the script lives in the backend gitlink.
+      - name: Module complexity ratchet
+        working-directory: .
+        run: |
+          if [ ! -f backend/scripts/check_module_complexity.py ]; then
+            echo "SKIP: backend/scripts/check_module_complexity.py is absent - the backend submodule was not checked out, so the size and complexity ratchet is unverified, not satisfied"
+            exit 0
+          fi
+          python backend/scripts/check_module_complexity.py
+
       - name: Install ruff
         run: python -m pip install "ruff==0.14.1"
 
@@ -390,14 +410,22 @@ jobs:
       # executed by a test, and nothing said so. A number that is only printed is
       # a number nobody protects; the floor is what turns it into a contract.
       #
-      # WHY 65 AND WHY THE INTERPRETER DECIDES: the floor is what THIS job measures
-      # (Python 3.9 + requirements.txt only), rounded down - 65.32% on the commit
-      # that introduced the gate. The refactor venv on 3.10 measures 66% because a
-      # few stdlib-only branches differ between the two pythons; pinning 66 would be
-      # a gate that is red for a reason nobody can fix. 65 is a FLOOR, not a target:
-      # it gets raised in the same commit that adds the coverage, and the number
-      # lives in backend/pyproject.toml ([tool.coverage.report] fail_under) so the
-      # Makefile target and this step cannot drift.
+      # WHY 90 AND WHY THE INTERPRETER DECIDES: this job measures 94.42% branch
+      # coverage (Python 3.9 + requirements.txt only, so that is the number that counts);
+      # the refactor venv on 3.10 measures 94.44% because a few stdlib-only branches
+      # differ between the two pythons. The floor sits BELOW the measurement on purpose:
+      # one point under the current number would turn every honest refactor - a branch
+      # deleted, two helpers merged - into a demand for a new test, and a gate that has
+      # to be negotiated is a gate people pass --no-verify. Far below it protects
+      # nothing. Where the number came from: 46% when the suite first ran, 65 when the
+      # gate landed (every application and persistence module still at zero), 73 with the
+      # slice + deployment-module tests, 76 with the settings, schema-bootstrap, JWT,
+      # entry-point, connection-recovery, composition and S3 tests, and 90 with the
+      # router, task, mail, cache, storage, job-service and matching-pipeline contract
+      # tests that took it to 94%. It gets raised in the same commit that adds the
+      # coverage, and the number lives in backend/pyproject.toml
+      # ([tool.coverage.report] fail_under) exactly once, so the Makefile target and this
+      # step cannot drift.
       #
       # WHY 'coverage run' AND NOT 'pytest --cov': measured on this host, pytest-cov
       # resolves its configuration from .coveragerc by default, ignores

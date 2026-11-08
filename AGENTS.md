@@ -101,6 +101,13 @@ wrapper over the scripts in `docker/` and only saves typing):
   publishes a port.
 - `make logs`, `make ps`, `make down`, `make guards` — inspect, stop, and run the
   `scripts/check_*.py` gates. `make smoke` proves the proxy path end to end.
+- `make coverage` — branch coverage of `backend/service/` against the floor in
+  `backend/pyproject.toml` (`fail_under = 90`, several points below the 94% the CI
+interpreter measures - see `docs/RUNBOOK.md` §16.1 for why it is not set one point under).
+It drives the `coverage` CLI, not
+  `pytest --cov`: pytest-cov reads `.coveragerc` and ignores `pyproject.toml`, records
+  statement data despite `branch = true`, and the next run dies with "Can't combine
+  statement coverage data with branch data". CI runs the same command in its own step.
 
 Backend, inside `backend/`:
 
@@ -138,7 +145,7 @@ ML sidecar, inside `ml/`:
   gone and `scripts/check_ml_boundary.py` fails a commit that brings it back.
 - `make ml-test` — the contract tests, and the form all three callers agree on: the
   Makefile target, the CI job and the docs all run `python -m pytest ml/tests -q` from
-  the **repository root** (`Makefile:350-351`, `.github/workflows/ci.yml:534`). `cd ml &&
+  the **repository root** (`Makefile:388-389`, `.github/workflows/ci.yml:594`). `cd ml &&
   python -m pytest tests -q` gives the same result, because `ml/pyproject.toml` sets
   `pythonpath = ["service"]` and `testpaths = ["tests"]`; running from the root is
   preferred so `backend/tests/` fixtures cannot leak in. They must pass with **no**
@@ -232,16 +239,24 @@ exists because the alternative silently loses work.
   relevant service test command).
 - `make guards` runs the `scripts/check_*.py` set — env-manifest parity, compose
   integrity, api-prefix contract, dockerfile pinning, healthcheck coverage, generated
-  state, the ML boundary — and fails on the first violation it finds. `make structure`
-  is the cheap subset for a move inside the tree: `scripts/check_ml_boundary.py` plus any
-  `scripts/check_*structure*.py`, then the two submodule layout guards
-  (`backend/scripts/check_backend_layout.py`, `ml/scripts/check_ml_service_layout.py`,
-  skipped when the checkout does not have them) — no docker and no env file needed
-  (`Makefile:280-282`). `make lint` is a
+  state, the ML boundary — and fails on the first violation it finds; it then runs the two
+  submodule guards (`backend/scripts/check_backend_layout.py`,
+  `ml/scripts/check_ml_service_layout.py`), seven checks plus two. `make structure` is the
+  cheap subset for a move inside the tree: `scripts/check_ml_boundary.py` plus any
+  `scripts/check_*structure*.py`, then three submodule guards — the layout of each
+  checkout and the complexity ratchet (`backend/scripts/check_module_complexity.py`) — one
+  superproject guard plus three, no docker and no env file needed (`Makefile:292-294`).
+  A size-touching diff is reviewed against `backend/scripts/complexity_baseline.json`: it
+  records the accepted over-ceiling debt, it may only shrink, and an entry that is no longer
+  needed is printed for removal rather than failing the build. `make lint` is a
   different gate: it runs `pre-commit run --all-files`, which invokes those same guards
   plus the formatting, YAML/JSON, gitleaks and large-file hooks. Both are required before
   a PR; `make lint` fails loudly when `pre-commit` is not installed instead of reporting
-  an unverified success.
+  an unverified success. CI adds three more backend gates a local `make test` does not:
+  the coverage floor (`make coverage`, `fail_under = 90` in `backend/pyproject.toml`),
+  the complexity ratchet in its own step (the same script `make structure` runs), and the
+  OpenAPI snapshot comparison — a contract change without `python -m tests.snapshot_tool
+  --write` fails there rather than in a client.
 
 ## Where Generated State Lives
 

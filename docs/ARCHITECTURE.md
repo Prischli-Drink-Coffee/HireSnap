@@ -241,9 +241,11 @@ backend/
 ├── docs/                        PLATFORM_LAYER.md and images/ (the README's assets)
 ├── notebooks/                   exploration; imported by nothing and copied into no image
 ├── scripts/                     check_backend_layout.py - the layout gate without pytest
-├── tests/                       conftest.py, the suite (twelve modules: structural, import,
-│                                contract, worker and platform tests), snapshots/ and snapshot_tool.py
-├── pyproject.toml               project metadata, ruff, mypy and the pytest configuration
+├── tests/                       conftest.py, the suite (structural, import, contract, settings,
+│                                slice, worker and platform tests), fixtures/ (incl.
+│                                fake_db.py, the in-memory stand-in for the connection handle),
+│                                snapshots/ and snapshot_tool.py
+├── pyproject.toml               project metadata, ruff, mypy, pytest and the coverage floor
 ├── requirements.txt             runtime pins, GPU-free; requirements-platform.txt beside it
 └── .python-version              3.9 - the interpreter the gates and the image agree on
 ```
