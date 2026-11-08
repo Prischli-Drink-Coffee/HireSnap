@@ -33,6 +33,15 @@ WHAT IS ASSERTED
    a rename, fails here. The committed snapshot in ml/tests/snapshots/ml_routes.json is
    checked the same way, so the three copies of the contract cannot drift apart between
    pytest runs.
+5. NO MODULE OR FUNCTION GREW PAST THE SIZE CEILINGS. File lines, function length and
+   cyclomatic complexity are measured over service/ with the same three numbers
+   backend/scripts/check_module_complexity.py uses, so "too big" means one thing in this
+   repository. The vendored service/cosmos_tokenizer/ is excluded for the reason it is
+   excluded from ruff: it is NVIDIA upstream code kept verbatim, and a 1040-line layer
+   module there is that project's design, not this tree's debt. This is a CEILING, not a
+   ratchet: the sidecar is small enough today that no measurement is near a limit, so a
+   recorded-debt file would only be a second place to look. If a number here stops fitting,
+   split the module rather than raising the ceiling.
 
 Parsed with ast, never imported: importing app.py would need fastapi and the app would
 start an engine, and this guard must run on any python in the repository.
@@ -67,6 +76,33 @@ README = ML / "README.md"
 SNAPSHOT = ML / "tests" / "snapshots" / "ml_routes.json"
 
 VENDORED_PACKAGE = "cosmos_tokenizer"
+
+# The three size ceilings, deliberately identical to the defaults of
+# backend/scripts/check_module_complexity.py. Two guards with two opinions about "too big"
+# would let a module be split in one tree and tolerated in the other for no reason a reader
+# could find. The numbers are high on purpose: this rule is here to catch the module that
+# became a dumping ground, not to argue about a 60-line function.
+MAX_LINES_PER_FILE = 750
+MAX_FUNCTION_LENGTH = 250
+MAX_CYCLOMATIC_COMPLEXITY = 70
+
+# The same branching nodes the backend ratchet counts, so a complexity number means the same
+# thing in both guards. ast.Match is 3.10+ and the runtime is 3.9, so it is looked up
+# defensively - on 3.9 there is no match statement to count, which changes no number.
+MATCH_NODE = getattr(ast, "Match", None)
+
+BRANCHING_NODES = (
+    ast.If,
+    ast.For,
+    ast.AsyncFor,
+    ast.While,
+    ast.IfExp,
+    ast.ExceptHandler,
+    ast.With,
+    ast.AsyncWith,
+    ast.Assert,
+    ast.Try,
+)
 
 # Modules that must not be imported at module scope by the two entry-point modules. These
 # are the imports that would make `import app` cost a CUDA init or fail on a CPU host; the
@@ -404,6 +440,117 @@ def check_readme_contract(report: Report) -> None:
         report.ok.append(rel(SNAPSHOT) + " pins every route app.py serves")
 
 
+def cyclomatic_complexity(function: ast.AST) -> int:
+    """Decision points in one function, counted exactly as the backend ratchet counts them.
+
+    A copy rather than a shared import for the same reason Report is a copy: the two guards
+    live in different checkouts and either one must run alone. The counting rules are the
+    contract - If/For/AsyncFor/While/IfExp/ExceptHandler/With/AsyncWith/Assert/Try add one,
+    a BoolOp adds one per extra operand (each is another short-circuit a test has to cover),
+    a match adds one per case, and the base is 1 so the number reads as paths, not ifs.
+    """
+    complexity = 1
+    for node in ast.walk(function):
+        if isinstance(node, BRANCHING_NODES):
+            complexity += 1
+        if isinstance(node, ast.BoolOp):
+            complexity += max(len(node.values) - 1, 0)
+        if MATCH_NODE is not None and isinstance(node, MATCH_NODE):
+            complexity += len(node.cases)
+    return complexity
+
+
+def measured_modules() -> List[Path]:
+    """*.py under service/, the vendored package excluded.
+
+    Excluded for the reason ml/pyproject.toml excludes it from ruff: service/cosmos_tokenizer
+    is NVIDIA upstream code kept verbatim, so its size is not a decision this repository
+    made and "fixing" it would mean diverging from upstream on the next vendor drop.
+    """
+    if not SERVICE.is_dir():
+        return []
+    files = []
+    for path in sorted(SERVICE.rglob("*.py")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(SERVICE)
+        if relative.parts and relative.parts[0] == VENDORED_PACKAGE:
+            continue
+        if set(path.parts) & WALK_SKIP_DIRS:
+            continue
+        files.append(path)
+    return files
+
+
+def check_size_ceilings(report: Report) -> None:
+    """Rule 5: no module or function in service/ outgrew the shared ceilings."""
+    files = measured_modules()
+    if not files:
+        report.skips.append(
+            "no module under " + rel(SERVICE) + " was found, so the size ceilings were not"
+            " measured. NOT a pass."
+        )
+        return
+    longest_file = (0, "")
+    longest_function = (0, "")
+    most_complex = (0, "")
+    offenders = 0
+    for path in files:
+        tree, error = parse_module(path)
+        if tree is None:
+            # core/infra/layout is not the place to explain a syntax error; ruff and
+            # compileall own it, and reporting it here too would make one defect look like two.
+            report.warnings.append(
+                rel(path) + " could not be parsed (" + error + "), so its size and"
+                " complexity were not measured"
+            )
+            continue
+        line_count = len(path.read_text(encoding="utf-8", errors="replace").splitlines())
+        if line_count > longest_file[0]:
+            longest_file = (line_count, rel(path))
+        if line_count > MAX_LINES_PER_FILE:
+            offenders += 1
+            report.failures.append(
+                rel(path) + " is " + str(line_count) + " line(s), over the ceiling of "
+                + str(MAX_LINES_PER_FILE) + ". The sidecar is a flat set of pipeline modules;"
+                " a module this large is usually two of them, so split it along the step"
+                " boundary and keep the top-level import names stable."
+            )
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            length = (node.end_lineno or node.lineno) - node.lineno + 1
+            label = rel(path) + ":" + str(node.lineno) + " " + node.name
+            if length > longest_function[0]:
+                longest_function = (length, label)
+            if length > MAX_FUNCTION_LENGTH:
+                offenders += 1
+                report.failures.append(
+                    label + " is " + str(length) + " line(s), over the ceiling of "
+                    + str(MAX_FUNCTION_LENGTH) + ". Extract the steps into named helpers so"
+                    " the pipeline stage stays readable."
+                )
+            complexity = cyclomatic_complexity(node)
+            if complexity > most_complex[0]:
+                most_complex = (complexity, label)
+            if complexity > MAX_CYCLOMATIC_COMPLEXITY:
+                offenders += 1
+                report.failures.append(
+                    label + " has cyclomatic complexity " + str(complexity) + ", over the"
+                    " ceiling of " + str(MAX_CYCLOMATIC_COMPLEXITY) + ". Each branch is a"
+                    " path a test has to cover; split the decisions into separate functions."
+                )
+    if offenders == 0:
+        report.ok.append(
+            str(len(files))
+            + " module(s) measured against the shared ceilings; longest file "
+            + longest_file[1] + " " + str(longest_file[0])
+            + " line(s), longest function " + longest_function[1] + " "
+            + str(longest_function[0]) + " line(s), highest cyclomatic complexity "
+            + most_complex[1] + " " + str(most_complex[0])
+        )
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="assert that ml/ keeps the flat sidecar layout and a truthful README"
@@ -421,6 +568,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     check_nested_packages(report)
     check_entry_module_imports(report)
     check_readme_contract(report)
+    check_size_ceilings(report)
     return report.emit(args.json)
 
 
