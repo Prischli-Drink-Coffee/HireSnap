@@ -1,4 +1,38 @@
 #!/bin/bash
+# =============================================================================
+# HISTORICAL RECORD - this file no longer runs the pipeline.
+# =============================================================================
+#
+# The OCEAN/MBTI pipeline this script drove has moved out of backend/ into the
+# "ml" submodule (ml/service/, served over HTTP by ml/service/app.py). The
+# modules it used to call - src/modelling/video_to_text.py, get_text_embedding.py,
+# get_frames.py, get_video_embedding.py, get_common_embedding.py, submit.py and
+# mbti.py - were deleted together with src/modelling/; cosmos_tokenizer/ went with
+# them. Every command below is therefore commented out, and running this file
+# prints a notice and exits non-zero on purpose.
+#
+# What replaced it:
+#   * embeddings and transcription are HTTP routes on the sidecar
+#       POST /v1/embed/video   raw video bytes  -> {vector, dim, model}
+#       POST /v1/embed/text    {"text": "..."}  -> {vector, dim, model}
+#       POST /v1/transcribe    raw media bytes  -> {text, model}
+#     The address is ML_SERVICE_URL (http://ml:8080 inside the stack,
+#     http://127.0.0.1:8080 on a checkout). The canonical description is
+#     ml/README.md, not this file.
+#   * the OCEAN/MBTI ranking step - what submit.py and mbti.py computed - did NOT
+#     become a route. It is business logic and stayed in the API, as
+#     build_matrix() in backend/src/services/main_services.py. There is no
+#     command-line equivalent any more: the API computes it per candidate when a
+#     video is uploaded.
+#
+# Why the dead commands are kept: they record the ORDER the old batch flow ran in
+# and the arguments each module took. That order is still the order the sidecar
+# executes internally, so the block below is useful when reading ml/service/. It
+# is a record, not runnable documentation.
+#
+# To process videos today, upload a candidate video through the API, or call the
+# sidecar routes directly with curl.
+# =============================================================================
 
 # Проверяем наличие аргументов
 if [ -z "$1" ]; then
@@ -22,8 +56,10 @@ USERS_FOLDER="$MAIN_FOLDER/users"
 SUBMIT_OUTPUT="$MAIN_FOLDER/ocean_results_text.pkl"
 MBTI_OUTPUT="$MAIN_FOLDER/mbti_results_text.pkl"
 
-# Создаем необходимые директории
-# mkdir -p "$TEMP_AUDIO_FOLDER" "$USERS_FOLDER" "$PERSONALITY_FOLDER" "$VACANCIES_FOLDER" "$PERSONALITY_EMBEDDINGS_FOLDER"
+# ---- Everything below is the retired pipeline, kept as history. --------------
+# The two steps that were still LIVE before the split (submit.py and mbti.py) are
+# commented out here as well: they were the only lines that could still execute,
+# and both import modules that no longer exist.
 
 # # Шаг 1: Получение текстовых эмбеддингов
 # echo "Step 1: Extracting audio, transcribing, and generating text embeddings..."
@@ -58,15 +94,21 @@ MBTI_OUTPUT="$MAIN_FOLDER/mbti_results_text.pkl"
 # # Объединяем текстовые и видео эмбеддинги
 # python src/modelling/get_common_embedding.py --video_embedding_folder "$USERS_FOLDER/video_embeddings" --text_embedding_folder "$USERS_FOLDER/text_embeddings" --output_folder "$USERS_FOLDER/embeddings"
 
-# Шаг 4: Вычисление сходства и генерация submit файла
-echo "Step 4: Calculating similarity and generating submission file..."
+# # Шаг 4: Вычисление сходства и генерация submit файла
+# echo "Step 4: Calculating similarity and generating submission file..."
 
-# Запускаем расчет сходства с личностными чертами и сохраняем результат в .pkl файл
-python src/modelling/submit.py "$USERS_FOLDER/text_embeddings" "$PERSONALITY_FOLDER/embeddings" --metric 'cosine' --o "$SUBMIT_OUTPUT"
+# # Запускаем расчет сходства с личностными чертами и сохраняем результат в .pkl файл
+# python src/modelling/submit.py "$USERS_FOLDER/text_embeddings" "$PERSONALITY_FOLDER/embeddings" --metric 'cosine' --o "$SUBMIT_OUTPUT"
 
-# Шаг 5: Вычисление MBTI и сохранение в файл
-echo "Step 5: Calculating MBTI and generating MBTI file..."
+# # Шаг 5: Вычисление MBTI и сохранение в файл
+# echo "Step 5: Calculating MBTI and generating MBTI file..."
 
-python src/modelling/mbti.py "$USERS_FOLDER/text_embeddings" "$PERSONALITY_FOLDER/embeddings" --metric 'cosine' --o "$MBTI_OUTPUT"
+# python src/modelling/mbti.py "$USERS_FOLDER/text_embeddings" "$PERSONALITY_FOLDER/embeddings" --metric 'cosine' --o "$MBTI_OUTPUT"
 
-echo "Pipeline completed. Submission file saved to $SUBMIT_OUTPUT and MBTI file saved to $MBTI_OUTPUT"
+# ---- Retired pipeline ends here. --------------------------------------------
+
+echo "Nothing was executed: the pipeline moved to the ml/ sidecar (see the header)."
+echo "  embeddings/transcription: POST /v1/embed/video, /v1/embed/text, /v1/transcribe on \$ML_SERVICE_URL"
+echo "  OCEAN/MBTI ranking:      build_matrix() in backend/src/services/main_services.py"
+echo "  contract:                ml/README.md"
+exit 2
