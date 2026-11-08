@@ -31,6 +31,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import types
 
 import pytest
 
@@ -164,12 +165,28 @@ def test_an_unusable_s3_backend_fails_closed_on_the_operation():
 
 
 def test_health_never_probes_the_network(monkeypatch):
-    """The gateway polls health on a timer; a probe there is an outage amplifier."""
+    """The gateway polls health on a timer; a probe there is an outage amplifier.
+
+    WHY boto3 IS STUBBED IN AND NOT STUBBED OUT: this test used to rely on boto3
+    being importable, which is true in a developer venv that installed
+    requirements-platform.txt and FALSE in the CI image, where only
+    requirements.txt is installed. There build_storage() correctly degrades to
+    local (see the test above), so storage_health() reported backend=local and
+    this assertion failed - a host-dependent test is a test that reports the
+    environment as a defect. A stub makes the s3 backend real by presence only:
+    nothing calls boto3.client() on the health path, which is exactly the
+    property under test.
+    """
     monkeypatch.setenv("STORAGE__BACKEND", "s3")
     for name in ("STORAGE__ENDPOINT", "STORAGE_ENDPOINT"):
         monkeypatch.delenv(name, raising=False)
+    # Presence-only stub: an empty module is enough for build_storage()'s
+    # "import boto3" probe, and S3Storage imports botocore only inside
+    # _get_client(), which health must never reach.
+    monkeypatch.setitem(sys.modules, "boto3", types.ModuleType("boto3"))
     from service.infrastructure import storage as storage_module
 
+    storage_module.reset_storage()
     payload = storage_module.storage_health()
     assert payload["backend"] == "s3"
     # No bucket/endpoint configured, so it is honest about being unusable...

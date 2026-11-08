@@ -85,3 +85,35 @@ addopts = "--strict-markers -ra"
 python_version = "3.9"
 ignore_missing_imports = true
 follow_imports = "silent"
+
+# Coverage configuration. ONE source of truth for "what is measured": source = ["service"]
+# means the test helpers under tests/ and the manual smoke script are not counted as product
+# code, and branch = true counts the not-taken branch, because half of this tree's rules ARE
+# the error branch - a 404 that no test ever triggers is not tested.
+#
+# WHY THE CI FLOOR IS 65 AND NOT THE 67 OF THE TEMPLATE: the FLOOR IS THE NUMBER THE CI
+# INTERPRETER MEASURES, rounded down. CI runs Python 3.9 (.github/workflows/ci.yml:237) and
+# that venv measures 65% branch coverage on this commit; the 3.10 refactor venv measures 66%
+# (a few stdlib-only branches differ between the two pythons, so pinning the higher number
+# would be a gate that is red for reasons nobody can fix). A gate that is red on the day it
+# lands teaches people to pass --no-verify instead of writing a test. 65 is a FLOOR, not a
+# target: raise it in the same commit that adds the coverage.
+[tool.coverage.run]
+source = ["service"]
+branch = true
+
+[tool.coverage.report]
+skip_empty = true
+show_missing = true
+
+# WHY THE GATE USES THE 'coverage' CLI AND NOT 'pytest --cov': pytest-cov reads its
+# configuration from .coveragerc by DEFAULT and ignores pyproject.toml, so a bare
+# 'pytest --cov' silently records STATEMENT data despite branch = true above - and the next
+# run that DOES read this file then dies with "Can't combine statement coverage data with
+# branch data" (measured on this host, twice, in both directions). Driving 'coverage run
+# --rcfile=pyproject.toml' has one entry point and an explicit config, so the number is a
+# property of the code instead of a property of which file got discovered.
+#
+# fail_under lives HERE and nowhere else: the Makefile 'coverage' target, the CI step and a
+# developer's own command all read this number, so they cannot drift apart.
+fail_under = 65
