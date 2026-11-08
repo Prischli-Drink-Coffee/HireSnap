@@ -413,3 +413,97 @@ def test_describe_reports_the_configuration_and_no_secret(fake_boto):
         "secure": True,
     }
     assert "secret" not in repr(described)
+
+
+# --- factory and health -----------------------------------------------------
+def test_build_storage_returns_the_s3_backend_when_boto3_is_installed(fake_boto, monkeypatch):
+    """The fallback is only for a MISSING library; with boto3 present S3 is honoured."""
+    monkeypatch.setenv("STORAGE__BACKEND", "s3")
+    monkeypatch.setenv("STORAGE__BUCKET", "configured-bucket")
+    monkeypatch.setenv("STORAGE__ENDPOINT", "http://storage:9000")
+    storage_module.reset_storage()
+
+    backend = storage_module.build_storage()
+
+    assert backend.name == "s3"
+    assert backend.describe()["bucket"] == "configured-bucket"
+    storage_module.reset_storage()
+
+
+def test_build_storage_falls_back_to_local_without_boto3(monkeypatch):
+    """An upload must not be lost because an optional library is absent."""
+    monkeypatch.setitem(sys.modules, "boto3", None)
+    monkeypatch.setenv("STORAGE__BACKEND", "s3")
+    storage_module.reset_storage()
+
+    assert storage_module.build_storage().name == "local"
+    storage_module.reset_storage()
+
+
+def test_storage_health_of_s3_checks_configuration_not_the_network(fake_boto, monkeypatch):
+    """A health endpoint must never turn a storage hiccup into a red probe."""
+    monkeypatch.setenv("STORAGE__BACKEND", "s3")
+    monkeypatch.setenv("STORAGE__BUCKET", "bucket")
+    monkeypatch.setenv("STORAGE__ENDPOINT", "http://storage:9000")
+    storage_module.reset_storage()
+
+    described = storage_module.storage_health()
+
+    assert described["backend"] == "s3"
+    assert described["ok"] is True
+    assert fake_boto.client.calls == []
+    storage_module.reset_storage()
+
+
+def test_storage_health_of_an_unconfigured_s3_is_not_ok(fake_boto, monkeypatch):
+    monkeypatch.setenv("STORAGE__BACKEND", "s3")
+    monkeypatch.setenv("STORAGE__ENDPOINT", "")
+    storage_module.reset_storage()
+
+    assert storage_module.storage_health()["ok"] is False
+    storage_module.reset_storage()
+
+
+def test_a_failed_bucket_creation_fails_closed(fake_boto):
+    """No bucket means no uploads; retrying forever would hide the permission error."""
+
+    def head_missing(Bucket):  # noqa: N803
+        raise FakeClientError("404")
+
+    def create_denied(Bucket):  # noqa: N803
+        raise FakeClientError("AccessDenied")
+
+    fake_boto.client.head_bucket = head_missing
+    fake_boto.client.create_bucket = create_denied
+
+    with pytest.raises(storage_module.StorageError) as excinfo:
+        _backend().ensure_bucket()
+    assert "storage_bucket_create_failed" in str(excinfo.value)
+
+
+def test_a_failed_file_upload_is_translated(fake_boto, tmp_path):
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"video")
+    fake_boto.client.error = RuntimeError("connection reset")
+
+    with pytest.raises(storage_module.StorageError) as excinfo:
+        _backend().put_file("files/clip.mp4", source)
+    assert "storage_write_failed" in str(excinfo.value)
+
+
+def test_the_client_lock_reuses_a_client_built_by_another_thread(fake_boto):
+    """Double-checked locking: the second thread must not build a second client."""
+    backend = _backend()
+
+    class _RacingLock(object):
+        def __enter__(self):
+            backend._client = "created-by-another-thread"
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    backend._lock = _RacingLock()
+
+    assert backend._get_client() == "created-by-another-thread"
+    assert fake_boto.calls == []

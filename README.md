@@ -69,10 +69,10 @@
     |   └── shared/ - errors.py (ServiceError и его подклассы), hashing, tokens,
     |                validation, urls, debug
     ├── scripts/ - check_backend_layout.py: те же правила раскладки без pytest
-    ├── tests/ - pytest (conftest.py, структурные и контрактные тесты,
-    |            snapshots/critical_endpoint_openapi.json)
+    ├── tests/ - pytest (conftest.py, структурные, контрактные и слайс-тесты,
+    |            fixtures/fake_db.py, snapshots/critical_endpoint_openapi.json)
     ├── .env - переменные среды
-    ├── pyproject.toml - метаданные проекта, ruff, mypy и настройки pytest
+    ├── pyproject.toml - метаданные проекта, ruff, mypy, pytest и порог покрытия
     ├── requirements.txt - список зависимостей
     ├── requirements-platform.txt - celery/redis/boto3, нужны только воркерам
     └── README.md - этот файл
@@ -145,6 +145,12 @@ python -m pytest -q
 `tests/conftest.py` кладёт каталог `backend/` в `sys.path`, поэтому тесты видны без
 установки пакета. Отдельного ручного прогона пайплайна в этом пакете больше нет:
 инференс переехал в `ml/` (`python service/app.py`), и вызывается он по HTTP.
+
+Покрытие ветвей `service/` проверяется отдельной целью `make coverage` (из корня
+репозитория): порог лежит в `pyproject.toml` (`[tool.coverage.report] fail_under`), а
+запускается CLI `coverage`, а не `pytest --cov`, потому что pytest-cov читает
+`.coveragerc` и игнорирует `pyproject.toml`. Один тест помечен `xfail(strict=True)` — это
+известный дефект из `docs/KNOWN_GAPS.md` §26, а не зелёная галочка.
 
 ### Переменные среды
 

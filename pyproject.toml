@@ -91,17 +91,23 @@ follow_imports = "silent"
 # code, and branch = true counts the not-taken branch, because half of this tree's rules ARE
 # the error branch - a 404 that no test ever triggers is not tested.
 #
-# WHY THE FLOOR IS 76 AND NOT THE 67 OF THE TEMPLATE: the FLOOR IS THE NUMBER THE CI
-# INTERPRETER MEASURES, rounded down. CI runs Python 3.9 (.github/workflows/ci.yml) and that
-# venv measures 76.69% branch coverage on this commit; the 3.10 refactor venv measures a
-# fraction more (76.8%) because a few stdlib-only branches differ between the two pythons, so
-# pinning the higher number would be a gate that is red for reasons nobody can fix. A gate
-# that is red on the day it lands teaches people to pass --no-verify instead of writing a
-# test. History: 46% (gate introduced at 65 - every application and persistence module was at
-# zero), then 73 with the slice and deployment-module tests, then 76 with the settings,
-# schema-bootstrap, JWT, entry-point, connection-recovery, composition and S3 tests. Each time
-# the floor moved in the SAME commit that added the coverage. Keep that rule: raise it WITH
-# the tests, never without them and never ahead of them.
+# WHY THE FLOOR IS 90 AND NOT THE 67 OF THE TEMPLATE: the FLOOR IS A NUMBER THE CI
+# INTERPRETER MEASURES, with room below it. CI runs Python 3.9 (.github/workflows/ci.yml) and
+# that venv measures 94.42% branch coverage on this commit; the 3.10 refactor venv measures
+# 94.44% because a few stdlib-only branches differ between the two pythons. The floor is set
+# BELOW the measurement (90, not 94) for one reason: a floor one point under the current
+# number turns every honest refactor - a deleted branch, a shared helper replacing two
+# copies - into a demand for a new test, and a gate that has to be negotiated gets bypassed
+# with --no-verify. A floor far below it stops protecting anything. 90% is the point where
+# deleting a real test file still fails the build and a refactor does not.
+#
+# The history of this number, because it is the argument for the rule: 46% when the gate was
+# introduced at 65 (every application and persistence module was at zero), 73 with the slice
+# and deployment-module tests, 76 with the settings / schema-bootstrap / JWT / entry-point /
+# connection-recovery / composition / S3 tests, and 90 with the router, task, mail, cache,
+# storage, job-service and matching-pipeline contract tests that took the tree to 94%. Each
+# time the floor moved in the SAME commit that added the coverage. Keep that rule: raise it
+# WITH the tests, never without them and never ahead of them.
 [tool.coverage.run]
 source = ["service"]
 branch = true
@@ -120,4 +126,4 @@ show_missing = true
 #
 # fail_under lives HERE and nowhere else: the Makefile 'coverage' target, the CI step and a
 # developer's own command all read this number, so they cannot drift apart.
-fail_under = 76
+fail_under = 90
