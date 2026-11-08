@@ -22,8 +22,9 @@ export default class VacancyService {
   // POST /api/upload_vacancy/inference/employer - multipart form (name,
   // description, optional salary and skill).
   //
-  // WARNING - this route is a stub today: backend/service/services/matching.py:250-256
-  // returns the literal {"message": "test"} and persists nothing, so a vacancy
+  // WARNING - this route is a stub today: the backend's
+  // service/services/matching/application/matching_service.py:343-353 returns the
+  // literal {"message": "test"} and persists nothing, so a vacancy
   // created here DOES NOT appear in GET /vacancies/ afterwards. The UI says so
   // out loud rather than implying the row was saved. Do not "fix" it here by
   // switching to POST /vacancies/: that skips the embedding the recommendation

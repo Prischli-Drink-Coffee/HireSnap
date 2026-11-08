@@ -8,8 +8,9 @@ import VacancyService from "shared/api/services/vacancyService";
 // The employer's create form. It posts to
 // /api/upload_vacancy/inference/employer (multipart).
 //
-// That route is a STUB on the server today: backend/service/services/matching.py:250-256
-// returns {"message": "test"} and writes nothing, so the new vacancy does not
+// That route is a STUB on the server today: the backend's
+// service/services/matching/application/matching_service.py:343-353 returns
+// {"message": "test"} and writes nothing, so the new vacancy does not
 // appear in the table below and gets no embedding. The success toast therefore
 // says "request sent", not "vacancy added" - a green "добавлено" over a row that
 // never appears would send the user hunting for a bug in the form.
