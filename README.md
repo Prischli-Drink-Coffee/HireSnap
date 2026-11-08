@@ -31,16 +31,30 @@ ml/
 ├── docker/
 │   ├── Dockerfile              # CUDA runtime base + python 3.9, non-root
 │   └── requirements.txt        # pinned model stack against the cu116 index
-├── tests/test_contract.py      # HTTP contract; runs with NO torch and NO weights
+├── tests/                      # developer-only; excluded from the image
+│   ├── conftest.py             # stub engine + hermetic-env fixture
+│   ├── test_contract.py        # HTTP contract; NO torch, NO weights
+│   ├── test_route_snapshot.py  # app.py vs snapshots/ml_routes.json
+│   ├── test_service_boundary.py# layout, imports, config surface (AST)
+│   ├── fixtures/               # error_cases.json: every emit-able error
+│   └── snapshots/              # ml_routes.json: the pinned route contract
+├── scripts/                    # developer-only; excluded from the image
+│   ├── check_ml_service_layout.py  # this tree's own guard (stdlib only)
+│   └── ml_gate.sh              # runs ruff/pytest/the guard with an interpreter that works
 ├── pyproject.toml              # tooling only - deliberately not a package
+├── .python-version             # 3.9: the minor the image installs (deadsnakes)
 └── README.md                   # this file: the canonical route + env reference
 ```
 
 The modules are **flat**: `import settings`, never `from service import settings`.
 `ml/service` is on `sys.path` in both places that matter - `PYTHONPATH=/app/service` in
 the image, `pythonpath = ["service"]` in `pyproject.toml` for pytest - so a test can
-only pass on a layout the container also has. There is no `__init__.py` and no
-`sys.path.insert` anywhere in this tree.
+only pass on a layout the container also has. `service/` has **no** `__init__.py` and
+there is no `sys.path.insert` anywhere in this tree; the only package marker is
+`tests/__init__.py`, which exists so the suite can import its own fixtures by name
+(`from tests.conftest import StubEngine`) and is never shipped - `.dockerignore`
+excludes `tests/` and `scripts/` from the image, so `app.py` is loaded as a bare module
+in the container exactly as it is here.
 
 ## HTTP contract
 
@@ -153,17 +167,95 @@ matter because every default in `settings.py` is derived from `__file__`.
 ### Tests
 
 ```bash
-# from the repository root
+# from the repository root (the form Makefile, CI and the docs agree on)
 python -m pytest ml/tests -q
-# or from ml/
+# or from ml/ - same collected tests, same rootdir
 python -m pytest tests -q
+# the layout guard, which is not a pytest test (see below)
+python ml/scripts/check_ml_service_layout.py
 ```
 
-The contract suite **must pass on a machine with no torch, no weights and no GPU**: it
-stubs `app.engine`, so it exercises routing, validation, size limits, status codes and
-the error shape - not the vectors. Two of its tests are about import hygiene: importing
-`app` must not pull `torch` into `sys.modules`, and must not open a `.pth`/`.jit`/`.npy`
-file. That is why every heavy import in the pipeline modules is inside a function.
+There is no `pytest.ini` and no `tox.ini`: every pytest key lives in `pyproject.toml`
+(`testpaths = ["tests"]`, `pythonpath = ["service"]`, `addopts = "--strict-markers -ra"`,
+the `integration`/`slow` markers). `pythonpath` is what lets the suite write `import app`
+with no `sys.path` line anywhere, on the same layout the image runs.
+
+The suite **must pass on a machine with no torch, no weights and no GPU**: `tests/conftest.py`
+stubs `app.engine`, so the tests exercise routing, validation, size limits, status codes
+and the error shape - not the vectors. Three files, each with one job:
+
+| File | What it pins |
+|------|--------------|
+| `tests/test_contract.py` | The behaviour of each route: response fields, the size and media-type limits, the 503-vs-500 split, no traceback in a 500. Also the two import-hygiene proofs - importing `app` must not put `torch` in `sys.modules` and must not open a `.pth`/`.jit`/`.npy` file. |
+| `tests/test_route_snapshot.py` | The route *table*: every `APIRoute` in `app.py`, its operation id and the exact top-level keys of its 200 response, compared against `tests/snapshots/ml_routes.json` in both directions (a route missing from the snapshot and a snapshot entry with no route both fail). |
+| `tests/test_service_boundary.py` | The shape of the tree, by AST: no module imports `backend`, `src.*` or `service.*`; no relative imports; every import is a sibling, a declared dependency or stdlib; `settings.py` is the only reader of `os.environ`; every environment name is a documented key; the only nested package is the vendored tokenizer. |
+
+`tests/fixtures/error_cases.json` is the table of **every** error the service can emit
+(code, status, the request that provokes it) - the suite iterates it instead of hard-coding
+one request per error, so adding an error case is a data change.
+
+#### `tests/snapshots/ml_routes.json`
+
+The committed copy of the contract: for each route its method, path, operation id, status,
+the exact 200 response keys and their nested keys, plus the `error_codes`/`error_statuses`
+registry and the routes that must stay disabled (`/docs`, `/redoc`). `app.py` is compared
+against it, and so are `ERROR_CODES` and the README table - one file that moves when the
+contract moves, so a route cannot be added to the code alone.
+
+**Regenerate it by hand, in the same commit as the change, never from a test:** the point
+of a snapshot is that a human looked at the diff. A helper that rewrote it on failure would
+turn the gate into a rubber stamp.
+
+#### `scripts/check_ml_service_layout.py`
+
+A stdlib-only guard for the properties pytest cannot see, in the `[OK]`/`[FAIL]`/`[SUMMARY]`
+shape of `scripts/check_*.py` in the superproject (same output, same exit codes 0/1/2, so
+`make guards` can absorb it). It parses, never imports - it must run on any Python in the
+repository, and importing `app.py` would need fastapi and start an engine:
+
+1. no module at the `ml/` root (anything there is unreachable at runtime, because
+   `PYTHONPATH` is `/app/service`, or a script that belongs in `scripts/`);
+2. the only nested package under `service/` is `cosmos_tokenizer/`;
+3. `app.py` and `settings.py` import no ML framework at module scope (`engine.py` may - it
+   is the module that owns the models);
+4. the README route table, `app.py` and the snapshot list the same routes, compared as sets.
+
+Run it standalone from the repository root (`python ml/scripts/check_ml_service_layout.py`)
+or from `ml/`. It is deliberately **not** collected by pytest: it is a repository gate
+shaped for `make guards`, not a unit test, and it must stay runnable from a bare `ml/`
+checkout, where `../scripts/` does not exist - which is why it duplicates twenty lines of
+the report helper instead of importing it.
+
+#### `scripts/ml_gate.sh`, and why the pre-commit hooks go through it
+
+`.pre-commit-config.yaml` runs three local hooks - `ruff check .`, `pytest -q` and the
+layout guard - through `scripts/ml_gate.sh <ruff|pytest|layout>`. The helper exists
+because finding a usable interpreter turned out to be three defects wearing one coat:
+
+1. **The name on `PATH` is not an interpreter.** On Windows `python` is the Microsoft
+   Store alias, which starts nothing and exits 49. So every candidate is *run*, not
+   looked up: the first one that answers `-c "import sys"` wins.
+2. **Starting is not enough for `ruff` and `pytest`.** A candidate must also import the
+   tool. `python3` on this host is a uv-managed 3.12 with no ruff, so a gate that only
+   asked "does it start" picked it and failed with `No module named ruff` on a clean
+   tree. The layout gate is stdlib-only, so for it starting is enough.
+3. **The interpreter is chosen where it will run.** `ml/.python-version` pins `3.9`, the
+   minor the image installs through deadsnakes. On a machine that has not installed 3.9,
+   pyenv makes every shim *in this directory* exit 1 with `no global/local python version
+   has been set`. The helper therefore `cd`s into the checkout before probing, and then
+   resolves the winner to its real absolute path (`cygpath`-converted on Windows) before
+   running it - a shim is a launcher that re-reads the working directory, so "it started
+   during the probe" says nothing about the run two lines later.
+
+When every name on `PATH` fails, the helper falls back to the standard install roots
+(`~/.pyenv/pyenv-win/versions/*/python.exe`, `~/.pyenv/versions/*/bin/python3`,
+`~/.local/share/uv/python/*/bin/python3`) and uses the first that can import the tool. The
+pinned 3.9 is still what CI and the image use; the fallback only lets the check happen on
+a developer machine that never installed it. `ML_GATE_PYTHON=/path/to/python` pins an
+interpreter explicitly and is a hard failure when it cannot import the tool - a stale
+pinned path must never look like a pass. With no usable interpreter at all the helper
+prints `SKIP` and exits 0; CI installs 3.9 with `setup-python` and runs the same
+commands, so the check still happens where it can be trusted.
 
 Nothing here needs a database. `ml/` has no state, no auth and no schema.
 
@@ -206,7 +298,7 @@ superproject and no generated mirror of one.
   here it must be listed in the PR so it can be re-applied on the next vendoring.
 - Everything else in `service/` is first-party and is where a pipeline change belongs.
 - `backend/` keeps business logic only. It reaches this service over HTTP through
-  `backend/service/services/ml_client.py` and contains no ML import.
+  `backend/service/infrastructure/ml_sidecar.py` and contains no ML import.
 
 **One sentence, because it is the invariant:** *`ml/` imports nothing from `../backend/`*
 - no `sys.path` insert, no `ML_BACKEND_ROOT`, no reach into `src.modelling`; the process

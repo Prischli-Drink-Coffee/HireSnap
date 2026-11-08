@@ -1,0 +1,80 @@
+{
+  "_comment": [
+    "Error cases the sidecar documents in ml/README.md (## Errors) and must keep speaking.",
+    "tests/test_contract.py drives this table against the real app, so a case that stops",
+    "mapping to its documented code fails here rather than in a caller. Keep it in step with",
+    "the README table: it is the executable half of that table.",
+    "Fields: id (test name suffix), method, path, request (one of raw/json/files), status,",
+    "code. `raw` is sent as UTF-8 bytes with `content_type`; `json` is sent as a JSON body;",
+    "`files` is sent as multipart with the given filename and content type.",
+    "Cases that need an environment override (the size ceilings) stay as explicit tests in",
+    "test_contract.py, because their point is the monkeypatched limit, not the route."
+  ],
+  "error_body_keys": [
+    "detail",
+    "error"
+  ],
+  "cases": [
+    {
+      "id": "unknown_route",
+      "method": "GET",
+      "path": "/v1/nope",
+      "status": 404,
+      "code": "not_found"
+    },
+    {
+      "id": "wrong_method",
+      "method": "GET",
+      "path": "/v1/embed/text",
+      "status": 405,
+      "code": "method_not_allowed"
+    },
+    {
+      "id": "empty_media_body",
+      "method": "POST",
+      "path": "/v1/embed/video",
+      "raw": "",
+      "content_type": "application/octet-stream",
+      "status": 400,
+      "code": "empty_body"
+    },
+    {
+      "id": "empty_text",
+      "method": "POST",
+      "path": "/v1/embed/text",
+      "json": {
+        "text": "   "
+      },
+      "status": 400,
+      "code": "empty_body"
+    },
+    {
+      "id": "json_on_a_media_route",
+      "method": "POST",
+      "path": "/v1/embed/video",
+      "raw": "{\"oops\": true}",
+      "content_type": "application/json",
+      "status": 415,
+      "code": "unsupported_media_type"
+    },
+    {
+      "id": "missing_text_field",
+      "method": "POST",
+      "path": "/v1/embed/text",
+      "json": {
+        "prompt": "wrong key"
+      },
+      "status": 422,
+      "code": "invalid_request"
+    },
+    {
+      "id": "malformed_json",
+      "method": "POST",
+      "path": "/v1/embed/text",
+      "raw": "{not json",
+      "content_type": "application/json",
+      "status": 422,
+      "code": "invalid_request"
+    }
+  ]
+}

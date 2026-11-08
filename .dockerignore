@@ -21,8 +21,13 @@ venv/
 __pycache__/
 *.py[cod]
 
-# --- tests and developer-only files -------------------------------------
+# --- tests, guards and developer-only files -----------------------------
+# tests/ AND scripts/: neither is imported by the service, and both are developer
+# surfaces. The guard in scripts/ is deliberately stdlib-only and runs on a laptop or in
+# CI; shipping it would put a second, unused entry point in the image and imply the
+# container checks its own layout, which it does not.
 tests/
+scripts/
 *.md
 !README.md
 

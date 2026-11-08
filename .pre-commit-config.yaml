@@ -34,11 +34,20 @@ repos:
       # on Windows the name `python` on PATH is the Microsoft Store stub, which
       # starts no interpreter at all and exits 49. pre-commit reported both hooks
       # as "exit code: 9009" and refused every commit in this submodule. The
-      # helper runs each candidate interpreter with -c "import sys" and uses the
-      # first that works, which is the same fix scripts/run_guard.sh applies in the
-      # superproject. A machine with no Python gets a loud SKIP instead of a
-      # permanent block; CI installs 3.9 with setup-python, so the gate still runs
-      # where it can be trusted.
+      # helper runs each candidate and keeps the first that both starts AND can
+      # import the tool it is about to run (a uv-managed 3.12 with no ruff is not a
+      # usable ruff interpreter, however healthy it looks). It probes after cd-ing
+      # into the checkout, because this directory pins .python-version 3.9 and pyenv
+      # shims here refuse to start on a machine without 3.9; the winner is then
+      # resolved to its absolute path so a launcher cannot change its mind.
+      # A machine with no Python at all gets a loud SKIP instead of a permanent
+      # block; CI installs 3.9 with setup-python, so the gate still runs where it
+      # can be trusted. README.md, "scripts/ml_gate.sh", has the full reasoning.
+      #
+      # NOTE ON WINDOWS: pre-commit resolves `bash` from PATH, and C:\WINDOWS\system32\bash.exe
+      # is the WSL launcher - with no WSL distribution the failure reads
+      # "execvpe(/bin/bash) failed". Put Git Bash first on PATH (or use `make lint`,
+      # which pins SHELL); the superproject .pre-commit-config.yaml documents it too.
       - id: ml-ruff
         name: ruff (ml sidecar)
         entry: bash scripts/ml_gate.sh ruff check .
@@ -54,3 +63,12 @@ repos:
         # The suite is the one gate that proves the HTTP contract still holds, so it runs
         # on every Python change rather than only when tests/ is touched.
         always_run: false
+      - id: ml-layout
+        name: layout guard (flat service/, entry imports, README routes)
+        entry: bash scripts/ml_gate.sh layout
+        language: system
+        # No types filter: the properties it checks are about WHERE files are and what
+        # README.md says, so a commit that only moves a file or edits the docs must run
+        # it too.
+        pass_filenames: false
+        always_run: true

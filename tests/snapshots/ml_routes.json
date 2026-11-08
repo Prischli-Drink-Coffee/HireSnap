@@ -1,0 +1,109 @@
+{
+  "_comment": [
+    "Committed snapshot of the ML sidecar's HTTP contract.",
+    "Changed ONLY in the same commit as ml/service/app.py, ml/README.md and ml/tests/test_contract.py.",
+    "tests/test_route_snapshot.py diffs the live app against this file: an added, removed or",
+    "renamed route, a changed operation id, a changed 200 status code, a changed response key set",
+    "or a new/removed error code fails the suite instead of shipping quietly.",
+    "Required keys are an EXACT key set, not a subset: an extra field is how two deployments stop",
+    "being comparable, and docs/SERVICE_CONTRACTS.md 1.1 makes the /health body exactly three keys.",
+    "`error_codes` is the closed set app.ERROR_CODES declares; `error_statuses` is the mapping",
+    "the handlers use, and the semantic contract tests drive each of them for real."
+  ],
+  "schema_version": 1,
+  "service": "ml",
+  "routes": {
+    "GET /health": {
+      "operation_id": "health",
+      "status": 200,
+      "response_keys": [
+        "service",
+        "status",
+        "version"
+      ],
+      "nested_keys": {},
+      "request": "none"
+    },
+    "GET /v1/capabilities": {
+      "operation_id": "capabilities",
+      "status": 200,
+      "response_keys": [
+        "cuda",
+        "models",
+        "text_embedding",
+        "transcription",
+        "video_embedding"
+      ],
+      "nested_keys": {
+        "models": [
+          "asr",
+          "text",
+          "video"
+        ]
+      },
+      "request": "query:refresh"
+    },
+    "POST /v1/embed/video": {
+      "operation_id": "embed_video",
+      "status": 200,
+      "response_keys": [
+        "dim",
+        "model",
+        "vector"
+      ],
+      "nested_keys": {},
+      "request": "raw media bytes, or multipart with a 'file' part"
+    },
+    "POST /v1/embed/text": {
+      "operation_id": "embed_text",
+      "status": 200,
+      "response_keys": [
+        "dim",
+        "model",
+        "vector"
+      ],
+      "nested_keys": {},
+      "request": "json:{\"text\": str}"
+    },
+    "POST /v1/transcribe": {
+      "operation_id": "transcribe",
+      "status": 200,
+      "response_keys": [
+        "model",
+        "text"
+      ],
+      "nested_keys": {},
+      "request": "raw media bytes, or multipart with a 'file' part"
+    }
+  },
+  "error_shape": [
+    "detail",
+    "error"
+  ],
+  "error_codes": [
+    "empty_body",
+    "inference_failed",
+    "internal",
+    "invalid_request",
+    "method_not_allowed",
+    "not_found",
+    "request_too_large",
+    "service_unavailable",
+    "unsupported_media_type"
+  ],
+  "error_statuses": {
+    "empty_body": 400,
+    "inference_failed": 500,
+    "internal": 500,
+    "invalid_request": 422,
+    "method_not_allowed": 405,
+    "not_found": 404,
+    "request_too_large": 413,
+    "service_unavailable": 503,
+    "unsupported_media_type": 415
+  },
+  "disabled_routes": [
+    "/docs",
+    "/redoc"
+  ]
+}

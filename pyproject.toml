@@ -34,14 +34,31 @@ dev = [
     "ruff>=0.6,<1",
 ]
 
+# The single source of pytest configuration. There is deliberately no pytest.ini and no
+# tox.ini: three files that can disagree about testpaths is how a suite runs a different
+# set of tests in CI than on a laptop (R:/GPTHub/backend/pytest.ini holds the same keys,
+# in a file this repository does not need).
 [tool.pytest.ini_options]
-# The directory holding the flat modules. This is the whole point: the tests and the
-# container use the same import names.
-pythonpath = ["service"]
+# Both roots are relative to ml/, which pytest makes the rootdir because this file is
+# here - so `python -m pytest ml/tests -q` from the superproject root and
+# `python -m pytest tests -q` from ml/ run the same collected tests. Root is preferred
+# (Makefile:306, .github/workflows/ci.yml) so backend/tests fixtures cannot leak in.
 testpaths = ["tests"]
-# Fail on an unknown marker instead of silently ignoring a typo that makes a test
-# always match.
-addopts = "--strict-markers"
+# The directory holding the flat modules. This is the whole point: the tests and the
+# container use the same import names, so a test cannot pass on a layout the image
+# does not have. It is also why there is no conftest.py sys.path line anywhere here.
+pythonpath = ["service"]
+# --strict-markers: an unknown @pytest.mark.typo is an error, not a test that silently
+# matches nothing. -ra: the short summary of skips and xfails, because a skipped GPU
+# test is information the reader needs, not noise.
+addopts = "--strict-markers -ra"
+# Markers are declared rather than invented at the call site, so --strict-markers can
+# do its job. Both are for tests that must never join the default suite: it has to pass
+# on a host with no torch, no weights and no GPU.
+markers = [
+    "integration: needs a real GPU, real weights or network access; never collected by default",
+    "slow: hermetic but takes more than a few seconds",
+]
 filterwarnings = [
     "error::DeprecationWarning:pytest.*",
 ]
