@@ -101,7 +101,8 @@ class DisabledMailer(object):
         logger.debug(
             "mail backend=disabled status=skipped to=%s subject=%r "
             "action=set MAIL__ENABLED=true to deliver",
-            _join(to), subject,
+            _join(to),
+            subject,
         )
         return False
 
@@ -130,16 +131,13 @@ class FileMailer(object):
     def send(self, to, subject, body, html=None):
         recipients = _join(to)
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        block = (
-            "=== %s ===\n"
-            "To: %s\n"
-            "From: %s\n"
-            "Subject: %s\n"
-            "\n"
-            "%s\n"
-            "\n"
-        ) % (stamp, recipients, _env("MAIL__FROM", "MAIL_FROM", default=DEFAULT_FROM),
-             subject, body)
+        block = ("=== %s ===\nTo: %s\nFrom: %s\nSubject: %s\n\n%s\n\n") % (
+            stamp,
+            recipients,
+            _env("MAIL__FROM", "MAIL_FROM", default=DEFAULT_FROM),
+            subject,
+            body,
+        )
         try:
             with self._lock:
                 directory = os.path.dirname(self._path)
@@ -152,7 +150,12 @@ class FileMailer(object):
             # failure - log it as an error so it is not silently ignored.
             logger.error("mail backend=file status=write_failed path=%s error=%s", self._path, exc)
             return False
-        logger.info("mail backend=file status=stored to=%s subject=%r path=%s", recipients, subject, self._path)
+        logger.info(
+            "mail backend=file status=stored to=%s subject=%r path=%s",
+            recipients,
+            subject,
+            self._path,
+        )
         return True
 
     def describe(self):
@@ -170,8 +173,17 @@ class SmtpMailer(object):
 
     name = "smtp"
 
-    def __init__(self, host, port=DEFAULT_SMTP_PORT, user="", password="",
-                 sender=DEFAULT_FROM, starttls=True, timeout=DEFAULT_TIMEOUT, ssl=False):
+    def __init__(
+        self,
+        host,
+        port=DEFAULT_SMTP_PORT,
+        user="",
+        password="",
+        sender=DEFAULT_FROM,
+        starttls=True,
+        timeout=DEFAULT_TIMEOUT,
+        ssl=False,
+    ):
         self._host = host
         self._port = int(port or DEFAULT_SMTP_PORT)
         self._user = user or ""
@@ -194,7 +206,9 @@ class SmtpMailer(object):
             else:
                 client = smtplib.SMTP(self._host, self._port, timeout=self._timeout)
         except Exception as exc:
-            logger.warning("mail backend=smtp code=smtp_unavailable host=%s error=%s", self._host, exc)
+            logger.warning(
+                "mail backend=smtp code=smtp_unavailable host=%s error=%s", self._host, exc
+            )
             raise MailError("smtp_unavailable: %s" % (exc,)) from exc
         try:
             client.ehlo()
@@ -203,7 +217,9 @@ class SmtpMailer(object):
                     client.starttls()
                     client.ehlo()
                 except Exception as exc:
-                    logger.warning("mail backend=smtp code=starttls_failed host=%s error=%s", self._host, exc)
+                    logger.warning(
+                        "mail backend=smtp code=starttls_failed host=%s error=%s", self._host, exc
+                    )
                     raise MailError("smtp_starttls_failed: %s" % (exc,)) from exc
             if self._user:
                 client.login(self._user, self._password)
@@ -218,7 +234,9 @@ class SmtpMailer(object):
                 client.quit()
             except Exception:
                 pass
-        logger.info("mail backend=smtp status=sent to=%s subject=%r", ", ".join(recipients), subject)
+        logger.info(
+            "mail backend=smtp status=sent to=%s subject=%r", ", ".join(recipients), subject
+        )
         return True
 
     def describe(self):
@@ -299,6 +317,7 @@ def send_now_or_later(to, subject, body, html=None):
 
     daemon=True so an interpreter shutdown never waits on an SMTP handshake.
     """
+
     def _run():
         try:
             send_now(to, subject, body, html=html)
@@ -306,7 +325,9 @@ def send_now_or_later(to, subject, body, html=None):
             logger.warning(
                 "mail status=async_send_failed to=%s subject=%r error=%s "
                 "action=request already succeeded; check MAIL__HOST",
-                _join(to), subject, exc,
+                _join(to),
+                subject,
+                exc,
             )
 
     try:

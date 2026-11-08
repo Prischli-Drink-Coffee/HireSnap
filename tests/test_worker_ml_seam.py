@@ -8,12 +8,12 @@ time, no test covered the call, and the mismatch would only surface as a failed
 nightly job on the first real upload.
 
 These tests pin the three things that were wrong, each against the real contract
-in docs/SIDECARS.md and backend/service/services/ml_client.py:
+in docs/SIDECARS.md and backend/service/infrastructure/ml_sidecar.py:
 
-  1. The embedder is reached through service.services.ml_client.get_user_embedding,
+  1. The embedder is reached through service.infrastructure.ml_sidecar.get_user_embedding,
      which takes a FILESYSTEM PATH, not a key/URL pair.
   2. The response is a vector (a sequence of floats), which
-     service/services/ml_client.py decodes from {"vector": [...], "dim": N}.
+     service/infrastructure/ml_sidecar.py decodes from {"vector": [...], "dim": N}.
   3. The temporary file materialised for an object-store backend is removed
      afterwards, and a failure in the embedder does not leak it either.
 
@@ -71,7 +71,10 @@ class FakeMlClient(object):
         self.calls = []
 
     def describe_transport(self):
-        return {"transport": "in-process", "service_url": None}
+        # Mirrors the real ml_sidecar: HTTP to the sidecar, never in-process. The
+        # fake has to answer with the same shape as the module it stands in for,
+        # or the embedder label assertion below would test the fake.
+        return {"transport": "http", "service_url": "http://127.0.0.1:8080"}
 
     def get_user_embedding(self, video_path, **kwargs):
         self.calls.append(video_path)
@@ -149,9 +152,9 @@ def test_materialised_file_survives_an_extensionless_key(tmp_path):
 # the client seam itself
 # ---------------------------------------------------------------------------
 def test_ml_client_is_the_supported_module():
-    """The one supported seam is service.services.ml_client (docs/SIDECARS.md 4)."""
+    """The one supported seam is service.infrastructure.ml_sidecar (docs/SIDECARS.md 4)."""
     client = tasks_module._ml_client()
-    assert client.__name__ == "service.services.ml_client"
+    assert client.__name__ == "service.infrastructure.ml_sidecar"
     assert hasattr(client, "get_user_embedding")
 
 
@@ -159,16 +162,16 @@ def test_missing_client_is_reported_as_unavailable(monkeypatch):
     """A broken install must raise TaskUnavailable, not ImportError at import time."""
     import sys
 
-    import service.services as services_package
-    import service.services.ml_client  # noqa: F401 - make the submodule importable first
+    import service.infrastructure as infrastructure_package
+    import service.infrastructure.ml_sidecar  # noqa: F401 - make the submodule importable first
 
     # None in sys.modules is how CPython represents "this module cannot be
     # imported"; the parent attribute has to go too, or "from x import y" would
     # still find the already-imported object.
-    monkeypatch.delattr(services_package, "ml_client", raising=False)
-    monkeypatch.setitem(sys.modules, "service.services.ml_client", None)
+    monkeypatch.delattr(infrastructure_package, "ml_sidecar", raising=False)
+    monkeypatch.setitem(sys.modules, "service.infrastructure.ml_sidecar", None)
 
-    with pytest.raises(tasks_module.TaskUnavailable, match="ml_client_unavailable"):
+    with pytest.raises(tasks_module.TaskUnavailable, match="ml_sidecar_unavailable"):
         tasks_module._ml_client()
 
 
@@ -187,7 +190,9 @@ def test_embed_candidate_hands_the_client_a_path_not_a_key(monkeypatch, tmp_path
 
     assert client.calls == [str(media)]
     assert result["status"] == tasks_module.STATUS_OK
-    assert result["embedder"] == "ml_client:in-process"
+    # tasks.py formats "ml_client:%s" from describe_transport()["transport"], and the
+    # only transport left is HTTP: "in-process" would mean torch is back in the image.
+    assert result["embedder"] == "ml_client:http"
     assert result["embedding_key"].startswith(tasks_module.EMBEDDING_PREFIX)
     assert result["embedding_key"].endswith(".npy")
     assert result["result_url"].startswith("https://example.invalid/")

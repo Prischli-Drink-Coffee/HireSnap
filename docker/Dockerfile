@@ -4,7 +4,7 @@
 #
 # INFERENCE IS NOT IN THIS IMAGE. The embedding, text-embedding and
 # transcription models live in the ml sidecar (ml/), and the backend reaches
-# them over HTTP through service/services/ml_client.py (default
+# them over HTTP through service/infrastructure/ml_sidecar.py (default
 # http://127.0.0.1:8080, override with ML_SERVICE_URL). That is why there is no
 # torch layer, no requirements_external.txt install and no
 # cosmos_tokenizer/ copy here any more: this image used to carry ~4 GB of CUDA
@@ -152,8 +152,8 @@ RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" \
 # --- layer 2: platform dependencies (celery, redis, boto3) -----------------
 # WHY the SAME image also carries the platform stack instead of a second
 # Dockerfile for the workers: the worker tasks import
-# service.infrastructure.messaging.tasks, which imports service.services.jobs_services
-# and service.services.ml_client - i.e. the worker
+# service.infrastructure.messaging.tasks, which imports service.services.jobs.application.job_service
+# and service.infrastructure.ml_sidecar - i.e. the worker
 # is the API image plus a different entry point, and now that both reach
 # inference over HTTP they need exactly the same dependencies. R:GPTHub solves
 # this the same way (celery-worker-* services in docker/docker-compose.yaml:
@@ -207,7 +207,7 @@ COPY --chown=app:app backend/database /app/database
 #                directory is created so the mount point is stable and the packaged
 #                fallback at /app/service/certs stays available
 # /app/service/certs  the fallback location for the JWT pair when the variables are
-#                unset (service/domain/models.py:_key_path)
+#                unset (service/models/auth_models.py:_key_path)
 RUN mkdir -p /app/data /app/logs /app/secrets/certs /app/service/certs \
     && chown -R app:app /app/data /app/logs /app/secrets /app/service/certs
 

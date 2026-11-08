@@ -12,8 +12,12 @@ import types
 
 import pytest
 
-from service.services import jobs_services
 from service.infrastructure.messaging import tasks as tasks_module
+
+# The job subsystem is a vertical slice: service/services/jobs/application/job_service.py.
+# The module-level functions are kept (the slice's own tests and scripts use them) and
+# JobService is the object the composition layer hands out; both are covered below.
+from service.services.jobs.application import job_service as jobs_services
 
 
 @pytest.fixture
@@ -74,7 +78,9 @@ def test_failing_task_produces_a_failed_job(monkeypatch):
         raise RuntimeError("embedder exploded")
 
     monkeypatch.setitem(tasks_module.TASKS, "hiresnap.send_email", explode)
-    job_id = jobs_services.enqueue("send_email", {"to": "a@example.com", "subject": "s", "body": "b"})
+    job_id = jobs_services.enqueue(
+        "send_email", {"to": "a@example.com", "subject": "s", "body": "b"}
+    )
 
     record = jobs_services.status(job_id)
     assert record["state"] == jobs_services.STATE_FAILED
@@ -86,10 +92,16 @@ def test_result_url_is_extracted_for_polling_clients(monkeypatch):
     """status() must expose the stored object's URL without a second call."""
 
     def fake_embed(**kwargs):
-        return {"status": "ok", "embedding_key": "embeddings/users/x.npy", "result_url": "https://x/y.npy"}
+        return {
+            "status": "ok",
+            "embedding_key": "embeddings/users/x.npy",
+            "result_url": "https://x/y.npy",
+        }
 
     monkeypatch.setitem(tasks_module.TASKS, "hiresnap.embed_candidate", fake_embed)
-    job_id = jobs_services.enqueue("embed_candidate", {"candidate_id": "c1", "file_key": "files/a.mp4"})
+    job_id = jobs_services.enqueue(
+        "embed_candidate", {"candidate_id": "c1", "file_key": "files/a.mp4"}
+    )
     record = jobs_services.status(job_id)
     assert record["state"] == jobs_services.STATE_SUCCEEDED
     assert record["result_url"] == "https://x/y.npy"
@@ -100,7 +112,9 @@ def test_payload_is_summarised_not_stored_verbatim(tmp_path):
     import os
 
     os.environ["MAIL__ENABLED"] = "false"
-    job_id = jobs_services.enqueue("send_email", {"to": "a@example.com", "subject": "s", "body": "b"})
+    job_id = jobs_services.enqueue(
+        "send_email", {"to": "a@example.com", "subject": "s", "body": "b"}
+    )
     record = jobs_services.status(job_id)
     summary = record["payload_summary"]
     assert summary["keys"] == ["body", "subject", "to"]
@@ -110,7 +124,7 @@ def test_payload_is_summarised_not_stored_verbatim(tmp_path):
 
 
 def test_cleanup_refuses_to_delete_when_the_database_is_unreachable(tmp_path, monkeypatch):
-    """"Cannot read the references" must mean "delete nothing"."""
+    """ "Cannot read the references" must mean "delete nothing"."""
     monkeypatch.setenv("DATA_PATH", str(tmp_path))
     monkeypatch.setattr(tasks_module, "_referenced_keys", lambda: None)
 
@@ -129,7 +143,9 @@ def test_degraded_enqueue_falls_back_to_inline(monkeypatch, outbox):
     # requirements file installed.
     monkeypatch.setitem(sys.modules, "celery", None)
 
-    job_id = jobs_services.enqueue("send_email", {"to": "a@example.com", "subject": "Fallback", "body": "b"})
+    job_id = jobs_services.enqueue(
+        "send_email", {"to": "a@example.com", "subject": "Fallback", "body": "b"}
+    )
     record = jobs_services.status(job_id)
     assert record["state"] == jobs_services.STATE_SUCCEEDED
     assert record["mode"] == "inline"
@@ -158,7 +174,9 @@ def test_broker_mode_is_reported_when_a_broker_is_configured(monkeypatch):
     fake_celery.get_celery_app = lambda: _FakeApp()
     monkeypatch.setitem(sys.modules, "service.infrastructure.messaging.celery_app", fake_celery)
 
-    job_id = jobs_services.enqueue("send_email", {"to": "a@example.com", "subject": "s", "body": "b"})
+    job_id = jobs_services.enqueue(
+        "send_email", {"to": "a@example.com", "subject": "s", "body": "b"}
+    )
     record = jobs_services.status(job_id)
     assert sent["name"] == "hiresnap.send_email"
     assert sent["kwargs"]["to"] == "a@example.com"
@@ -169,7 +187,9 @@ def test_broker_mode_is_reported_when_a_broker_is_configured(monkeypatch):
 
 def test_cancel_is_false_for_an_inline_job(outbox):
     """Inline jobs are already finished; claiming a cancel would be a lie."""
-    job_id = jobs_services.enqueue("send_email", {"to": "a@example.com", "subject": "s", "body": "b"})
+    job_id = jobs_services.enqueue(
+        "send_email", {"to": "a@example.com", "subject": "s", "body": "b"}
+    )
     assert jobs_services.cancel(job_id) is False
     assert jobs_services.cancel("unknown-id") is False
 
@@ -185,3 +205,20 @@ def test_job_records_expire():
     """Operational state is disposable: the TTL is part of the contract."""
     assert jobs_services.JOB_TTL_SECONDS > 0
     assert jobs_services.JOB_TTL_SECONDS <= 7 * 24 * 3600
+
+
+def test_job_service_object_delegates_to_the_same_records(outbox):
+    """JobService is what the composition layer hands out, so it must not be a
+    second implementation: a job enqueued through the object is visible through
+    the module functions and vice versa."""
+    service = jobs_services.JobService()
+
+    job_id = service.enqueue("send_email", {"to": "c@example.com", "subject": "Obj", "body": "b"})
+    assert isinstance(job_id, str) and len(job_id) == 32
+    assert jobs_services.status(job_id)["id"] == job_id
+    assert service.status(job_id)["state"] == jobs_services.STATE_SUCCEEDED
+    assert service.supported_kinds() == jobs_services.supported_kinds()
+    assert service.celery_enabled() is jobs_services.celery_enabled()
+    assert service.health()["mode"] == "inline"
+    assert service.cancel(job_id) is False
+    assert service.status("does-not-exist") is None

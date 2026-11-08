@@ -1,18 +1,19 @@
 import os
-import pymysql
-from service.configuration.logging import setup_logging
-from service.configuration.env import Env
-from service.configuration.paths import DATABASE_DIR, schema_file
-from pandas import read_csv
+
 import numpy as np
 import pandas as pd
+import pymysql
+from pandas import read_csv
+
+from service.configuration.env import Env
+from service.configuration.logging import setup_logging
+from service.configuration.paths import DATABASE_DIR, schema_file
 
 env = Env()
 log = setup_logging()
 
 
 class CreateSQL:
-
     def __init__(self):
         # Определение пути к SQL-файлу
         # Resolved through service.configuration.paths so the dump is found in
@@ -20,7 +21,7 @@ class CreateSQL:
         # the file name case (HireSnap.sql vs a lowercase database name).
         self.path = str(DATABASE_DIR)
         self.path_to_sql = str(schema_file(env.__getattr__("DB")))
-        self.path_to_data = os.path.join(env.__getattr__('DATA_PATH'), 'tables')
+        self.path_to_data = os.path.join(env.__getattr__("DATA_PATH"), "tables")
 
         # Установка соединения с базой данных
         self.connection = pymysql.connect(
@@ -28,8 +29,8 @@ class CreateSQL:
             port=int(env.__getattr__("DB_PORT")),
             user=env.__getattr__("DB_USER"),
             password=env.__getattr__("DB_PASSWORD"),
-            charset='utf8mb4',
-            cursorclass=pymysql.cursors.DictCursor
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
         )
 
     @staticmethod
@@ -38,9 +39,9 @@ class CreateSQL:
         try:
             # Чтение CSV файла в DataFrame
             df = df.replace({pd.NA: None, np.nan: None})
-            column_name1='Unnamed: 0.1'
-            column_name2='Unnamed: 0'
-            column_name3='Unnamed: 0.2'
+            column_name1 = "Unnamed: 0.1"
+            column_name2 = "Unnamed: 0"
+            column_name3 = "Unnamed: 0.2"
             # Проверяем, существует ли столбец с нужным названием
             if column_name1 in df.columns:
                 if column_name2 in df.columns:
@@ -50,23 +51,29 @@ class CreateSQL:
                         df = df.drop(columns=[column_name2])
                         df = df.drop(columns=[column_name3])
                 # Сохраняем обновленный DataFrame обратно в CSV
-                print(f"Столбец удален из датафрейма")
+                print("Столбец удален из датафрейма")
                 return df
             else:
-                log.error(f"Столбец не найден в датафрейме")
+                log.error("Столбец не найден в датафрейме")
                 return df
         except Exception as e:
             log.exception(f"Ошибка при обработке датафрейме: {e}")
 
     def read_sql(self):
         try:
-
             tables = {}
             # Проверяем наличие таблицы mbti, taro
             for file in os.listdir(self.path_to_data):
-                if file.endswith('.csv'):
-                    table_name = file.split('.')[0]
-                    if table_name not in ['embeddings', 'files', 'personalities', 'users', 'info_candidates', 'vacancies']:
+                if file.endswith(".csv"):
+                    table_name = file.split(".")[0]
+                    if table_name not in [
+                        "embeddings",
+                        "files",
+                        "personalities",
+                        "users",
+                        "info_candidates",
+                        "vacancies",
+                    ]:
                         log.warning(f"Не найдена таблица {table_name}")
                         continue
                     else:
@@ -85,7 +92,7 @@ class CreateSQL:
                     sql_script = f.read()
 
                     # Разделение SQL-скрипта на отдельные запросы
-                    statements = [stmt.strip() for stmt in sql_script.split(';') if stmt.strip()]
+                    statements = [stmt.strip() for stmt in sql_script.split(";") if stmt.strip()]
 
                     # Выполнение всех запросов в файле
                     for statement in statements:
@@ -100,8 +107,8 @@ class CreateSQL:
                 for table_name, table in tables.items():
                     table = self.remove_column_from_csv(table)
                     # Получаем имена столбцов и формируем плейсхолдеры
-                    columns = ', '.join(table.columns)
-                    placeholders = ', '.join(['%s'] * len(table.columns))
+                    columns = ", ".join(table.columns)
+                    placeholders = ", ".join(["%s"] * len(table.columns))
                     sql = f"INSERT INTO {table_name} ({columns}) VALUES ({placeholders})"
 
                     # Преобразуем DataFrame в список кортежей

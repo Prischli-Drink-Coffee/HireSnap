@@ -2,9 +2,9 @@
 
 WHY THESE TESTS EXIST
 ---------------------
-ml_client.py used to decide, from one environment variable, whether the ML
-pipeline ran in the API process or in the ml sidecar. The in-process branch has
-been removed together with torch from the backend image, so there is now exactly
+service/infrastructure/ml_sidecar.py used to decide, from one environment
+variable, whether the ML pipeline ran in the API process or in the ml sidecar. The in-process
+branch has been removed together with torch from the backend image, so there is now exactly
 one transport and the properties worth pinning are different:
 
   * an unconfigured deployment must still have a DEFINED target (the sidecar's
@@ -18,7 +18,7 @@ one transport and the properties worth pinning are different:
     image.
 
 Nothing here imports torch, opens a socket, needs a GPU or a running sidecar:
-the single HTTP seam, ml_client._http_post, is replaced with a fake that returns
+the single HTTP seam, ml_sidecar._http_post, is replaced with a fake that returns
 a canned response object. That seam is deliberately one small function so this
 file can test the real decision logic - status mapping, body decoding, vector
 conversion - instead of a mock of it.
@@ -36,7 +36,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from service.services import ml_client
+# The ML transport is infrastructure, not a domain slice: it speaks HTTP to the
+# sidecar and is reached through service/infrastructure/ml_sidecar.py. The local
+# alias keeps this file's ~80 references unchanged and makes the seam obvious.
+from service.infrastructure import ml_sidecar as ml_client
 
 
 # --------------------------------------------------------------------------- #
@@ -147,8 +150,8 @@ def test_describe_transport_is_always_http(monkeypatch):
     """The startup banner and the per-task embedder name come from here.
 
     "in-process" must never appear again: it was the marker of a transport that
-    no longer exists, and service/infrastructure/messaging/tasks.py formats this value into the name it
-    records for every embedding task.
+    no longer exists, and service/infrastructure/messaging/tasks.py formats this value into the
+    name it records for every embedding task.
     """
     _clear_url_env(monkeypatch)
     described = ml_client.describe_transport()
@@ -179,7 +182,7 @@ def test_module_import_pulls_in_neither_torch_nor_the_local_pipeline():
     of the API.
     """
     probe = (
-        "import sys; import service.services.ml_client as m; "
+        "import sys; import service.infrastructure.ml_sidecar as m; "
         "print('torch' in sys.modules); "
         "print('src.modelling' in sys.modules); "
         "print(m.service_url())"
@@ -225,16 +228,14 @@ def test_module_source_imports_no_local_inference():
         if name.split(".")[0] in {"torch", "sentence_transformers", "transformers", "moviepy"}
         or name.startswith("src.modelling")
     }
-    assert forbidden == set(), "ml_client.py must stay free of " + str(sorted(forbidden))
+    assert forbidden == set(), "ml_sidecar.py must stay free of " + str(sorted(forbidden))
 
 
 # --------------------------------------------------------------------------- #
 # HTTP success path
 # --------------------------------------------------------------------------- #
 def test_http_video_embedding_returns_a_float32_vector(remote, media, monkeypatch):
-    fake = FakeHTTP(
-        FakeResponse(200, {"vector": [0.5, 0.25, 0.125], "dim": 3, "model": "Unet3D"})
-    )
+    fake = FakeHTTP(FakeResponse(200, {"vector": [0.5, 0.25, 0.125], "dim": 3, "model": "Unet3D"}))
     monkeypatch.setattr(ml_client, "_http_post", fake)
 
     result = ml_client.get_user_embedding(str(media))
@@ -251,9 +252,7 @@ def test_http_video_embedding_returns_a_float32_vector(remote, media, monkeypatc
     assert fake.calls[0]["headers"]["x-filename"] == "candidate.mp4"
 
 
-def test_request_goes_to_the_default_url_when_unconfigured(
-    unconfigured, media, monkeypatch
-):
+def test_request_goes_to_the_default_url_when_unconfigured(unconfigured, media, monkeypatch):
     """The default is a real target, not a sentinel: the request is addressed to
     it, so the error an operator reads names the address that was tried."""
     fake = FakeHTTP(FakeResponse(200, {"vector": [1.0], "dim": 1}))
@@ -315,7 +314,10 @@ def test_5xx_is_unavailable_and_keeps_the_service_message(remote, media, monkeyp
         FakeHTTP(
             FakeResponse(
                 503,
-                {"error": "service_unavailable", "detail": "UNet3D weights not found at /app/src/weights/Unet3D.pth"},
+                {
+                    "error": "service_unavailable",
+                    "detail": "UNet3D weights not found at /app/src/weights/Unet3D.pth",
+                },
             )
         ),
     )
@@ -356,7 +358,9 @@ def test_4xx_is_rejected_with_the_service_code(remote, media, monkeypatch, statu
     assert caught.value.status == status
 
 
-def test_transport_failure_is_unavailable_not_a_propagated_requests_error(remote, media, monkeypatch):
+def test_transport_failure_is_unavailable_not_a_propagated_requests_error(
+    remote, media, monkeypatch
+):
     monkeypatch.setattr(
         ml_client, "_http_post", FakeHTTP(raises=ConnectionError("name resolution"))
     )
@@ -374,9 +378,7 @@ def test_unreachable_sidecar_message_names_the_url_and_the_fix(monkeypatch, medi
     """
     monkeypatch.delenv("ML_SERVICE_URL", raising=False)
     monkeypatch.delenv("ML__SERVICE_URL", raising=False)
-    monkeypatch.setattr(
-        ml_client, "_http_post", FakeHTTP(raises=OSError("connection refused"))
-    )
+    monkeypatch.setattr(ml_client, "_http_post", FakeHTTP(raises=OSError("connection refused")))
     with pytest.raises(ml_client.MLUnavailable) as caught:
         ml_client.get_user_embedding(str(media))
     assert caught.value.code == "ml_service_unreachable"
@@ -436,9 +438,7 @@ def test_missing_vector_is_a_contract_error(remote, media, monkeypatch):
 
 
 def test_transcript_without_text_is_a_contract_error(remote, media, monkeypatch):
-    monkeypatch.setattr(
-        ml_client, "_http_post", FakeHTTP(FakeResponse(200, {"model": "wav2vec2"}))
-    )
+    monkeypatch.setattr(ml_client, "_http_post", FakeHTTP(FakeResponse(200, {"model": "wav2vec2"})))
     with pytest.raises(ml_client.MLContractError) as caught:
         ml_client.get_video_transcript(str(media))
     assert caught.value.code == "invalid_response"
@@ -483,8 +483,8 @@ def test_error_hierarchy_is_catchable_as_one_type():
 def test_documented_surface_is_exported():
     """The removal of the fallback is not allowed to shrink the module's surface.
 
-    service/infrastructure/messaging/tasks.py calls describe_transport and get_user_embedding by name,
-    and operators read service_url/is_remote in the health output.
+    service/infrastructure/messaging/tasks.py calls describe_transport and get_user_embedding by
+    name, and operators read service_url/is_remote in the health output.
     """
     expected = {
         "MLClientError",

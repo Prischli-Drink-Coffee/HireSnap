@@ -8,12 +8,12 @@ a job silently never runs:
   2. A beat entry pointing at a task that no longer exists, so the periodic job
      stops firing and nothing raises.
 
-Neither needs celery installed: the module level of service/infrastructure/messaging/celery_app.py is
-plain data, which is the design decision under test as much as the data itself.
+Neither needs celery installed: the module level of
+service/infrastructure/messaging/celery_app.py is plain data, which is the design decision under
+test as much as the data itself.
 """
 
 import importlib
-import sys
 
 import pytest
 
@@ -24,9 +24,15 @@ from service.infrastructure.messaging import tasks as tasks_module
 
 def test_importing_the_modules_does_not_require_celery():
     """The base image has no celery; importing these modules must still work."""
-    for name in ("service.infrastructure.cache", "service.infrastructure.storage", "service.infrastructure.mail",
-                 "service.infrastructure.messaging.celery_app", "service.infrastructure.messaging.tasks",
-                 "service.infrastructure.messaging.beat_schedule", "service.services.jobs_services"):
+    for name in (
+        "service.infrastructure.cache",
+        "service.infrastructure.storage",
+        "service.infrastructure.mail",
+        "service.infrastructure.messaging.celery_app",
+        "service.infrastructure.messaging.tasks",
+        "service.infrastructure.messaging.beat_schedule",
+        "service.services.jobs.application.job_service",
+    ):
         assert importlib.import_module(name) is not None
 
 
@@ -82,7 +88,9 @@ def test_beat_schedule_targets_known_tasks_and_queues():
     assert schedule, "beat with an empty schedule is a silent no-op"
     for entry_name, entry in schedule.items():
         assert entry["task"] in tasks_module.TASKS, entry_name + " targets a missing task"
-        assert entry["options"]["queue"] in app_module.QUEUES, entry_name + " targets an unknown queue"
+        assert entry["options"]["queue"] in app_module.QUEUES, (
+            entry_name + " targets an unknown queue"
+        )
         assert float(entry["schedule"]) > 0, entry_name + " has a non-positive interval"
         assert "expires" in entry["options"], entry_name + " can pile up behind a beat restart"
 
@@ -137,7 +145,8 @@ def test_broker_credentials_are_redacted():
 def test_unknown_module_attribute_raises_attribute_error():
     """The lazy __getattr__ must not turn typos into None."""
     with pytest.raises(AttributeError):
-        getattr(app_module, "definitely_not_an_attribute")
+        # A bare attribute access, not getattr(): the missing name IS the assertion.
+        app_module.definitely_not_an_attribute  # noqa: B018
 
 
 def test_register_tasks_binds_every_name_with_its_queue():
@@ -149,6 +158,7 @@ def test_register_tasks_binds_every_name_with_its_queue():
             def decorator(function):
                 bound[name] = {"options": options, "function": function}
                 return function
+
             return decorator
 
     registered = tasks_module.register_tasks(_FakeApp())

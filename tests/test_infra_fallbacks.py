@@ -142,7 +142,9 @@ def test_corrupt_payload_is_purged_and_reads_as_miss():
     facade = cache_module.build_cache()
     facade._backend.set_raw(facade.make_key("bad", "t"), "{not json", 60)
     assert facade.get("bad", "fallback", namespace="t") == "fallback"
-    assert facade._backend.get_raw(facade.make_key("bad", "t")) is None, "corrupt entry must be purged"
+    assert facade._backend.get_raw(facade.make_key("bad", "t")) is None, (
+        "corrupt entry must be purged"
+    )
 
 
 def test_noop_backend_never_stores():
@@ -221,7 +223,15 @@ def test_local_storage_public_url_matches_the_data_mount(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize(
     "key",
-    ["/etc/passwd", "C:/windows/system32", "files/../../escape", "", "files//double", "files/a:b", "files\\win"],
+    [
+        "/etc/passwd",
+        "C:/windows/system32",
+        "files/../../escape",
+        "",
+        "files//double",
+        "files/a:b",
+        "files\\win",
+    ],
 )
 def test_local_storage_rejects_traversal_keys(key, tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_PATH", str(tmp_path))

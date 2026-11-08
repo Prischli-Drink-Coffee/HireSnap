@@ -7,30 +7,50 @@ from anywhere in the container or it does not work at all - there is no
 
 Layout, and why each directory exists:
 
-    api/            HTTP layer. Routers validate a request and delegate; they hold
-                    no SQL and no business rules. security.py is the JWT dependency.
-    configuration/  Process configuration: the env wrapper, logging, the YAML
-                    loader and the path helpers. Nothing here imports anywhere else.
-    domain/         The pydantic models that describe the data. Pure data, no I/O.
-    infrastructure/ Swappable I/O: the database connection and schema loader, the
-                    cache, object storage, mail, uploads and the Celery messaging
-                    layer. Each backend is chosen by an environment flag and has a
-                    local default, so importing this package never requires a server.
-    repositories/   Raw SQL, one module per table. They take a model or a dict and
-                    return rows; they never raise an HTTP error.
-    services/       Business rules, one module per vertical. They compose
-                    repositories and raise HTTPException, which is what the routers
-                    surface.
-    shared/         Small helpers with no dependencies of their own: password
-                    hashing, JWTs, URL building, validation helpers and debug logging.
+    api/                HTTP plumbing only: `app.py` builds the root app, mounts
+                        `/server`, `/public` and `/data`, installs CORS and the one
+                        error handler; `registry.py` is the ordered router list and
+                        `security.py` the JWT dependency. It holds no business rule.
+    configuration/      Process configuration: the env wrapper, logging, the YAML
+                        loader and the path helpers. Nothing here imports anywhere else.
+    composition/        The ONLY wiring root. `services.py` knows which class
+                        implements a domain, `repositories.py` which module holds its
+                        SQL, `infra.py` which concrete cache/storage/mailer/queue/ML
+                        transport a flag selects, `container.py` owns their lifetime and
+                        `state.py` is the accessor surface a router calls.
+    models/             The pydantic models that describe the data, split into
+                        `auth_models.py` (credentials, tokens, JWT settings) and
+                        `db/db_models.py` (the ten tables). Pure data, no I/O, and
+                        nothing here may import `service.services` or `service.api`.
+    infrastructure/     Swappable I/O: the database connection and schema loader, the
+                        cache, object storage, mail, uploads and the messaging layer.
+                        Each backend is chosen by an environment flag and has a local
+                        default, so importing this package never requires a server.
+    services/<domain>/  One vertical slice per business capability, laid out as
+                        `application/` (the rules), `persistence/` (raw SQL for that
+                        slice), `presentation/routers/<name>_api/` (the HTTP routes) and
+                        `domain/` where a slice has rules of its own. A slice talks to
+                        another slice through `composition.state`, never by import.
+    shared/             Small helpers with no dependencies of their own: the error
+                        hierarchy, the port protocols, password hashing, JWTs, URL
+                        building and debug logging.
 
-The rule that keeps this honest: importing `service.api.app` must work with no
-MySQL, no `.env` and no model weights. tests/test_backend_structure.py asserts the
-layout (one package, the short root allowlist, the layer directories, no `src.*`
-imports, every router mounted) and tests/test_import_without_infra.py asserts the
-import in a fresh interpreter from a temporary working directory.
+Why the split is real rather than cosmetic: the old tree had `services/` as twelve flat
+modules that imported each other and raised `HTTPException` directly, `repositories/` at
+the top level, and models mixed in. A rule that raises an HTTP exception cannot be called
+from a worker, and two slices importing each other cannot be tested alone. Now a domain
+failure is a `ServiceError` that exactly one handler maps to a status, and a slice reaches
+a sibling through the composition layer.
 
-Mirror of R:\\GPTHub\\backend\\service (one package, layers named after the job they do).
+The rule that keeps this honest: importing `service.api.app` must work with no MySQL, no
+`.env`, no broker and no model weights. `tests/test_backend_structure.py` asserts the
+layout, `tests/test_service_boundary.py` asserts the layer rules,
+`tests/test_ports_contracts.py` asserts the ports pull in no driver, and
+`tests/test_import_without_infra.py` asserts the import in a fresh interpreter from a
+temporary working directory. `backend/scripts/check_backend_layout.py` is the same layout
+claim expressed as a pre-commit and CI gate, so a reviewer does not have to be the gate.
+
+Mirror of R:\\GPTHub\\backend\\service (one package, slices named after the business job).
 """
 
 __version__ = "1.0.0"

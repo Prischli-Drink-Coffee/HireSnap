@@ -68,7 +68,7 @@ def _env(*names, default=""):
 # ---------------------------------------------------------------------------
 # ML client: one seam, imported lazily.
 # ---------------------------------------------------------------------------
-# service/services/ml_client.py is the only supported way to reach the pipeline
+# service/infrastructure/ml_sidecar.py is the only supported way to reach the pipeline
 # (docs/SIDECARS.md 4). It POSTs the media bytes to /v1/embed/video and decodes
 # {"vector": [...], "dim": N, "model": ...}; ML_SERVICE_URL picks the address and
 # defaults to the sidecar on 127.0.0.1:8080. There is no in-process path.
@@ -76,7 +76,7 @@ def _env(*names, default=""):
 # WHY this replaced a "probe a list of candidate modules" approach: the previous
 # version searched for src.modelling.ml_client / ml.client and fell back to
 # POSTing JSON to "/embed". None of those three things exist - the module is
-# service.services.ml_client, the route is /v1/embed/video, and the body is the
+# service.inffrastructure.ml_sidecar, the route is /v1/embed/video, and the body is the
 # media bytes, not a JSON descriptor. Every layer of that would have failed on
 # the first real task, and it failed silently at import time instead, which is
 # worse. A fallback that cannot work is not a fallback.
@@ -85,10 +85,10 @@ def _env(*names, default=""):
 def _ml_client():
     """The ML transport module, or a TaskUnavailable explaining its absence."""
     try:
-        from service.services import ml_client
+        from service.infrastructure import ml_sidecar
     except Exception as exc:  # a broken install, not a missing feature flag
-        raise TaskUnavailable("ml_client_unavailable: %s" % (exc,)) from exc
-    return ml_client
+        raise TaskUnavailable("ml_sidecar_unavailable: %s" % (exc,)) from exc
+    return ml_sidecar
 
 
 def _local_media_path(storage, file_key, source_path=None):
@@ -140,7 +140,7 @@ def _npy_bytes(vector):
     try:
         import numpy as np
     except Exception as exc:
-        raise TaskUnavailable("numpy_missing: %s" % (exc,))
+        raise TaskUnavailable("numpy_missing: %s" % (exc,)) from exc
     buffer = io.BytesIO()
     np.save(buffer, np.asarray(vector))
     return buffer.getvalue()
@@ -166,7 +166,7 @@ def _storage():
     try:
         from service.infrastructure.storage import get_storage
     except Exception as exc:  # pragma: no cover - only on a broken install
-        raise TaskUnavailable("storage_unavailable: %s" % (exc,))
+        raise TaskUnavailable("storage_unavailable: %s" % (exc,)) from exc
     return get_storage()
 
 
@@ -213,7 +213,9 @@ def embed_candidate(candidate_id, file_key, model_version=MODEL_VERSION, source_
             try:
                 os.unlink(media_path)
             except OSError as exc:  # never mask the original failure
-                logger.warning("task=embed_candidate temp_cleanup_failed path=%s error=%s", media_path, exc)
+                logger.warning(
+                    "task=embed_candidate temp_cleanup_failed path=%s error=%s", media_path, exc
+                )
 
     invalidated = _invalidate(EMBEDDING_PREFIX)
 
@@ -229,7 +231,10 @@ def embed_candidate(candidate_id, file_key, model_version=MODEL_VERSION, source_
     }
     logger.info(
         "task=embed_candidate status=ok candidate_id=%s key=%s bytes=%d embedder=%s",
-        candidate_id, key, len(payload), description,
+        candidate_id,
+        key,
+        len(payload),
+        description,
     )
     return result
 
@@ -257,7 +262,9 @@ def reindex_embeddings(limit=200, older_than_seconds=None):
     for item in uploads:
         if len(queued) >= limit_value:
             break
-        digest = hashlib.sha1(("%s|%s|%s" % ("", item["key"], MODEL_VERSION)).encode("utf-8")).hexdigest()[:32]
+        digest = hashlib.sha1(
+            ("%s|%s|%s" % ("", item["key"], MODEL_VERSION)).encode("utf-8")
+        ).hexdigest()[:32]
         # Without a candidate id we cannot build the deterministic key exactly,
         # so the presence check uses the file's own digest prefix as a hint and
         # leaves the real decision to embed_candidate, which is idempotent.
@@ -269,14 +276,20 @@ def reindex_embeddings(limit=200, older_than_seconds=None):
     dispatched = 0
     for file_key in queued:
         try:
-            dispatch("hiresnap.embed_candidate", {"candidate_id": _candidate_from_key(file_key), "file_key": file_key})
+            dispatch(
+                "hiresnap.embed_candidate",
+                {"candidate_id": _candidate_from_key(file_key), "file_key": file_key},
+            )
             dispatched += 1
         except Exception as exc:
             logger.warning("task=reindex_embeddings status=partial key=%s error=%s", file_key, exc)
 
     logger.info(
         "task=reindex_embeddings status=ok scanned=%d queued=%d skipped=%d dispatched=%d",
-        len(uploads), len(queued), skipped, dispatched,
+        len(uploads),
+        len(queued),
+        skipped,
+        dispatched,
     )
     return {
         "status": STATUS_OK,
@@ -313,6 +326,7 @@ def cleanup_orphan_uploads(older_than_seconds=86400, dry_run=False):
         threshold = 86400.0
 
     import time
+
     now = time.time()
     uploads = storage.list_objects("%s/" % UPLOAD_NAMESPACE, limit=100000)
 
@@ -320,7 +334,8 @@ def cleanup_orphan_uploads(older_than_seconds=86400, dry_run=False):
     if referenced is None:
         logger.warning(
             "task=cleanup_orphan_uploads status=skipped code=database_unavailable "
-            "action=deleting nothing is the safe default (scanned=%d)", len(uploads)
+            "action=deleting nothing is the safe default (scanned=%d)",
+            len(uploads),
         )
         return {
             "status": STATUS_SKIPPED,
@@ -353,7 +368,9 @@ def cleanup_orphan_uploads(older_than_seconds=86400, dry_run=False):
         _invalidate("%s/" % UPLOAD_NAMESPACE, namespace="files")
     logger.info(
         "task=cleanup_orphan_uploads status=ok scanned=%d deleted=%d dry_run=%s",
-        len(uploads), len(deleted), dry_run,
+        len(uploads),
+        len(deleted),
+        dry_run,
     )
     return {
         "status": STATUS_OK,
@@ -367,19 +384,24 @@ def cleanup_orphan_uploads(older_than_seconds=86400, dry_run=False):
 def _referenced_keys():
     """File names referenced by MySQL, or None when the database is unreachable.
 
-    Imported inside the function on purpose: service.infrastructure.database.connection opens a
-    MySQL connection at import time, so a module-level import would make every
-    worker task import (and every test run) require a live database.
+    Imported inside the function on purpose: the repository module pulls in
+    service.infrastructure.database.connection, whose module-level `db` object is cheap but
+    whose queries need a live MySQL, and a worker must import without a database. The
+    connection itself is lazy - the import cost is the point, not a connect.
     """
     try:
-        from service.repositories.file_repository import get_all_files
+        from service.services.files.persistence import get_all_files
     except Exception as exc:
-        logger.info("task=cleanup_orphan_uploads status=skipped reason=repository_import error=%s", exc)
+        logger.info(
+            "task=cleanup_orphan_uploads status=skipped reason=repository_import error=%s", exc
+        )
         return None
     try:
         rows = get_all_files()
     except Exception as exc:
-        logger.info("task=cleanup_orphan_uploads status=skipped reason=database_unreachable error=%s", exc)
+        logger.info(
+            "task=cleanup_orphan_uploads status=skipped reason=database_unreachable error=%s", exc
+        )
         return None
     names = set()
     for row in rows or []:
@@ -402,8 +424,15 @@ def send_email(to, subject, body, html=None):
     from service.infrastructure.mail import send_now
 
     sent = send_now(to, subject, body, html=html)
-    logger.info("task=send_email status=%s to=%s subject=%r", "ok" if sent else "skipped", to, subject)
-    return {"status": STATUS_OK if sent else STATUS_SKIPPED, "to": to, "subject": subject, "sent": bool(sent)}
+    logger.info(
+        "task=send_email status=%s to=%s subject=%r", "ok" if sent else "skipped", to, subject
+    )
+    return {
+        "status": STATUS_OK if sent else STATUS_SKIPPED,
+        "to": to,
+        "subject": subject,
+        "sent": bool(sent),
+    }
 
 
 def health():
@@ -416,20 +445,25 @@ def health():
     report = {"status": STATUS_OK, "worker": os.environ.get("HOSTNAME", "local"), "checks": {}}
     try:
         from service.infrastructure.cache import cache_health
+
         report["checks"]["cache"] = cache_health()
     except Exception as exc:
         report["checks"]["cache"] = {"ok": False, "error": str(exc)}
     try:
         from service.infrastructure.storage import storage_health
+
         report["checks"]["storage"] = storage_health()
     except Exception as exc:
         report["checks"]["storage"] = {"ok": False, "error": str(exc)}
     try:
         from service.infrastructure.mail import mail_health
+
         report["checks"]["mail"] = mail_health()
     except Exception as exc:
         report["checks"]["mail"] = {"ok": False, "error": str(exc)}
-    if not all(isinstance(value, dict) and value.get("ok", True) for value in report["checks"].values()):
+    if not all(
+        isinstance(value, dict) and value.get("ok", True) for value in report["checks"].values()
+    ):
         report["status"] = STATUS_FAILED
     return report
 
@@ -454,8 +488,10 @@ def get_task(name):
     """Look up a task body by name. Raises KeyError with the known names."""
     try:
         return TASKS[name]
-    except KeyError:
-        raise KeyError("unknown task %r; known tasks: %s" % (name, ", ".join(sorted(TASKS))))
+    except KeyError as exc:
+        raise KeyError(
+            "unknown task %r; known tasks: %s" % (name, ", ".join(sorted(TASKS)))
+        ) from exc
 
 
 def dispatch(name, kwargs=None, async_mode=None):
@@ -470,12 +506,14 @@ def dispatch(name, kwargs=None, async_mode=None):
     if async_mode is None:
         try:
             from service.infrastructure.messaging.celery_app import is_configured
+
             async_mode = bool(is_configured())
         except Exception:
             async_mode = False
 
     if async_mode:
         from service.infrastructure.messaging.celery_app import get_celery_app
+
         app = get_celery_app()
         return app.send_task(name, kwargs=kwargs)
 
@@ -489,7 +527,12 @@ def register_tasks(app):
     queues, time limits) are visible in one place and can be asserted with a fake
     app in tests.
     """
-    from service.infrastructure.messaging.celery_app import TASK_ROUTES, TASK_TIME_LIMITS, SOFT_TIME_LIMIT, HARD_TIME_LIMIT
+    from service.infrastructure.messaging.celery_app import (
+        HARD_TIME_LIMIT,
+        SOFT_TIME_LIMIT,
+        TASK_ROUTES,
+        TASK_TIME_LIMITS,
+    )
 
     registered = []
     for name, body in TASKS.items():
@@ -506,5 +549,7 @@ def register_tasks(app):
             acks_late=True,
         )(body)
         registered.append(name)
-    logger.info("celery status=tasks_registered count=%d names=%s", len(registered), ",".join(registered))
+    logger.info(
+        "celery status=tasks_registered count=%d names=%s", len(registered), ",".join(registered)
+    )
     return registered

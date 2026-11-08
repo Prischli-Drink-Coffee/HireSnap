@@ -1,0 +1,87 @@
+# WHY THIS FILE EXISTS
+#
+# It is metadata plus tool configuration, and NOT a distributable package: there is no
+# [build-system] table on purpose. The backend image COPYs the tree and sets PYTHONPATH=/app,
+# so an installed wheel would be a second, competing source of truth for what ships. Leaving
+# [build-system] out is what stops a stray 'pip install .' from succeeding and making the
+# image look correct while it runs an older copy of the package.
+#
+# Every tool below searches UPWARD for this file and stops at the first one it finds. That is
+# why it belongs at backend/ and not under service/: a copy closer to the code would silently
+# stop governing the rest of the tree. Same reason ml/pyproject.toml sits at ml/.
+#
+# What this file does NOT do: it does not replace requirements.txt. The image still installs
+# from requirements.txt (or the pinned snapshot backend/docker/requirements.lock.txt), because
+# a dependency list that only exists here would be one more place to forget to rebuild. See
+# docs/KNOWN_GAPS.md sections 4 and 15.
+
+[project]
+name = "hiresnap-backend"
+requires-python = ">=3.9"
+
+# Ruff configuration. line-length 100 is the format the tree already uses; target-version
+# "py39" pins the syntax level so a 3.10+ construct (match, PEP 604 unions in annotations
+# without the future import) is reported here instead of failing in the image.
+#
+# extend-exclude keeps notebooks out: they are exploratory, they are not on the import path,
+# and the fatal-rules gate would otherwise report undefined names in cells that are meant to
+# be run in a particular order.
+#
+# NOTE the difference between this configuration and the commit gate. This select is the full
+# recommended set (E, F, I, B) for a developer running ruff by hand. CI and the pre-commit
+# hook run the FATAL SUBSET only - 'ruff check --select E9,F63,F7,F82 service' - because the
+# legacy tree has pre-existing findings that no commit in this refactor created, and a gate
+# that is red on day one teaches people to pass --no-verify. Widening the gate is a separate,
+# deliberate change once that debt is cleared.
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+
+# B008 ("do not perform a function call in an argument default") is FastAPI's dependency
+# injection mechanism, not a mistake: `service=Depends(get_user_service)` is how the router
+# asks for its collaborator. The Annotated[..., Depends(...)] spelling is equivalent and is
+# what GPTHub uses, but these handler signatures already run past 100 characters and the
+# rewrite would push every one of them onto three extra lines for no behavioural gain, so the
+# rule is switched off for the routers rather than the code reshaped around a lint rule.
+# Everything else B checks - comparisons, mutable defaults, loop variables - still applies.
+[tool.ruff.lint.per-file-ignores]
+"service/services/*/presentation/routers/*/*.py" = ["B008"]
+
+# Pytest configuration. ONE source of pytest config: there is deliberately no
+# backend/pytest.ini and no backend/setup.cfg. pytest reads the first of pytest.ini,
+# pyproject.toml, tox.ini and setup.cfg that it finds, so a second file would either be dead
+# or would silently win over this one - and then 'cd backend && python -m pytest -q' and
+# 'python -m pytest ml/tests -q' from the root would disagree about rootdir.
+#
+# testpaths = ["tests"] makes a bare "python -m pytest -q" mean the backend suite, not a walk
+# of the whole checkout. pythonpath = ["."] puts backend/ itself on sys.path so the tests
+# import the package (import service.api.app) rather than a script, which is the form the
+# image uses. addopts carries --strict-markers so a typo in a marker name is an error instead
+# of a silently unselected test.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = ["integration: needs a live stack"]
+addopts = "--strict-markers -ra"
+
+# Mypy configuration. follow_imports = "silent" and ignore_missing_imports = true keep the
+# check useful on a tree that is typed unevenly: the deployment modules are clean, the legacy
+# business modules are not, and a type error inside a module that is merely imported is not
+# what this gate is about.
+#
+# python_version = "3.9" is the RUNTIME version (backend/docker/Dockerfile), not whatever
+# interpreter happens to run mypy. It must stay 3.9 even where mypy cannot honour it: from
+# mypy 2.0 the tool refuses to analyse below 3.10 and prints
+# 'python_version: Python 3.9 is not supported (must be 3.10 or higher)' while still running.
+# That message is version skew in the local install, not a defect here - CI pins
+# mypy==1.13.0 (.github/workflows/ci.yml:193), which does support 3.9. Raising this number to
+# silence a newer local mypy would let 3.10+ syntax into the tree and move the failure to
+# the image build.
+[tool.mypy]
+python_version = "3.9"
+ignore_missing_imports = true
+follow_imports = "silent"

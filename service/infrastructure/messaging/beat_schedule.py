@@ -26,9 +26,9 @@ from __future__ import annotations
 import os
 
 # Defaults, chosen from the observed cost of each job rather than round numbers.
-CLEANUP_INTERVAL_SECONDS = 3600.0      # hourly: orphaned uploads are cheap to find
-REINDEX_INTERVAL_SECONDS = 86400.0     # nightly: embedding a corpus is minutes of GPU
-CLEANUP_EXPIRES_SECONDS = 3300.0       # a missed cleanup must not pile up behind beat
+CLEANUP_INTERVAL_SECONDS = 3600.0  # hourly: orphaned uploads are cheap to find
+REINDEX_INTERVAL_SECONDS = 86400.0  # nightly: embedding a corpus is minutes of GPU
+CLEANUP_EXPIRES_SECONDS = 3300.0  # a missed cleanup must not pile up behind beat
 REINDEX_EXPIRES_SECONDS = 3600.0
 
 

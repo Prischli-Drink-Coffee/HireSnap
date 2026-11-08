@@ -272,7 +272,10 @@ class RedisCache(CacheBackend):
         logger.warning(
             "cache backend=redis status=degraded code=%s url=%s error=%s "
             "action=serving misses for %.0fs",
-            code, self._log_url, exc, self._backoff,
+            code,
+            self._log_url,
+            exc,
+            self._backoff,
         )
 
     def get_raw(self, key):
@@ -427,7 +430,9 @@ class Cache(object):
         try:
             return int(self._backend.clear_prefix(full) or 0)
         except Exception as exc:
-            logger.warning("cache status=degraded code=invalidate_failed prefix=%s error=%s", full, exc)
+            logger.warning(
+                "cache status=degraded code=invalidate_failed prefix=%s error=%s", full, exc
+            )
             return 0
 
     def ping(self):
@@ -452,7 +457,10 @@ _MISS = object()
 def build_cache(backend=None):
     """Build a facade for the requested backend name (default: the env flag)."""
     _bootstrap_env()
-    name = str(backend or _env("CACHE__BACKEND", "CACHE_BACKEND", default="memory")).strip().lower() or "memory"
+    name = (
+        str(backend or _env("CACHE__BACKEND", "CACHE_BACKEND", default="memory")).strip().lower()
+        or "memory"
+    )
     prefix = _env("CACHE__PREFIX", "CACHE_PREFIX", default="hiresnap")
     default_ttl = _env("CACHE__TTL", "CACHE_TTL", default=str(DEFAULT_TTL))
 
@@ -476,7 +484,9 @@ def build_cache(backend=None):
         # a typo in an env file must not take the API down.
         if name != "memory":
             logger.warning("cache status=unknown_backend value=%s action=using memory", name)
-        max_entries = _env("CACHE__MAX_ENTRIES", "CACHE_MAX_ENTRIES", default=str(DEFAULT_MAX_ENTRIES))
+        max_entries = _env(
+            "CACHE__MAX_ENTRIES", "CACHE_MAX_ENTRIES", default=str(DEFAULT_MAX_ENTRIES)
+        )
         try:
             max_entries_value = int(max_entries)
         except (TypeError, ValueError):
@@ -503,7 +513,9 @@ def get_cache():
     Cached per backend name so an env change plus reset_cache() (tests) or a
     process restart is enough to switch, and so connection setup happens once.
     """
-    name = str(_env("CACHE__BACKEND", "CACHE_BACKEND", default="memory")).strip().lower() or "memory"
+    name = (
+        str(_env("CACHE__BACKEND", "CACHE_BACKEND", default="memory")).strip().lower() or "memory"
+    )
     with _CACHES_LOCK:
         existing = _CACHES.get(name)
         if existing is not None:

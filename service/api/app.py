@@ -28,28 +28,17 @@ from __future__ import annotations
 import json
 import os
 
-from fastapi import APIRouter, FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.models import Tag as OpenApiTag
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from service import __version__
-from service.api.routers import (
-    auth,
-    candidate_vacancies,
-    embeddings,
-    files,
-    info_candidates,
-    inference,
-    magics,
-    personalities,
-    personality_candidates,
-    personality_vacancies,
-    users,
-    vacancies,
-)
+from service.api.registry import ROUTERS
 from service.configuration.logging import get_logger
 from service.configuration.paths import data_dir
+from service.shared.errors import ServiceError
 
 log = get_logger()
 
@@ -70,23 +59,9 @@ TAGS = [
     OpenApiTag(name="Embedding", description="CRUD operations embedding"),
 ]
 
-#: The routers, in the order the old single module declared their handlers. Order
-#: matters for two reasons: OpenAPI output is generated in declaration order, and
-#: a static path must be declared before a parameterised one that could shadow it.
-ROUTERS = (
-    auth,
-    inference,
-    users,
-    info_candidates,
-    vacancies,
-    magics,
-    personalities,
-    personality_vacancies,
-    personality_candidates,
-    candidate_vacancies,
-    files,
-    embeddings,
-)
+# The routers live in service/api/registry.py, not here: the structure test and the
+# layout guard both read that tuple, so it belongs in a module whose only job is the list.
+# ROUTERS is imported above and mounted in build_server_app() below.
 
 
 def _cors_settings() -> dict:
@@ -142,10 +117,29 @@ def _cors_settings() -> dict:
     return {"allow_origins": origins, "allow_credentials": True}
 
 
+async def service_error_handler(request: Request, exc: ServiceError) -> JSONResponse:
+    """Render any ServiceError as {"detail": ...} with the error's own status.
+
+    WHY ONE HANDLER AND NOT A TRY/EXCEPT PER ROUTE: the status code belongs to the
+    failure, not to the handler that happened to raise it - a not-found row is a 404
+    whether a route, a task or another service discovered it. Registering it once on the
+    /server sub-application means a new route cannot forget it, and the router bodies
+    shrank from try/except HTTPException to a plain call.
+
+    WHY IT IS REGISTERED ON /server AND NOT ON THE ROOT APP: the root app only mounts
+    sub-applications; an exception raised inside a mounted app is handled by THAT app's
+    handlers. Registering it on the root would leave /server answering 500.
+    """
+    return JSONResponse(status_code=exc.status_code, content=exc.to_payload())
+
+
 def build_server_app() -> FastAPI:
     """The application mounted at /server: every business route lives here."""
     app_server = FastAPI(title="API - server")
     app_server.openapi_tags = [tag.model_dump() for tag in TAGS]
+    # Keyed by the BASE class so one registration covers all four subclasses; Starlette
+    # walks the MRO when it looks a handler up.
+    app_server.add_exception_handler(ServiceError, service_error_handler)
 
     @app_server.get("/health", tags=[OPTIONS_TAG], summary="Liveness probe")
     async def health() -> dict:

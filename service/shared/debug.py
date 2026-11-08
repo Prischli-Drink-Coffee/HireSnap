@@ -1,7 +1,6 @@
 from service.configuration.env import Env
 from service.configuration.logging import setup_logging
 
-
 env = Env()
 log = setup_logging()
 

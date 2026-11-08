@@ -8,7 +8,7 @@
 #
 # WHAT IS NOT IN HERE: the inference stack. Embedding, transcription and the
 # Cosmos tokenizer live in the ml sidecar (ml/); the backend reaches them over
-# HTTP through service/services/ml_client.py and imports no ML library at all.
+# HTTP through service/infrastructure/ml_sidecar.py and imports no ML library at all.
 # torch, torchvision, torchaudio, transformers, sentence-transformers, moviepy,
 # librosa, torchmetrics, torcheval, faiss-cpu, spacy, textattack, nltk, webrtcvad,
 # twisted, aiobotocore, opencv-python, notebook, munch, protobuf, matplotlib and
@@ -53,7 +53,7 @@ watchfiles==0.22.0
 # --- configuration and validation -----------------------------------------
 pydantic==2.7.4
 pydantic_core==2.18.4
-# service/configuration/env.py loads backend/.env; service/domain/models.py
+# service/configuration/env.py loads backend/.env; service/models/auth_models.py
 # reads the JWT expiry keys through it.
 pydantic-settings==2.2.1
 python-dotenv==1.0.1

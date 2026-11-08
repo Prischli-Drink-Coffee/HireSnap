@@ -53,16 +53,26 @@
     |   └── app.log
     ├── notebooks/ - исследовательские ноутбуки
     ├── service/ - сам сервис
-    |   ├── main.py - точка входа: bootstrap схемы и uvicorn
-    |   ├── api/ - app.py (create_app, GET /server/health), security.py, routers/
-    |   ├── configuration/ - env.py, logging.py, logging.yaml, paths.py
-    |   ├── domain/models.py - pydantic-модели и AuthJWT
-    |   ├── infrastructure/ - cache, storage, mail, uploads, database/, messaging/
-    |   ├── repositories/ - SQL-запросы
-    |   ├── services/ - бизнес-логика, включая matching.py и ml_client.py
-    |   └── shared/ - debug, hashing, tokens, urls, validation
-    ├── tests/ - pytest (conftest.py, manual/pipeline_smoke.py и тесты платформы)
+    |   ├── main.py - точка входа: bootstrap схемы (DEBUG и INIT_DB) и uvicorn
+    |   ├── settings.py - типизированные настройки: get_settings() читает окружение один раз
+    |   ├── api/ - app.py (create_app, три монтирования, CORS, GET /server/health,
+    |   |            обработчик ServiceError), registry.py (порядок роутеров), security.py
+    |   ├── composition/ - единственное место сборки: infra -> repositories -> services
+    |   ├── configuration/ - env.py (совместимый шим Env), logging.py, logging.yaml, paths.py
+    |   ├── models/ - db_models.py и auth_models.py: pydantic-модели, общие для слайсов
+    |   ├── infrastructure/ - cache, storage, mail, uploads, ml_sidecar.py, database/, messaging/
+    |   ├── services/<домен>/ - вертикальные слайсы: auth, users, candidates, vacancies,
+    |   |                      magics, personalities, personality_vacancies,
+    |   |                      personality_candidates, candidate_vacancies, files,
+    |   |                      embeddings, matching, jobs; внутри domain/, application/,
+    |   |                      persistence/ и presentation/routers/<домен>_api/
+    |   └── shared/ - errors.py (ServiceError и его подклассы), hashing, tokens,
+    |                validation, urls, debug
+    ├── scripts/ - check_backend_layout.py: те же правила раскладки без pytest
+    ├── tests/ - pytest (conftest.py, структурные и контрактные тесты,
+    |            snapshots/critical_endpoint_openapi.json)
     ├── .env - переменные среды
+    ├── pyproject.toml - метаданные проекта, ruff, mypy и настройки pytest
     ├── requirements.txt - список зависимостей
     ├── requirements-platform.txt - celery/redis/boto3, нужны только воркерам
     └── README.md - этот файл
@@ -133,7 +143,8 @@ python -m pytest -q
 ```
 
 `tests/conftest.py` кладёт каталог `backend/` в `sys.path`, поэтому тесты видны без
-установки пакета. Отдельный ручной прогон пайплайна — `tests/manual/pipeline_smoke.py`.
+установки пакета. Отдельного ручного прогона пайплайна в этом пакете больше нет:
+инференс переехал в `ml/` (`python service/app.py`), и вызывается он по HTTP.
 
 ### Переменные среды
 
@@ -178,7 +189,7 @@ python -m pytest -q
 > В обычной работе вызывать их вручную не нужно: эмбеддинги и транскрипция — это
 > `POST /v1/embed/video`, `POST /v1/embed/text` и `POST /v1/transcribe` по адресу
 > `ML_SERVICE_URL` (в стеке `http://ml:8080`), а из этого дерева их вызывает
-> `service/services/ml_client.py`. Скрипта `inference.sh` в дереве больше нет.
+> `service/infrastructure/ml_sidecar.py`. Скрипта `inference.sh` в дереве больше нет.
 
 Раньше оценки личности по системам MBTI и OCEAN для набора видео-визиток считал
 пакетный скрипт `inference.sh`; он удалён вместе с `src/modelling/`, а папки
@@ -195,7 +206,7 @@ python -m pytest -q
 
 Ответ — `{"vector", "dim", "model"}`; транскрипция — `POST /v1/transcribe` с теми же
 заголовками. Контракт, коды ошибок и ограничения по размеру описаны в `ml/README.md`,
-а вызывающий код в этом дереве — `service/services/ml_client.py` (он же задаёт
+а вызывающий код в этом дереве — `service/infrastructure/ml_sidecar.py` (он же задаёт
 `ML_SERVICE_URL`, по умолчанию `http://127.0.0.1:8080`).
 
 ## Пайплайн определения типа личности (OCEAN)
@@ -341,7 +352,7 @@ python service/video_embedding.py --data_dir <frames_folder> --batch_size 1 --we
 
 > **Этот раздел актуален.** Ранжирование OCEAN/MBTI (его в пакетном режиме считали
 > удалённые `submit.py` и `mbti.py`) — бизнес-логика, и она осталась в API как
-> `build_matrix()` в `service/services/matching.py`. Командной строки для неё
+> `build_matrix()` в `service/services/matching/`. Командной строки для неё
 > больше нет: API считает матрицу при загрузке видео кандидата.
 
 После создания представлений для вакансий, характеристик OCEAN и кандидатов мы можем установить соответствие между кандидатами и вакансиями. Мы рассчитываем "степень соответствия" для кандидатов и вакансий относительно характеристик OCEAN. Для оценки соответствия используем косинусное расстояние (или корреляцию Пирсона), нормированное в диапазон [0, 1].

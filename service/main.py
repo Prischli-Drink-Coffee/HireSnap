@@ -28,9 +28,8 @@ from typing import Optional
 import uvicorn
 import yaml
 
-from service.api.app import app  # re-exported: uvicorn imports this module
 from service.configuration.env import Env
-from service.configuration.logging import get_logger, setup_logging
+from service.configuration.logging import get_logger
 from service.configuration.paths import LOGGING_YAML
 from service.shared.debug import debug_info
 

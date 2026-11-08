@@ -191,14 +191,19 @@ def build_celery_app():
     # Declare the queues explicitly so a worker started with --queues=ml binds a
     # real queue even before any task has been routed to it.
     from kombu import Queue
+
     app.conf.task_queues = tuple(Queue(name) for name in QUEUES)
 
     from service.infrastructure.messaging.tasks import register_tasks
+
     register_tasks(app)
 
     logger.info(
         "celery app=%s status=built broker=%s backend=%s queues=%s",
-        APP_NAME, redact_url(broker_url()), redact_url(result_backend()), ",".join(QUEUES),
+        APP_NAME,
+        redact_url(broker_url()),
+        redact_url(result_backend()),
+        ",".join(QUEUES),
     )
     return app
 

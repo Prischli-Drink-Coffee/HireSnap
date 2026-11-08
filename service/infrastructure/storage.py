@@ -223,7 +223,9 @@ class LocalStorage(object):
                     stat = os.stat(absolute)
                 except OSError:
                     continue
-                results.append({"key": relative, "size": stat.st_size, "modified_at": stat.st_mtime})
+                results.append(
+                    {"key": relative, "size": stat.st_size, "modified_at": stat.st_mtime}
+                )
                 if len(results) >= limit:
                     return results
         return results
@@ -262,8 +264,17 @@ class S3Storage(object):
 
     name = "s3"
 
-    def __init__(self, bucket=None, endpoint=None, access_key=None, secret_key=None,
-                 region=None, secure=None, prefix=None, presign_ttl=None):
+    def __init__(
+        self,
+        bucket=None,
+        endpoint=None,
+        access_key=None,
+        secret_key=None,
+        region=None,
+        secure=None,
+        prefix=None,
+        presign_ttl=None,
+    ):
         self._bucket = bucket or DEFAULT_BUCKET
         self._endpoint = endpoint or ""
         self._access_key = access_key or ""
@@ -318,7 +329,9 @@ class S3Storage(object):
         except Exception as exc:
             code = str(getattr(exc, "response", {}).get("Error", {}).get("Code", "") or "")
             if "404" not in code and "NoSuchBucket" not in code:
-                raise StorageError("storage_bucket_unavailable bucket=%s error=%s" % (self._bucket, exc)) from exc
+                raise StorageError(
+                    "storage_bucket_unavailable bucket=%s error=%s" % (self._bucket, exc)
+                ) from exc
         try:
             client.create_bucket(Bucket=self._bucket)
             return True
@@ -326,7 +339,9 @@ class S3Storage(object):
             # Two workers racing to create the same bucket is normal at startup.
             if "BucketAlreadyOwnedByYou" in str(exc) or "BucketAlreadyExists" in str(exc):
                 return True
-            raise StorageError("storage_bucket_create_failed bucket=%s error=%s" % (self._bucket, exc)) from exc
+            raise StorageError(
+                "storage_bucket_create_failed bucket=%s error=%s" % (self._bucket, exc)
+            ) from exc
 
     def put_bytes(self, key, data, content_type=None):
         if isinstance(data, str):
@@ -348,7 +363,9 @@ class S3Storage(object):
         extra = {"ContentType": content_type} if content_type else None
         try:
             if extra:
-                client.upload_file(str(source_path), self._bucket, self.object_key(key), ExtraArgs=extra)
+                client.upload_file(
+                    str(source_path), self._bucket, self.object_key(key), ExtraArgs=extra
+                )
             else:
                 client.upload_file(str(source_path), self._bucket, self.object_key(key))
         except Exception as exc:
@@ -396,13 +413,21 @@ class S3Storage(object):
             for page in paginator.paginate(Bucket=self._bucket, Prefix=search or ""):
                 for item in page.get("Contents", []) or []:
                     full = item.get("Key", "")
-                    relative = full[len(self._prefix) + 1:] if self._prefix and full.startswith(self._prefix + "/") else full
+                    relative = (
+                        full[len(self._prefix) + 1 :]
+                        if self._prefix and full.startswith(self._prefix + "/")
+                        else full
+                    )
                     modified = item.get("LastModified")
-                    results.append({
-                        "key": relative,
-                        "size": item.get("Size", 0),
-                        "modified_at": modified.timestamp() if hasattr(modified, "timestamp") else 0.0,
-                    })
+                    results.append(
+                        {
+                            "key": relative,
+                            "size": item.get("Size", 0),
+                            "modified_at": modified.timestamp()
+                            if hasattr(modified, "timestamp")
+                            else 0.0,
+                        }
+                    )
                     if len(results) >= limit:
                         return results
         except Exception as exc:
@@ -437,7 +462,11 @@ def build_storage(backend=None):
     would make the feature flag a footgun.
     """
     _bootstrap_env()
-    name = str(backend or _env("STORAGE__BACKEND", "STORAGE_BACKEND", default=DEFAULT_BACKEND)).strip().lower()
+    name = (
+        str(backend or _env("STORAGE__BACKEND", "STORAGE_BACKEND", default=DEFAULT_BACKEND))
+        .strip()
+        .lower()
+    )
     if name != "s3":
         if name != "local":
             logger.warning("storage status=unknown_backend value=%s action=using local", name)
@@ -451,7 +480,9 @@ def build_storage(backend=None):
         region=_env("STORAGE__REGION", "STORAGE_REGION", default=DEFAULT_REGION),
         secure=_truthy(_env("STORAGE__SECURE", "STORAGE_SECURE", default="false")),
         prefix=_env("STORAGE__PREFIX", "STORAGE_PREFIX", default=""),
-        presign_ttl=_env("STORAGE__PRESIGN_TTL", "STORAGE_PRESIGN_TTL", default=str(DEFAULT_PRESIGN_TTL)),
+        presign_ttl=_env(
+            "STORAGE__PRESIGN_TTL", "STORAGE_PRESIGN_TTL", default=str(DEFAULT_PRESIGN_TTL)
+        ),
     )
     try:
         import boto3  # noqa: F401 - presence check only; S3Storage imports it again lazily
