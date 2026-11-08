@@ -21,6 +21,7 @@ import ast
 import os
 import subprocess
 import sys
+import sysconfig
 from pathlib import Path
 from typing import List, Set, Tuple
 
@@ -67,7 +68,29 @@ THIRD_PARTY_MODULES = (
     "uvicorn",
 )
 
-STANDARD_LIBRARY = set(sys.stdlib_module_names)
+
+def _standard_library() -> Set[str]:
+    """Top-level standard-library module names, on any interpreter the suite runs on.
+
+    `sys.stdlib_module_names` only exists from Python 3.10, and the sidecar targets 3.9
+    (ml/.python-version, the deadsnakes minor the image installs, and the version the CI
+    job pins). Reading it unguarded made this file fail at COLLECTION time on 3.9 - before
+    a single assertion - so the boundary rule was silently absent on the interpreter that
+    matters. The fallback enumerates the same directory the interpreter itself uses, so it
+    answers the same question instead of carrying a hand-maintained list that could drift.
+    """
+    names = getattr(sys, "stdlib_module_names", None)
+    if names is not None:
+        return set(names)
+    stdlib = Path(sysconfig.get_paths()["stdlib"])
+    found = set(sys.builtin_module_names)
+    found.update(path.stem for path in stdlib.glob("*.py"))
+    found.update(path.parent.name for path in stdlib.glob("*/__init__.py"))
+    found.difference_update({"site-packages", "dist-packages"})
+    return found
+
+
+STANDARD_LIBRARY = _standard_library()
 
 
 def _module_names(tree: ast.AST) -> List[Tuple[str, int]]:
