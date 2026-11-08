@@ -1,0 +1,70 @@
+CREATE TABLE files (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    url VARCHAR(255) NOT NULL
+);
+CREATE TABLE embeddings (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    url VARCHAR(255) NOT NULL
+);
+CREATE TABLE info_candidates (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NULL DEFAULT NULL,
+    phone VARCHAR(255) NULL DEFAULT NULL,
+    gender ENUM('male', 'female') NOT NULL,
+    date_birth TIMESTAMP DEFAULT NULL,
+    file_id INT NULL DEFAULT NULL,
+    embedding_id INT NULL DEFAULT NULL,
+    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE SET NULL,
+    FOREIGN KEY (embedding_id) REFERENCES embeddings(id) ON DELETE SET NULL
+);
+CREATE TABLE users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    type ENUM('candidate, employer') NOT NULL,
+    info_id INT NULL DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (info_id) REFERENCES info_candidates(id) ON DELETE SET NULL
+);
+CREATE TABLE magics (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    candidate_answer TEXT NOT NULL,
+    vacancy_answer TEXT NOT NULL,
+    file_id INT NULL DEFAULT NULL,
+    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE SET NULL
+);
+CREATE TABLE personalities (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    embedding_id INT NULL DEFAULT NULL,
+    FOREIGN KEY (embedding_id) REFERENCES embeddings(id) ON DELETE SET NULL
+);
+CREATE TABLE vacancies (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    salary VARCHAR(255) NULL DEFAULT NULL,
+    skill VARCHAR(255) NULL DEFAULT NULL,
+    embedding_id INT NULL DEFAULT NULL,
+    FOREIGN KEY (embedding_id) REFERENCES embeddings(id) ON DELETE SET NULL
+);
+CREATE TABLE personality_vacancies (
+    id INT AUTO_INCREMENT,
+    personality_id INT NOT NULL,
+    vacancy_id INT NOT NULL,
+    distance DECIMAL(6,6) NOT NULL,
+    PRIMARY KEY (id, personality_id, vacancy_id),
+    FOREIGN KEY (personality_id) REFERENCES personalities(id) ON DELETE CASCADE,
+    FOREIGN KEY (vacancy_id) REFERENCES vacancies(id) ON DELETE CASCADE
+);
+CREATE TABLE candidate_vacancies (
+    id INT AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    vacancy_id INT NOT NULL,
+    distance DECIMAL(6,6) NOT NULL,
+    PRIMARY KEY (id, user_id, vacancy_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (vacancy_id) REFERENCES vacancies(id) ON DELETE CASCADE
+);

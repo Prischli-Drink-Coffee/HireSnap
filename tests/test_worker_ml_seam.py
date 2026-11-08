@@ -1,18 +1,19 @@
 """The worker -> ML seam: it must speak the sidecar contract, not a guess.
 
-Why this file exists: the first implementation of src/workers/tasks.py probed for
+Why this file exists: the first implementation of the worker ML seam (then src/workers/tasks.py,
+# now service/infrastructure/messaging/tasks.py) probed for
 modules named src.modelling.ml_client / ml.client and fell back to POSTing JSON
 {"file_key","path"} to "/embed". None of those exist. Nothing failed at import
 time, no test covered the call, and the mismatch would only surface as a failed
 nightly job on the first real upload.
 
 These tests pin the three things that were wrong, each against the real contract
-in docs/SIDECARS.md and backend/src/services/ml_client.py:
+in docs/SIDECARS.md and backend/service/services/ml_client.py:
 
-  1. The embedder is reached through src.services.ml_client.get_user_embedding,
+  1. The embedder is reached through service.services.ml_client.get_user_embedding,
      which takes a FILESYSTEM PATH, not a key/URL pair.
   2. The response is a vector (a sequence of floats), which
-     src/services/ml_client.py decodes from {"vector": [...], "dim": N}.
+     service/services/ml_client.py decodes from {"vector": [...], "dim": N}.
   3. The temporary file materialised for an object-store backend is removed
      afterwards, and a failure in the embedder does not leak it either.
 
@@ -24,7 +25,7 @@ import os
 
 import pytest
 
-from src.workers import tasks as tasks_module
+from service.infrastructure.messaging import tasks as tasks_module
 
 
 class FakeStorage(object):
@@ -148,9 +149,9 @@ def test_materialised_file_survives_an_extensionless_key(tmp_path):
 # the client seam itself
 # ---------------------------------------------------------------------------
 def test_ml_client_is_the_supported_module():
-    """The one supported seam is src.services.ml_client (docs/SIDECARS.md 4)."""
+    """The one supported seam is service.services.ml_client (docs/SIDECARS.md 4)."""
     client = tasks_module._ml_client()
-    assert client.__name__ == "src.services.ml_client"
+    assert client.__name__ == "service.services.ml_client"
     assert hasattr(client, "get_user_embedding")
 
 
@@ -158,14 +159,14 @@ def test_missing_client_is_reported_as_unavailable(monkeypatch):
     """A broken install must raise TaskUnavailable, not ImportError at import time."""
     import sys
 
-    import src.services as services_package
-    import src.services.ml_client  # noqa: F401 - make the submodule importable first
+    import service.services as services_package
+    import service.services.ml_client  # noqa: F401 - make the submodule importable first
 
     # None in sys.modules is how CPython represents "this module cannot be
     # imported"; the parent attribute has to go too, or "from x import y" would
     # still find the already-imported object.
     monkeypatch.delattr(services_package, "ml_client", raising=False)
-    monkeypatch.setitem(sys.modules, "src.services.ml_client", None)
+    monkeypatch.setitem(sys.modules, "service.services.ml_client", None)
 
     with pytest.raises(tasks_module.TaskUnavailable, match="ml_client_unavailable"):
         tasks_module._ml_client()

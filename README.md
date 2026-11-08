@@ -1,7 +1,14 @@
 
 #
 
-| <img src="./src/images/logo.svg" width="100" height="100" alt="logo"> | <a href="https://git.io/typing-svg"><img src="https://readme-typing-svg.herokuapp.com?font=Fira+Code&weight=100&size=30&pause=1000&center=true&vCenter=true&multiline=true&repeat=false&random=false&width=950&lines=HireSnap" alt="Typing SVG" /></a> |
+> **Language note.** This is the product README, kept in the project's original
+> language: what HireSnap is, what the screens look like, and the OCEAN/MBTI story.
+> The authoritative English documents are [`AGENTS.md`](../AGENTS.md) for working
+> conventions and [`docs/`](../docs/) for architecture, environment, contracts and the
+> runbook. The install, run and test commands below are current as of the `service/`
+> package refactor — if a path here ever disagrees with `docs/`, `docs/` wins.
+
+| <img src="./docs/images/logo.svg" width="100" height="100" alt="logo"> | <a href="https://git.io/typing-svg"><img src="https://readme-typing-svg.herokuapp.com?font=Fira+Code&weight=100&size=30&pause=1000&center=true&vCenter=true&multiline=true&repeat=false&random=false&width=950&lines=HireSnap" alt="Typing SVG" /></a> |
 |-----------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 
 
@@ -14,71 +21,65 @@
 
 ### Внешний вид графического интерфейса на React:
 
-| ![Registration](src/images/registration.svg) | ![Authorization](src/images/authorization.svg) |
+| ![Registration](docs/images/registration.svg) | ![Authorization](docs/images/authorization.svg) |
 |------------------------------------------------|--------------------------------------------------|
 
 
-Все страницы сайта можно посмотреть [**здесь**](src/images/HireSnap.pdf) <br/>
-Презентация проекта находится [**здесь**](src/images/HireSnap_presentation.pdf)
+Все страницы сайта можно посмотреть [**здесь**](docs/images/HireSnap.pdf) <br/>
+Презентация проекта находится [**здесь**](docs/images/HireSnap_presentation.pdf)
 
 
 - [Структура репозитория](#структура-репозитория)
 - [Необходимые требования](#требования)
 - [Установка и настройка](#установка-и-настройка)
   - [Установка виртуальной среды и зависимостей](#1-установка-виртуальной-среды-и-зависимостей)
-    - [Linux server](#linuxmacos)
-    - [Windows server](#windows)
-  - [Запуск тестов](#2-запуск-тестов)
-    - [Linux server](#linuxmacos-1)
-    - [Windows server](#windows-1)
+  - [Запуск сервера](#2-запуск-сервера)
+  - [Запуск тестов](#3-запуск-тестов)
+  - [Переменные среды](#переменные-среды)
 
- ## Структура репозитория
+## Структура репозитория
 
 ```
     HireSnap/
+    ├── database/
+    |   └── HireSnap.sql - sql скрипт для создания базы данных
+    ├── docker/
+    |   ├── Dockerfile - образ сервиса (python:3.9-slim, CMD python -m service.main)
+    |   └── requirements.lock.txt - зафиксированный снимок зависимостей
+    ├── docs/
+    |   ├── PLATFORM_LAYER.md - описание слоя платформы
+    |   └── images/ - картинки и презентации для этого README
     ├── logs/ - Папка для хранения логов
-    |   ├── setup/
-    |   |   ├── *.log
     |   └── app.log
-    ├── setup/ - Кастомный установщик среды
-    ├── src/
-    |   ├── database/ - База данных
-    |   ├── modelling/ - Основные модульные скрипты
-    |   ├── pipeline/ - пайплайны
-    |   |   ├── server.py - uvicorn сервер
-    |   |   ├── test.py - тесты CRUD операций
-    |   ├── services/ - Сервисы
-    |   |   ├── file_services.py
-    |   |   └── ...
-    |   ├── utils/ - Дополнительные файлы
-    |   |   └── ...
-    ├── venv - виртуальная среда
+    ├── notebooks/ - исследовательские ноутбуки
+    ├── service/ - сам сервис
+    |   ├── main.py - точка входа: bootstrap схемы и uvicorn
+    |   ├── api/ - app.py (create_app, GET /server/health), security.py, routers/
+    |   ├── configuration/ - env.py, logging.py, logging.yaml, paths.py
+    |   ├── domain/models.py - pydantic-модели и AuthJWT
+    |   ├── infrastructure/ - cache, storage, mail, uploads, database/, messaging/
+    |   ├── repositories/ - SQL-запросы
+    |   ├── services/ - бизнес-логика, включая matching.py и ml_client.py
+    |   └── shared/ - debug, hashing, tokens, urls, validation
+    ├── tests/ - pytest (conftest.py, manual/pipeline_smoke.py и тесты платформы)
     ├── .env - переменные среды
-    ├── .gitignore
-    ├── clear_setup_log.py - очистка логов
-    ├── create_sql.py - скрипт для авто создания и заполнения базы данных
-    ├── env.py - скрипт для работы с переменными средами
-    ├── main.bat - запуск сервера на Windows
-    ├── main.sh - запуск сервера на linux
-    ├── HireSnap.sql - sql скрипт для создания базы данных
     ├── requirements.txt - список зависимостей
-    ├── requirements_windows_tensorflow.txt - дополнительный список зависимостей
-    ├── server.sh - скрипт для запуска сервера на linux через pm2
-    ├── setup.bat - установка среды на windows
-    ├── setup.log - файл лога
-    └── setup.sh - установка среды на linux
+    ├── requirements-platform.txt - celery/redis/boto3, нужны только воркерам
+    └── README.md - этот файл
 ```
 
 
 ### Реляционная база данных:
 
-![image](src/images/HireSnap.svg)
+![image](docs/images/HireSnap.svg)
 
 
 
-  ## Требования
+## Требования
 - Python 3.9+
-- `pm2` (для управления процессами сервера на Linux/MacOS)
+- MySQL 5.7 (в стеке — контейнер `mysql`, схема поднимается из `database/HireSnap.sql`)
+- `ml/` рядом: эмбеддинги и транскрипция — это HTTP-вызовы, без них сервис отдаёт
+  `503 service_unavailable` на загрузке видео и работает на всех остальных маршрутах
 
 
 ## Установка и настройка
@@ -88,112 +89,114 @@
 * Клонируйте репозиторий на сервер:
   ```cmd
     git clone https://github.com/Prischli-Drink-Coffee/HireSnap.git
-    cd HireSnap
+    cd HireSnap/backend
   ```
 
-* Запустите скрипт для установки виртуальной среды и всех необходимых зависимостей:
+* Создайте виртуальную среду и установите зависимости:
 
-  **Linux/MacOS^**
+  **Linux/MacOS**
 
   ```bash
-    bash setup.sh
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt
   ```
 
-  **Windows^**
+  **Windows**
   ```cmd
-    setup.bat
+    python -m venv venv
+    venv\Scripts\activate
+    pip install -r requirements.txt
   ```
 
-* Следуйте инструкциям в консоли для установки пакетов
+  `requirements.txt` больше не содержит ML-стек: ни `torch`, ни CUDA, ни
+  `transformers` — инференс уехал в `ml/`. `requirements-platform.txt` нужен только
+  воркерам и S3-образу (`celery`, `redis`, `boto3`).
 
 ### 2. Запуск сервера
 
-* Запустите скрипт через pm2 для Linux/MacOS
+* Из каталога `backend/`:
     ```bash
-    pm2 start 'bash pm2.sh'
+    python -m service.main
     ```
-* Запустите через меню выбора для **Linux/MacOS**. Необходимо выбрать пункт 3.
-    ```bash
-    main.sh
-    ```
-* Запустите скрипт для запуска сервера на **Windows**. Необходимо выбрать пункт 3.
-    ```cmd
-    main.bat
-    ```
+  Точка входа — `service/main.py`; она поднимает `uvicorn` на `HOST`:`SERVER_PORT`
+  и включает `reload`, только если `DEBUG=TRUE`.
+* Если `DEBUG=TRUE` и `INIT_DB` истинны, при старте создаётся схема из
+  `database/HireSnap.sql` (см. `service/infrastructure/database/schema.py`).
 
-### 3. Запуск тестов CRUD операций базы данных
+### 3. Запуск тестов
 
-Для запуска автоматической проверки тестов с использованием `pytest`, выполните:
+Из каталога `backend/`:
 
-- **Linux/MacOS**:
-  ```bash
-  bash main.sh (Пункт с pytest)
-  ```
+```bash
+python -m pytest -q
+```
 
-- **Windows**:
-  ```cmd
-  main.bat (Пункт с pytest)
-  ```
+`tests/conftest.py` кладёт каталог `backend/` в `sys.path`, поэтому тесты видны без
+установки пакета. Отдельный ручной прогон пайплайна — `tests/manual/pipeline_smoke.py`.
 
 ### Переменные среды
 
-Сервер можно запустить локально или в веб-пространстве, тогда вы получите доступ к пользовательскому интерфейсу, для настройки сервера достаточно указать переменные среды в таком формате:
+Сервер читает переменные среды через `service/configuration/env.py` (а локально —
+из `backend/.env`). Минимально нужны:
 
 ```markdown
-  DATA_PATH=./data; <br/>
-  WEIGHTS_PATH=./src/weights; <br/>
-  METRICS_PATH=./src/metrics; <br/>
-  HOST=HOST; <br/>
-  SERVER_PORT=PORT; <br/>
+  HOST=0.0.0.0 <br/>
+  SERVER_PORT=8080 <br/>
+  DEBUG=TRUE <br/>
+  INIT_DB=TRUE <br/>
+  DATA_PATH=./data <br/>
   DB_HOST=HOST <br/>
-  DB=DATABASE; <br/>
-  DB_PORT=PORT; <br/>
-  DB_USER=USER; <br/>
-  DB_PASSWORD=PASSWORD; <br/>
-  SECRET_KEY=SECRET_KEY <br/>
+  DB_PORT=PORT <br/>
+  DB_USER=USER <br/>
+  DB_PASSWORD=PASSWORD <br/>
+  DB=DATABASE <br/>
+  PUBLIC_BASE_URL=http://localhost:8080/api/ <br/>
+  JWT_PRIVATE_KEY_PATH=./certs/jwt-private.pem <br/>
+  JWT_PUBLIC_KEY_PATH=./certs/jwt-public.pem <br/>
+  ACCESS_TOKEN_EXPIRE_MINUTES=60 <br/>
+  REFRESH_TOKEN_EXPIRE_DAYS=7 <br/>
+  CORS_ALLOW_ORIGINS=* <br/>
+  ML_SERVICE_URL=http://127.0.0.1:8080 <br/>
 ```
+
+Здесь имена плоские: `service/infrastructure/database/connection.py:40` читает ровно
+`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB`. В манифесте `docker/.env.example`
+они записаны как `DB__HOST`, `DB__PORT`, `DB__USER`, `DB__PASSWORD`, `DB__NAME`, а compose
+разворачивает их в плоские при подстановке — единственное место, где это происходит.
+Полный список ключей — `docker/.env.example` и [docs/ENV.md](../docs/ENV.md).
 
 
 ## Инференс модели определения типа личности (OCEAN)
 
 > **Код перенесён в `ml/`.** Пайплайн инференса больше не живёт в `backend/`: он
 > вынесен в отдельный сервис `ml/` (третий сабмодуль, HTTP API). Модули
-> `src/modelling/*` и `cosmos_tokenizer/` удалены, поэтому команды вида
-> `python src/modelling/...` ниже **не выполняются** — они сохранены как описание
-> прежнего пакетного режима. Источник истины: `ml/README.md`.
-> Эмбеддинги и транскрипция — это `POST /v1/embed/video`, `POST /v1/embed/text` и
-> `POST /v1/transcribe` по адресу `ML_SERVICE_URL` (в стеке `http://ml:8080`).
-> Скрипт `inference.sh` оставлен как историческая запись и намеренно завершается
-> с ненулевым кодом.
+> `src/modelling/*` и `cosmos_tokenizer/` удалены; их копии лежат в `ml/service/`
+> (`video_to_text.py`, `text_embedding.py`, `frames.py`, `video_embedding.py`,
+> `user_embedding.py`), и команды ниже уже указывают туда. Источник истины по
+> контракту — `ml/README.md`.
+> В обычной работе вызывать их вручную не нужно: эмбеддинги и транскрипция — это
+> `POST /v1/embed/video`, `POST /v1/embed/text` и `POST /v1/transcribe` по адресу
+> `ML_SERVICE_URL` (в стеке `http://ml:8080`), а из этого дерева их вызывает
+> `service/services/ml_client.py`. Скрипта `inference.sh` в дереве больше нет.
 
-Получение оценок личности по системам MBTI и OCEAN на основе видео-визиток реализовано в скрипте `inference.sh`. Для того, чтобы его запустить, следуюте следующим инструкциям:
-1. После клонирования репозитория, создайте рабочую папку - в ней будут храниться входные, промежуточные и выходные файлы инструмента.
-
-```bash
-  mkdir your_folder
-```
-
-2. В этой папке необходимо создать папку `video`:
+Раньше оценки личности по системам MBTI и OCEAN для набора видео-визиток считал
+пакетный скрипт `inference.sh`; он удалён вместе с `src/modelling/`, а папки
+`src/`, `setup/`, `main.sh`, `setup.sh`, `pm2.sh`, `create_sql.py` и `env.py` больше
+не существуют. Сегодня тот же результат даёт HTTP-вызов к `ml/`:
 
 ```bash
-  mkdir your_folder/video
+  # внутри стека: docker compose exec ml ... либо с хоста по ML_SERVICE_URL
+  curl -fsS -X POST http://127.0.0.1:8080/v1/embed/video \
+    -H 'content-type: application/octet-stream' \
+    -H 'x-filename: candidate.mp4' \
+    --data-binary @candidate.mp4
 ```
 
-3. Загрузите в папку `video` видо-визитки кандидатов.
-
-4. Запустите **HireSnap** - выполняйте эту команду в папке репозитория:
-
-```bash
-  ./inference.sh your_folder/
-```
-
-
-
-5. После отработки инструмента в папке `your_folder` должны появиться два файла:
-  - `ocean_results.pkl` - словарь, где для каждой характеристики системы OCEAN и каждой видео-визитки указано, насколько данный кандидат характеризуется данной чертой (от 0 до 1).
-  - `mbti_results.pkl` - словарь, где для каждой видео-визитки указан тип MBTI (без оценок принадлежности)
-
-При необходимости, Вы можете изменить названия файлов внутри скрипта.
+Ответ — `{"vector", "dim", "model"}`; транскрипция — `POST /v1/transcribe` с теми же
+заголовками. Контракт, коды ошибок и ограничения по размеру описаны в `ml/README.md`,
+а вызывающий код в этом дереве — `service/services/ml_client.py` (он же задаёт
+`ML_SERVICE_URL`, по умолчанию `http://127.0.0.1:8080`).
 
 ## Пайплайн определения типа личности (OCEAN)
 
@@ -215,7 +218,8 @@
 Для того, чтобы получить текстовое представление для видео-визитки, мы транскрибируем аудио из видео-визитки в текст. Транскрипция аудио осуществляется с помощью предобученной модели *wav2vec2*. Чтобы получить текстовое представление для речи кандидата, запустите в командной строке:
 
 ```bash
-  python src/modelling/video_to_text.py --video_folder <video_folder>  --audio_folder <audio_folder> --table_path <transcription_table>
+  # из каталога ml/ (модули лежат в ml/service/, PYTHONPATH=/app/service в образе)
+  python service/video_to_text.py --video_folder_path <video_folder> --audio_folder <audio_folder> --table_path <transcription_table>
 ```
 
 - `video_folder` - Папка с видео-визитками кандидатов (видео формата `.mp4`)
@@ -225,7 +229,7 @@
 Далее, с помощью предобученной модели BERT необходимо получить текстовое представление речи кандидата. Для этого выполните:
 
 ```bash
-  python src/modelling/get_text_embedding.py --path_to_texts <transcription_table> --output_folder <user_text_embedding_folder>
+  python service/text_embedding.py --path_to_texts <transcription_table> --output_folder <user_text_embedding_folder>
 ```
 
 - `path_to_texts` - Результат выполнения *предыдущей* команды. Таблица формата `.csv` с двумя колонками: **candidate**  и **speech**
@@ -236,7 +240,7 @@
 Также с помощью BERT-like модели получаем текстовое представление описания вакансий. Описание вакансий, использованное нами Вы можете найти в [открытом доступе](https://www.kaggle.com/datasets/kshitizregmi/jobs-and-job-description). Вы можете использовать как этот же датасет, так и свой. Получите векторное представление для вакансий следующей командой:
 
 ```bash
-  python src/modelling/get_text_embedding.py --path_to_texts <vacancies_description_table> --output_folder <vacancies_embedding_folder> --disable_candidates
+  python service/text_embedding.py --path_to_texts <vacancies_description_table> --output_folder <vacancies_embedding_folder> --disable_candidates
 ```
 
 - `path_to_texts` - Таблица формата `.csv` с описанием вакансий. В первой колонке должно быть название вакансии. Во второй колонке - описание этой вакансии
@@ -248,7 +252,7 @@
 Получите векторное представление для характеристик OCEAN (пяти из них) следующей командой:
 
 ```bash
-  python src/modelling/get_text_embedding.py --path_to_texts <vacancies_description_table> --output_folder <personalities_embedding_folder> --disable_candidates
+  python service/text_embedding.py --path_to_texts <vacancies_description_table> --output_folder <personalities_embedding_folder> --disable_candidates
 ```
 
 - `path_to_texts` - Таблица формата `.csv` с описанием вакансий. В первой колонке должно быть название характеристики. Во второй колонке - описание этой черты
@@ -262,13 +266,13 @@
 Для получения видео-эмбеддинга необходимо сначала извлечь кадры (frames) - несколько картинок - из каждого видео. Для этого выполните команду:
 
 ```bash
-  python src/modelling/get_frames.py <video_folder> <frames_folder>
+  python service/frames.py <video_folder> <frames_folder>
 ```
 
 - `video_folder` - Папка с видео-визитками кандидатов (видео формата `.mp4`)
 - `frames_folder` - Промежуточная папка. Содержит папки с кадрами каждой из видио-визиток (формата `.jpg`)
 
-По умолчанию извлекается 10 кадров в секунду из каждого видео. То есть если длительность Вашего видео 5 секунд, будет извлечено 50 кадров из видео. Частота извлечения кадров задаётся в `ml/service/frames.py` (параметр `fps`); в удалённом `src/modelling/get_frames.py` она задавалась так же.
+По умолчанию извлекается 10 кадров в секунду из каждого видео. То есть если длительность Вашего видео 5 секунд, будет извлечено 50 кадров из видео. Частота задаётся константой `FRAMES_PER_SECOND = 10` в `ml/service/frames.py` (не параметром командной строки: это свойство модели, а не производительности — токенизатор обучен на таком потоке кадров). В удалённом `src/modelling/get_frames.py` она была такой же.
 
 2. **Обучение видео-модели**
 
@@ -297,7 +301,7 @@
 Для того, чтобы получить визуальные эмбеддинги о видео-визитках на основе обученной модели UNET, выполните следующую команду:
 
 ```bash
-python src/modelling/get_video_embedding.py --data_dir <frames_folder> --batch_size 1 --weights_path <weights_path> --model_state "inference" --embeddings_path <user_video_embedding_folder>
+python service/video_embedding.py --data_dir <frames_folder> --batch_size 1 --weights_path <weights_path> --model_state "inference" --embeddings_path <user_video_embedding_folder>
 ```
 
 - `embeddings_path` - Папка, в которую будут сохранены видео-эмбеддинги кандидатов (по одному файлу на одну визитку, название файла соответствует изначальному наименованию видео-визитки)
@@ -307,38 +311,37 @@ python src/modelling/get_video_embedding.py --data_dir <frames_folder> --batch_s
 Для того, чтобы объединить визуальное и текстовое представления о видио-визитке, мы нормализовали и усреднили вектора обеих модальностей. Для этого выполните команду:
 
 ```bash
-  python src/modelling/get_common_embedding.py --video_embedding_folder <user_video_embedding_folder> --text_embedding_folder <user_text_embedding_folder> --output_folder <user_embedding_folder>
+  python service/user_embedding.py <video_file> --weights <weights_path> --output <user_embedding_folder>/<name>.npy
 ```
 
-- `video_embedding_folder` - Папка, в которой сохранены видео-эмбеддинги кандидатов из предыдущего пункта
-- `text_embedding_folder` - Папка, в которой сохранены текстовые эмбеддинги речи кандидатов  из первого пункта
-- `user_embedding_folder` - Папка, в которой будут сохранены объединенные эмбеддинги речи и изображений кандидатов
+- `video_file` - Одна видео-визитка (`.mp4`). Отдельной команды для пары папок нет:
+  прежний `get_common_embedding.py` объединял уже посчитанные модальности, а сейчас
+  `service/user_embedding.py` проходит весь путь сам — кадры, латенты
+  Cosmos-Tokenizer, UNet3D, аудио, транскрипция, текстовый эмбеддинг — и усредняет
+  модальности внутри одного вызова.
+- `--weights` - Веса UNET (`.pth`); по умолчанию берутся из `WEIGHTS_DIR` (`ml/service/settings.py`).
+- `--output` - Путь к `.npy`; без него вектор просто печатается.
 
 ### IV. Итоговое получение оценок личности
 
 Для того, чтобы получить итоговую аннотацию по типам личности MBTI и OCEAN, мы рассчитываем косинусное сходство (также есть возможности использовать корреляцию Пирсона) между мультимодальным представлением вакансии и текстовым представлением каждой из характеристик OCEAN.
 
-```bash
-  python src/modelling/submit.py <user_embedding_folder> <personalities_embedding_folder> --metric 'cosine' --o <output_file>
-```
-
-- `metric` - или косинусное сходство (cosine), или корреляция Пирсона (pearson)
-- `--o` - Результат выполнения функции, `pkl` файл, содержащий меерику сходства между векторами OCEAN и кандидатов. Интерпретируется как соответствие кандидата данной черте.
+> **Команда удалена.** Пакетный `submit.py` больше не существует; то же ранжирование
+> считает `build_matrix()` в `service/services/matching.py`, а вызывается оно из API при
+> загрузке видео кандидата. Метрика осталась одна — косинусное сходство, нормированное
+> в [0, 1]; корреляция Пирсона из пакетного режима в API не переносилась.
 
 
-Для перевода в MBTI мы использовали "ручной" перевод на основе сопоставления черт OCEAN и MBTI. Если Вы хотите для каждого кандидата получить его тип личности по MBTI, воспользуйтесь:
-
-```bash
-  python src/modelling/mbti.py <user_embedding_folder> <personalities_embedding_folder> --metric 'cosine' --o <output_file>
-```
-- `metric` - или косинусное сходство (cosine), или корреляция Пирсона (pearson).
-- `--o` - Результат выполнения функции, `pkl` файл, содержащий класс MBTI для каждого кандидата
+Для перевода в MBTI в пакетном режиме использовался "ручной" перевод на основе
+сопоставления черт OCEAN и MBTI — файл `mbti.py`. Он удалён вместе с `src/modelling/`
+и в `ml/` не переносился, поэтому получить MBTI из этого дерева сейчас нельзя:
+сервис отдаёт эмбеддинги, а не типы личности.
 
 ## Пайплайн мэтчинга вакансий и кандидатов
 
 > **Этот раздел актуален.** Ранжирование OCEAN/MBTI (его в пакетном режиме считали
 > удалённые `submit.py` и `mbti.py`) — бизнес-логика, и она осталась в API как
-> `build_matrix()` в `src/services/main_services.py`. Командной строки для неё
+> `build_matrix()` в `service/services/matching.py`. Командной строки для неё
 > больше нет: API считает матрицу при загрузке видео кандидата.
 
 После создания представлений для вакансий, характеристик OCEAN и кандидатов мы можем установить соответствие между кандидатами и вакансиями. Мы рассчитываем "степень соответствия" для кандидатов и вакансий относительно характеристик OCEAN. Для оценки соответствия используем косинусное расстояние (или корреляцию Пирсона), нормированное в диапазон [0, 1].

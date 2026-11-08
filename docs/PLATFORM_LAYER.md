@@ -20,19 +20,19 @@ the cache all default to `/1` rather than `/0`.
 ## Layout
 
 ```
-backend/src/infra/
+backend/service/infrastructure/
   __init__.py        package marker, explains the "optional at runtime" contract
   cache.py           Cache facade: memory (default) | redis | noop
   storage.py         Object storage: local (default) | s3
   mail.py            DisabledMailer | FileMailer | SmtpMailer + fire-and-forget send
-backend/src/workers/
+backend/service/infrastructure/messaging/
   __init__.py        package marker, explains the lazy-celery contract
   celery_app.py      Celery application factory, queues, routes, time limits
   tasks.py           Task bodies (pure functions) + registry + celery binding
   beat_schedule.py   Periodic schedule as data, with env overrides
-backend/src/services/
+backend/service/services/
   jobs_services.py   enqueue(kind, payload) -> job_id, status(job_id) -> record
-backend/requirements_platform.txt
+backend/requirements-platform.txt
   celery, redis, boto3 - optional, pinned, separately installed
 ```
 
@@ -49,7 +49,7 @@ preference: the backend container is built from `requirements.txt`, and a module
 `CACHE__BACKEND=memory` is a process-local dict - the same "no shared cache" semantics
 the API has today. `STORAGE__BACKEND=local` writes to `DATA_PATH` with the same key
 layout, the same file names and the same bytes as
-`src/utils/write_file_into_server.py`. `MAIL__ENABLED=false` sends nothing.
+`service/infrastructure/uploads.py`. `MAIL__ENABLED=false` sends nothing.
 `CELERY__ENABLED=false` runs jobs inline. Turning every flag off is not a degraded
 mode; it is the previous release.
 
@@ -195,7 +195,7 @@ miss, every write returns `False`, one warning is logged, and the API keeps answ
    because a defaulted MinIO password publishes an object store with a known credential.
 2. Set `STORAGE__BACKEND=s3`, `STORAGE__ENDPOINT=http://storage:9000`,
    `STORAGE__BUCKET=hiresnap-uploads`.
-3. Install `backend/requirements_platform.txt` in the image that runs with S3.
+3. Install `backend/requirements-platform.txt` in the image that runs with S3.
 4. Create the bucket once: `get_storage().ensure_bucket()` on startup or
    `mc mb` in the runbook.
 
@@ -218,7 +218,7 @@ action that already succeeded because the mail relay is down.
 
 Only after redis is enabled:
 
-1. Install `requirements_platform.txt` in the image that runs workers.
+1. Install `requirements-platform.txt` in the image that runs workers.
 2. Set `CELERY__ENABLED=true` and `CELERY__BROKER_URL=redis://cache:6379/1`.
 3. Start one worker per queue (compose profiles), each with a `stop_grace_period`
    of at least 90 s: `task_acks_late` only helps if SIGTERM arrives before Docker's
@@ -232,7 +232,7 @@ celery -A src.workers.celery_app worker --loglevel=info --concurrency=1 --queues
 celery -A src.workers.celery_app beat   --loglevel=info
 ```
 
-`src/workers/celery_app.py` exposes the application through a module-level
+`service/infrastructure/messaging/celery_app.py` exposes the application through a module-level
 `__getattr__`, so `-A src.workers.celery_app` works without an import-time
 `Celery(...)` call.
 
@@ -275,7 +275,7 @@ them touch the network, redis, MySQL or torch.
 
 ## Why the schedule lives in code, not in the database
 
-`src/workers/beat_schedule.py` returns a plain dict. A periodic job is part of the
+`service/infrastructure/messaging/beat_schedule.py` returns a plain dict. A periodic job is part of the
 program, exactly like a route: if it were a row in MySQL, every environment would need
 the row inserted by hand, a renamed task would leave a stale row pointing at nothing, and
 rolling back the image would not roll back the schedule. Code keeps it reviewable in the

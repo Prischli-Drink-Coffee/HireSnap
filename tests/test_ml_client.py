@@ -36,7 +36,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.services import ml_client
+from service.services import ml_client
 
 
 # --------------------------------------------------------------------------- #
@@ -147,7 +147,7 @@ def test_describe_transport_is_always_http(monkeypatch):
     """The startup banner and the per-task embedder name come from here.
 
     "in-process" must never appear again: it was the marker of a transport that
-    no longer exists, and src/workers/tasks.py formats this value into the name it
+    no longer exists, and service/infrastructure/messaging/tasks.py formats this value into the name it
     records for every embedding task.
     """
     _clear_url_env(monkeypatch)
@@ -179,7 +179,7 @@ def test_module_import_pulls_in_neither_torch_nor_the_local_pipeline():
     of the API.
     """
     probe = (
-        "import sys; import src.services.ml_client as m; "
+        "import sys; import service.services.ml_client as m; "
         "print('torch' in sys.modules); "
         "print('src.modelling' in sys.modules); "
         "print(m.service_url())"
@@ -483,7 +483,7 @@ def test_error_hierarchy_is_catchable_as_one_type():
 def test_documented_surface_is_exported():
     """The removal of the fallback is not allowed to shrink the module's surface.
 
-    src/workers/tasks.py calls describe_transport and get_user_embedding by name,
+    service/infrastructure/messaging/tasks.py calls describe_transport and get_user_embedding by name,
     and operators read service_url/is_remote in the health output.
     """
     expected = {

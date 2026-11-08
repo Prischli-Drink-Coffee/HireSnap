@@ -71,8 +71,8 @@
 # image has no build-essential any more.
 #
 # TWO SIBLING FILES, DELIBERATELY SEPARATE:
-#   requirements_platform.txt  celery, redis, boto3 - only for the worker and S3
-#                              images, imported lazily by src/infra/*.py
+#   requirements-platform.txt  celery, redis, boto3 - only for the worker and S3
+#                              images, imported lazily by service/infrastructure/
 #   docker/requirements.lock.txt  this file, verbatim: the reproducible build
 #
 # THERE IS NO GPU SIBLING ANY MORE. requirements_external.txt (torch+cu116,

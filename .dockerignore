@@ -3,12 +3,20 @@
 #
 # WHERE THIS FILE IS ACTUALLY READ: nowhere, in the stack as shipped.
 # The compose files build the backend with "context: .." and
-# "dockerfile: ./backend/docker/Dockerfile" (docker/docker-compose.yaml:70-73,
+# "dockerfile: ./backend/docker/Dockerfile" (docker/docker-compose.yaml:224-227,
 # mirroring R:\GPTHub\docker\docker-compose.yaml:32-37), so the context root is
 # the SUPERPROJECT and Docker reads the root .dockerignore, not this file.
-# It exists for the other path: "docker build backend/" while iterating on the
-# service alone, and for anyone who copies backend/ out as the standalone repo
-# it also is (it has its own remote and branch).
+#
+# WHY "docker build backend/" IS NOT A SUPPORTED PATH (measured, not assumed):
+# every COPY source in backend/docker/Dockerfile is written with the backend/
+# prefix (requirements.txt, requirements-platform.txt, requirements.lock.txt,
+# service/, database/), because the build context IS the superproject root.
+# Building with the backend directory as the context fails immediately with
+# "failed to compute cache key: ... /backend/requirements.txt not found"
+# (backend/docker/Dockerfile:145 and the three sibling COPY lines). This file
+# therefore filters the STANDALONE case only: backend/ is also a valid checkout
+# on its own remote and branch, and a future Dockerfile that does not prefix its
+# sources would read these rules. Do not quote it as protection for the stack
 #
 # WHY an ignore list at all: BuildKit ships every file it is not told to skip to
 # the daemon BEFORE it reads the Dockerfile. backend/ carries HireSnap.sql, a
@@ -38,12 +46,12 @@
 .gitattributes
 
 # --- JWT material ---------------------------------------------------------
-# src/certs holds the RS256 key pair that signs every issued token
-# (backend/src/database/models.py:29-30). In the stack it is a read-only bind
-# mount (docker/docker-compose.yaml:255-257) so that tokens stay valid across a
-# rebuild; baking it in would ship one deployment's private key inside a
-# distributable artifact.
-src/certs
+# service/certs is the packaged fallback location for the RS256 key pair that
+# signs every issued token (service/domain/models.py:_key_path). In the stack the
+# pair is a read-only bind mount at /app/secrets/certs
+# (docker/docker-compose.yaml) so that tokens stay valid across a rebuild; baking
+# it in would ship one deployment's private key inside a distributable artifact.
+service/certs
 certs
 *.pem
 *.key
@@ -76,7 +84,7 @@ coverage.xml
 data/
 logs/
 *.log
-src/weights/
+service/weights/
 weights/
 pretrained_ckpts/
 *.pt
@@ -86,20 +94,21 @@ pretrained_ckpts/
 *.ckpt
 
 # --- SQL dumps other than the one the image NEEDS -------------------------
-# create_sql.py:18 resolves "<DB>.sql" NEXT TO ITSELF, i.e. /app/HireSnap.sql,
-# so backend/HireSnap.sql is deliberately NOT ignored (Dockerfile:187). Any other
-# dump is a developer's local export and must not enter the image: it may hold
-# production rows.
+# service/infrastructure/database/schema.py resolves "<DB>.sql" from
+# BACKEND_ROOT/database, i.e. /app/database/HireSnap.sql, so the committed dump in
+# backend/database/ is deliberately NOT ignored (backend/docker/Dockerfile, layer
+# 3). Any OTHER dump is a developer's local export and must not enter the image:
+# it may hold production rows.
 *.sql.bak
 *.sql.gz
 *.dump
 mysqldump*.sql
 !HireSnap.sql
 
-# --- vendored/tooling noise the server does not import --------------------
-# setup/ is packaging metadata for the vendored cosmos_tokenizer package; the
-# runtime imports the package, never its installer.
-setup/
+# --- tooling noise the server does not import -----------------------------
+# scripts/ is the interactive developer bootstrap and the one-off seed job; no
+# runtime module imports it (service/ is the only importable package).
+scripts/
 *.ipynb
 .ipynb_checkpoints/
 notebooks/
@@ -107,7 +116,6 @@ tests/
 docs/
 **/*.md
 !requirements.txt
-!requirements_external.txt
 .mailmap
 .editorconfig
 .idea

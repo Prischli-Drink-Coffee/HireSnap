@@ -12,8 +12,8 @@ import types
 
 import pytest
 
-from src.services import jobs_services
-from src.workers import tasks as tasks_module
+from service.services import jobs_services
+from service.infrastructure.messaging import tasks as tasks_module
 
 
 @pytest.fixture
@@ -153,10 +153,10 @@ def test_broker_mode_is_reported_when_a_broker_is_configured(monkeypatch):
             sent["kwargs"] = kwargs
             return _FakeResult()
 
-    fake_celery = types.ModuleType("src.workers.celery_app")
+    fake_celery = types.ModuleType("service.infrastructure.messaging.celery_app")
     fake_celery.is_configured = lambda: True
     fake_celery.get_celery_app = lambda: _FakeApp()
-    monkeypatch.setitem(sys.modules, "src.workers.celery_app", fake_celery)
+    monkeypatch.setitem(sys.modules, "service.infrastructure.messaging.celery_app", fake_celery)
 
     job_id = jobs_services.enqueue("send_email", {"to": "a@example.com", "subject": "s", "body": "b"})
     record = jobs_services.status(job_id)

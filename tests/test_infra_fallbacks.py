@@ -15,9 +15,9 @@ import types
 
 import pytest
 
-from src.infra import cache as cache_module
-from src.infra import mail as mail_module
-from src.infra import storage as storage_module
+from service.infrastructure import cache as cache_module
+from service.infrastructure import mail as mail_module
+from service.infrastructure import storage as storage_module
 
 
 class _BrokenRedisClient:

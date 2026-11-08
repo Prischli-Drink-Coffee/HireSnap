@@ -4,7 +4,7 @@
 #
 # INFERENCE IS NOT IN THIS IMAGE. The embedding, text-embedding and
 # transcription models live in the ml sidecar (ml/), and the backend reaches
-# them over HTTP through src/services/ml_client.py (default
+# them over HTTP through service/services/ml_client.py (default
 # http://127.0.0.1:8080, override with ML_SERVICE_URL). That is why there is no
 # torch layer, no requirements_external.txt install and no
 # cosmos_tokenizer/ copy here any more: this image used to carry ~4 GB of CUDA
@@ -21,11 +21,16 @@
 # ../backend/../backend/... .
 #
 # CONSEQUENCE FOR .dockerignore: because the context root is the superproject
-# root, Docker reads <context>/.dockerignore (the root one, owned by the infra
-# layer) and NOT backend/.dockerignore. The ignore list this image actually
-# uses therefore lives in backend/docker/Dockerfile.dockerignore (BuildKit
-# reads <Dockerfile>.dockerignore); backend/.dockerignore covers a standalone
-# 'docker build backend/' and is kept in sync by hand.
+# root, Docker reads <context>/.dockerignore - the ROOT one, owned by the infra
+# layer - and NOT backend/.dockerignore. That root file is therefore the only
+# ignore list this image actually uses. backend/.dockerignore is not dead
+# weight: it covers the other build path, "docker build backend/" while
+# iterating on the service alone, and it is what the standalone backend checkout
+# gets. If a future refactor ever needs rules that differ between the two paths,
+# BuildKit also reads <Dockerfile>.dockerignore - here that would be
+# backend/docker/Dockerfile.dockerignore - but no such file exists today
+# (backend/docker/ holds exactly Dockerfile and requirements.lock.txt), so the
+# root .dockerignore is the whole story.
 #
 # WHY python:3.9-slim and not 3.11/3.12: Python 3.9 is the version the backend
 # targets (AGENTS.md) and every pin in requirements.txt has a cp39 wheel, so the
@@ -66,19 +71,15 @@ ENV PYTHONUNBUFFERED=1 \
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     TZ=UTC
-# PYTHONPATH: /app FIRST, then /app/src.
-# The brief says "/app/src", but that alone does not start the server:
-# 'python src/pipeline/server.py' puts the SCRIPT's directory
-# (/app/src/pipeline) on sys.path, never the working directory, so
-# 'from env import Env' (backend/src/pipeline/server.py:11) and
-# 'from create_sql import CreateSQL' (:1092) fail - both resolve only against
-# /app. Verified by running the real entry-point layout with
-# PYTHONPATH=<root>/src -> ModuleNotFoundError: No module named 'env', and with
-# PYTHONPATH=<root>:<root>/src -> imports OK.
-# /app/src is kept as well because backend/main.sh:14-15 exports exactly
-# PROJECT_PATH=$(pwd)/src into PYTHONPATH; keeping both means an import that
-# works on a developer machine also works in the image.
-ENV PYTHONPATH=/app:/app/src
+# PYTHONPATH: /app ONLY.
+# The package is 'service' (backend/service/ -> /app/service), so /app is the one
+# directory that has to be importable. There used to be a second entry, /app/src,
+# because the application lived in a directory called 'src' and half of the modules
+# were imported as TOP-LEVEL names ('from env import Env'). Both of those are gone:
+# the package has a name, every import is absolute ('from service.configuration.env
+# import Env'), and there is no top-level module left to find. A second PYTHONPATH
+# entry would only invite a new top-level module to appear beside the package.
+ENV PYTHONPATH=/app
 # HuggingFace cache. The backend no longer reads it (no model is loaded in this
 # process any more - see the header), but docker-compose.yaml still mounts the
 # hf_cache volume here for the sidecar-era layout, and a named volume inherits
@@ -106,11 +107,11 @@ RUN groupadd --gid 999 app \
 #
 # WHAT WENT AND WHY, because the removal is the point of this change:
 #   * ffmpeg, libsndfile1          - were for moviepy/librosa in
-#                                    src/modelling/*, which is gone from this
+#                                    the old modelling tree, which is gone from this
 #                                    stack. The pipeline that still shells out
 #                                    to ffmpeg runs in the ml image.
 #   * libgl1, libglib2.0-0, libsm6, libxext6 - were for opencv-python, which no
-#                                    module reachable from server.py imports.
+#                                    module reachable from service/api/app.py imports.
 #   * build-essential, gcc         - existed only because webrtcvad and parts of
 #                                    textattack/nltk have no cp39 wheel. Every
 #                                    pin in requirements.txt now ships one, so
@@ -150,8 +151,9 @@ RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" \
 
 # --- layer 2: platform dependencies (celery, redis, boto3) -----------------
 # WHY the SAME image also carries the platform stack instead of a second
-# Dockerfile for the workers: the worker tasks import src.workers.tasks, which
-# imports src.services.jobs_services and src.services.ml_client - i.e. the worker
+# Dockerfile for the workers: the worker tasks import
+# service.infrastructure.messaging.tasks, which imports service.services.jobs_services
+# and service.services.ml_client - i.e. the worker
 # is the API image plus a different entry point, and now that both reach
 # inference over HTTP they need exactly the same dependencies. R:GPTHub solves
 # this the same way (celery-worker-* services in docker/docker-compose.yaml:
@@ -164,65 +166,73 @@ RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" \
 #
 # WHY it is installed unconditionally rather than behind a build ARG: the code
 # imports all three LAZILY, so an image that carries them still starts and still
-# serves exactly as before when every flag is off (backend/requirements_platform.txt
+# serves exactly as before when every flag is off (backend/requirements-platform.txt
 # :1-13 states the same trade from the other side). A conditional layer would
 # produce two image variants whose behaviour differs only in an ImportError that
 # appears on a deploy night, and 'docker compose config' could not tell them apart.
-COPY --chown=app:app backend/requirements_platform.txt /tmp/requirements/requirements_platform.txt
+COPY --chown=app:app backend/requirements-platform.txt /tmp/requirements/requirements-platform.txt
 RUN pip install --no-cache-dir --index-url "${PIP_INDEX_URL}" \
-    -r /tmp/requirements/requirements_platform.txt
+    -r /tmp/requirements/requirements-platform.txt
 
 # --- layer 3: application code --------------------------------------------
-# src/          the FastAPI app, config.yaml, logging.yaml and the certs/ and
-#               weights/ mount points that compose fills in.
-# env.py        imported as a TOP-LEVEL module ('from env import Env'), so it
-#               must sit at /app/env.py, not inside src/ (server.py:11).
-# create_sql.py imported as a top-level module too, and it is the DEBUG-gated
-#               schema loader (server.py:1091-1094).
-# HireSnap.sql  create_sql.py:18 resolves '<DB>.sql' NEXT TO ITSELF, i.e.
-#               /app/HireSnap.sql, so the dump has to be in the image for a
-#               DEBUG=TRUE start to create its schema. It is the one *.sql file
-#               that is not excluded by the ignore lists (18 KB, already
-#               committed, no secrets).
-# setup/        NOT copied: it holds the interactive developer bootstrap
-#               (check_local_modules.py, setup_windows.py) and nothing at
-#               runtime imports it.
-# cosmos_tokenizer/ NOT copied: it was a vendored package for
-#               src/modelling/*.py, which is no longer part of this image. The
-#               ml sidecar mounts/copies it on its own side.
-COPY --chown=app:app backend/env.py backend/create_sql.py backend/HireSnap.sql /app/
-COPY --chown=app:app backend/src /app/src
+# THREE things are copied, and each is here because something imports or opens it
+# by a path derived from the package, not from the working directory:
+#
+# service/       the whole application package. /app/service/ is the package, so
+#                'from service.x import y' resolves and 'python -m service.main'
+#                runs. configuration/logging.yaml travels with it: it is code that
+#                configures the process, so it lives beside the code that reads it
+#                (service/configuration/paths.py:33-34) instead of at /app.
+# database/      the schema dump. The DEBUG-gated loader
+#                (service/infrastructure/database/schema.py) resolves
+#                <database>/<DB>.sql from BACKEND_ROOT/database, i.e.
+#                /app/database/HireSnap.sql, so a DEBUG=TRUE start can create its
+#                own schema. 18 KB, already committed, no secrets.
+# docker/        NOT copied (it is build context for this file only), and neither
+#                are scripts/, tests/, notebooks/ or docs/: the interactive
+#                developer bootstrap and the manual suites are not runtime code,
+#                and shipping them would put a second copy of every path in the
+#                image where a stale one could be imported.
+COPY --chown=app:app backend/service /app/service
+COPY --chown=app:app backend/database /app/database
 
-# Mount points, created with the right owner in the image. A bind mount hides
-# the directory but the named volume below does NOT: Docker seeds a fresh named
-# volume from the image's directory, ownership included. Without this, the
-# non-root user cannot write the HF cache and every model download fails with
-# 'Permission denied' only on the SECOND start (the first one ran as root).
-RUN mkdir -p /app/data /app/logs /app/src/certs /app/src/weights \
-        /app/pretrained_ckpts /app/.cache/huggingface \
-    && chown -R app:app /app/data /app/logs /app/src/certs /app/src/weights \
-        /app/pretrained_ckpts /app/.cache/huggingface
+# Mount points, created with the right owner in the image. Bind mounts hide these
+# directories, but a named volume does NOT: Docker seeds a fresh named volume from
+# the image's directory, ownership included, so the directory has to exist with the
+# right owner or the non-root user cannot write into it.
+#
+# /app/data      DATA_PATH bind mount (uploads and .npy embeddings)
+# /app/logs      app.log, written by service/configuration/logging.yaml
+# /app/secrets   ../infra/certs is mounted at /app/secrets/certs, read-only; the
+#                directory is created so the mount point is stable and the packaged
+#                fallback at /app/service/certs stays available
+# /app/service/certs  the fallback location for the JWT pair when the variables are
+#                unset (service/domain/models.py:_key_path)
+RUN mkdir -p /app/data /app/logs /app/secrets/certs /app/service/certs \
+    && chown -R app:app /app/data /app/logs /app/secrets /app/service/certs
 
 USER app
 # 8080 is the default of SERVER_PORT in the env manifest; EXPOSE is
 # documentation only - the actual bind address comes from HOST/SERVER_PORT
-# (server.py:1077-1080) and compose publishes nothing in prod.
+# (service/main.py, run_server) and compose publishes nothing in prod.
 EXPOSE 8080
 
 # --- healthcheck -----------------------------------------------------------
-# There is NO /health route in the application (server.py mounts /server,
-# /public and /data only) and adding one is not an allowed source patch.
-# /server/openapi.json is the closest honest liveness probe: it answers 200
-# only after uvicorn is serving AND the app object - including the
-# StaticFiles(DATA_PATH) mount - was constructed. Compose overrides this with
-# the same command plus a 180s start_period; the Dockerfile value is the
-# default for a plain 'docker run'.
+# GET /server/health answers {"status": "ok", "service": "backend", "version": ...}
+# (service/api/app.py). It is deliberately a route of its own rather than
+# /server/openapi.json, which was the previous probe: the OpenAPI document is built
+# from every router and costs real work on each call, while a liveness probe is run
+# every 30 seconds for the life of the container. The shape mirrors the ml sidecar's
+# /health (docs/SERVICE_CONTRACTS.md 1.1) so one script can probe both.
+# Compose overrides this with the same command plus a 180s start_period; the
+# Dockerfile value is the default for a plain 'docker run'.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
-    CMD curl -fsS "http://127.0.0.1:${SERVER_PORT:-8080}/server/openapi.json" -o /dev/null || exit 1
+    CMD curl -fsS "http://127.0.0.1:${SERVER_PORT:-8080}/server/health" -o /dev/null || exit 1
 
-# The entry point the repository itself documents (AGENTS.md:
-# 'python3 src/pipeline/server.py'). Not uvicorn directly: server.py:1077-1090
-# reads DEBUG to decide on --reload and configures uvicorn's log_config from
-# src/logging.yaml, so bypassing it would silently change logging and hot
-# reload behaviour.
-CMD ["python", "src/pipeline/server.py"]
+# The entry point is the package, run as a module: 'python -m service.main'. Not
+# uvicorn directly, because service/main.py reads DEBUG to decide on --reload and
+# configures uvicorn's log_config from service/configuration/logging.yaml, so
+# bypassing it would silently change logging and hot-reload behaviour. Not
+# 'python service/main.py' either: that puts service/ on sys.path instead of /app,
+# and 'from service.x import y' would then fail.
+CMD ["python", "-m", "service.main"]

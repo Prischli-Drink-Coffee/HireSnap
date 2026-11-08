@@ -8,7 +8,7 @@ a job silently never runs:
   2. A beat entry pointing at a task that no longer exists, so the periodic job
      stops firing and nothing raises.
 
-Neither needs celery installed: the module level of src/workers/celery_app.py is
+Neither needs celery installed: the module level of service/infrastructure/messaging/celery_app.py is
 plain data, which is the design decision under test as much as the data itself.
 """
 
@@ -17,16 +17,16 @@ import sys
 
 import pytest
 
-from src.workers import beat_schedule as beat_module
-from src.workers import celery_app as app_module
-from src.workers import tasks as tasks_module
+from service.infrastructure.messaging import beat_schedule as beat_module
+from service.infrastructure.messaging import celery_app as app_module
+from service.infrastructure.messaging import tasks as tasks_module
 
 
 def test_importing_the_modules_does_not_require_celery():
     """The base image has no celery; importing these modules must still work."""
-    for name in ("src.infra.cache", "src.infra.storage", "src.infra.mail",
-                 "src.workers.celery_app", "src.workers.tasks",
-                 "src.workers.beat_schedule", "src.services.jobs_services"):
+    for name in ("service.infrastructure.cache", "service.infrastructure.storage", "service.infrastructure.mail",
+                 "service.infrastructure.messaging.celery_app", "service.infrastructure.messaging.tasks",
+                 "service.infrastructure.messaging.beat_schedule", "service.services.jobs_services"):
         assert importlib.import_module(name) is not None
 
 

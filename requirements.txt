@@ -3,16 +3,16 @@
 # ===========================================================================
 #
 # WHAT IS IN HERE: the exact third-party import closure of the server entry
-# point, backend/src/pipeline/server.py, plus pytest for the test suite. Nothing
-# else. Every line is pinned.
+# point, backend/service/main.py (which uvicorn-loads service.api.app), plus
+# pytest for the test suite. Nothing else. Every line is pinned.
 #
 # WHAT IS NOT IN HERE: the inference stack. Embedding, transcription and the
 # Cosmos tokenizer live in the ml sidecar (ml/); the backend reaches them over
-# HTTP through src/services/ml_client.py and imports no ML library at all. torch,
-# torchvision, torchaudio, transformers, sentence-transformers, moviepy, librosa,
-# torchmetrics, torcheval, faiss-cpu, spacy, textattack, nltk, webrtcvad,
+# HTTP through service/services/ml_client.py and imports no ML library at all.
+# torch, torchvision, torchaudio, transformers, sentence-transformers, moviepy,
+# librosa, torchmetrics, torcheval, faiss-cpu, spacy, textattack, nltk, webrtcvad,
 # twisted, aiobotocore, opencv-python, notebook, munch, protobuf, matplotlib and
-# seaborn were removed with it - none of them was reachable from server.py.
+# seaborn were removed with it - none of them was reachable from service.main.
 #
 # numpy, pandas and scikit-learn stay: candidate/vacancy matching (cosine
 # distances, MinMaxScaler) is business logic that runs in the API process.
@@ -26,8 +26,8 @@
 # image has no build-essential any more.
 #
 # TWO SIBLING FILES, DELIBERATELY SEPARATE:
-#   requirements_platform.txt  celery, redis, boto3 - only for the worker and S3
-#                              images, imported lazily by src/infra/*.py
+#   requirements-platform.txt  celery, redis, boto3 - only for the worker and S3
+#                              images, imported lazily by service/infrastructure/
 #   docker/requirements.lock.txt  this file, verbatim: the reproducible build
 #
 # THERE IS NO GPU SIBLING ANY MORE. requirements_external.txt (torch+cu116,
@@ -35,10 +35,13 @@
 # into THIS interpreter is how the boundary erodes. The sidecar's image installs
 # its own torch from ml/.
 #
-# HOW THIS LIST WAS COMPUTED: an AST walk from src/pipeline/server.py over the
-# local import graph (39 modules), collecting the top-level third-party names,
-# with src/modelling and cosmos_tokenizer excluded from the walk because they are
-# deleted. Re-run it after adding an import to a module the entry point reaches.
+# HOW THIS LIST WAS COMPUTED: an AST walk from service/main.py over the local
+# import graph, collecting the top-level third-party names. The walk crosses the
+# whole of service/ (api, configuration, domain, repositories, services, shared,
+# infrastructure), which is why the count grew when the package was flattened out
+# of the old src/pipeline, src/services and src/utils split. Re-run it after
+# adding an import to a module the entry point reaches - backend/tests/
+# test_backend_structure.py enforces the shape, not this list.
 # ===========================================================================
 
 # --- web framework and server ---------------------------------------------
@@ -50,7 +53,8 @@ watchfiles==0.22.0
 # --- configuration and validation -----------------------------------------
 pydantic==2.7.4
 pydantic_core==2.18.4
-# src/database/models.py Settings reads backend/.env against these two.
+# service/configuration/env.py loads backend/.env; service/domain/models.py
+# reads the JWT expiry keys through it.
 pydantic-settings==2.2.1
 python-dotenv==1.0.1
 PyYAML==6.0.2

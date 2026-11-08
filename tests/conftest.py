@@ -1,16 +1,11 @@
-"""Test bootstrap: make "src.*" importable and keep env flags hermetic.
+"""Test bootstrap: make `service` importable and keep env flags hermetic.
 
-WHY a conftest and not a pytest.ini in backend/: the repository has no test
-configuration and adding one would change how every existing (future) test
-collects. This file does the two things the platform-layer tests need:
-
-  1. Puts backend/ on sys.path, so "import src.infra.cache" works when pytest is
-     invoked from the repository root OR from backend/ (the package is imported
-     as src.* everywhere in the application).
-  2. Clears every platform feature flag before each test and resets the caches
-     the modules hold, so a developer's backend/.env - which is loaded lazily by
-     the infra modules - cannot change the result of a test. A test that depends
-     on a developer's local env is a flaky test.
+WHY a conftest and not a pytest.ini: pytest already puts the rootdir on sys.path
+when it collects a test file inside a package, but these tests must also work when
+pytest is invoked from the repository root (`python -m pytest backend/tests`), and
+the package is imported as `service.*` from inside backend/. One explicit
+sys.path insert keeps both invocations identical, and unlike the old layout no
+module does it implicitly.
 """
 
 import os
@@ -51,7 +46,11 @@ def _hermetic_platform_env(monkeypatch):
 
     # The infra modules memoise backends; a stale facade from another test would
     # make the assertions depend on ordering.
-    for module_name in ("src.infra.cache", "src.infra.storage", "src.workers.celery_app"):
+    for module_name in (
+        "service.infrastructure.cache",
+        "service.infrastructure.storage",
+        "service.infrastructure.messaging.celery_app",
+    ):
         module = sys.modules.get(module_name)
         if module is None:
             continue

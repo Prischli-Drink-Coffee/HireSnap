@@ -5,9 +5,6 @@
 /.idea
 /logs/
 /urls.txt
-src/stuff/stuff.ipynb
-/inference
-/inference1
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -171,27 +168,43 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+# --- this checkout's own artifacts ----------------------------------------
+# Runtime output of a bare-metal run: uploads/embeddings (DATA_PATH) and the
+# log directory the container mounts from infra/logs. Both are bind mounts in
+# the stack and neither belongs in a commit.
 /data/
+/logs/
+
+# A local virtualenv. 'make env' and the README both create one here.
+/venv/
+/.venv/
+
+# The dump the image NEEDS is tracked on purpose: database/HireSnap.sql, loaded
+# by service/infrastructure/database/schema.py on INIT_DB. Any .sql file sitting
+# at the backend ROOT is somebody's local export and may hold production rows,
+# which is why the pattern is anchored (/*.sql) and the dump in database/ is
+# simply not matched.
+/*.sql
+
+# Local exports and one-off scratch files that used to live at the root of this
+# service. The refactor removed the paths that produced most of them (src/ no
+# longer exists) but the patterns stay, because an .ipynb dropped next to the
+# package is exactly what the layout rules forbid (.scripts/check_ml_boundary.py
+# fails a loose notebook at the backend root).
+/files/
+/SQL.txt
 /main_stuff.py
 /main_stuff.ipynb
-/cudnn_windows/
-/public/
-/SQL.txt
-/src/metrics/
-/src/weights/
-/src/certs/
-/src/baseline/train_data_categories.csv
-/src/EDA/metadata.csv
-/src/EDA/our_cats.csv
-/src/EDA/our_tags.csv
-/src/EDA/rutube - refactor.csv
-/src/EDA/rutube_cats.csv
-/src/EDA/rutube_tags.csv
-/src/stuff/video_dataset.py
-/src/stuff/train.py
-/src/images/HireSnap.fig
-/src/images/HireSnap.pdf
-/src/images/HireSnap.pptx
-/files/
-/src/script/graph_start function.py
-/pretrained_ckpts
+/urls.txt
+/setup.log
+*.tmp
+*.bak
+
+# Model weights: multi-gigabyte, licence-bound, and now mounted read-only into
+# the ml sidecar instead of being trained here. The pattern remains so that a
+# weights directory appearing in this tree can never be staged by accident.
+/pretrained_ckpts/
+/weights/
+service/certs/
+*.pem
+*.key
