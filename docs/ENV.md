@@ -107,8 +107,8 @@ prefers (`backend/service/shared/urls.py:16-20`), and keeps the unpatched
 
 `CORS_ALLOW_ORIGINS` is the one place a browser origin allow-list can be set without
 touching code. It is read by `_cors_settings()`
-(`backend/service/api/app.py:92-142`), whose return value is splatted into
-`CORSMiddleware` from `create_app()` at `backend/service/api/app.py:178-183`
+(`backend/service/api/app.py:67-117`), whose return value is splatted into
+`CORSMiddleware` from `create_app()` at `backend/service/api/app.py:169-177`
 (`**_cors_settings()` at `:182`). The gateway proxies; it does not filter by `Origin`, so
 this key is the enforcement point.
 
@@ -130,14 +130,14 @@ Two consequences follow, and both are deliberate:
    branch to deploy.
 2. **An explicit list is the configuration to use.** It keeps the legal credentialed
    pairing and it is what the manifest ships
-   (`CORS_ALLOW_ORIGINS=["https://hiresnap.example.com"]`, `docker/.env.example:112`).
+   (`CORS_ALLOW_ORIGINS=["https://hiresnap.example.com"]`, `docker/.env.example:116`).
 
 A malformed value degrades to the wildcard with a warning instead of raising: a typo in a
 variable must not make the API unimportable. The whole table is pinned by
 `backend/tests/test_cors_settings.py` (nine tests, including an end-to-end assertion that
 `create_app()` really hands the resolved value to `CORSMiddleware`).
 
-The manifest comment block (`docker/.env.example:99-111`) says the same thing in the place
+The manifest comment block (`docker/.env.example:103-115`) says the same thing in the place
 an operator will read it first. Background in
 [ARCHITECTURE.md §6](ARCHITECTURE.md#6-configuration-flow) and
 [KNOWN_GAPS.md §11](KNOWN_GAPS.md#11-cors-is-open-by-default-and-the-wildcard-cannot-carry-credentials).
@@ -179,10 +179,10 @@ See [RUNBOOK.md §10](RUNBOOK.md#11-rotating-the-database-password).
 
 | Key | Meaning | Required | Dev | Prod |
 |-----|---------|----------|-----|------|
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | Lifetime of an access token, minutes. Parsed as `int` at import (`backend/service/domain/models.py:61-63`). | yes | `15` | `15` |
-| `REFRESH_TOKEN_EXPIRE_DAYS` | Lifetime of a refresh token, days. `int` at `backend/service/domain/models.py:64-66`. | yes | `7` | `7` |
-| `JWT_ALGORITHM` | Algorithm name documented next to the keys. **No code reads it today**: the token layer hardcodes `RS256` (`backend/service/domain/models.py:101` `algoritm: str = "RS256"`, used at `backend/service/shared/tokens.py:49` and `:73`), so an HS256 value here changes nothing. It records the contract and is a candidate for deletion. | yes | `RS256` | `RS256` |
-| `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH` | Mount targets inside the container, not host paths. These two keys **win** when set and non-empty (`backend/service/domain/models.py:37-48`); the fallback when both are unset is `backend/service/certs/`, which is what a bare checkout uses. | yes | `/app/secrets/certs/…` | same |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | Lifetime of an access token, minutes. Parsed as `int` at import, in the settings model of `backend/service/models/auth_models.py`. | yes | `15` | `15` |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | Lifetime of a refresh token, days. `int` at import, from the same settings model. | yes | `7` | `7` |
+| `JWT_ALGORITHM` | Algorithm name documented next to the keys. **No code reads it today**: the token layer hardcodes `RS256` (the model's `algoritm: str = "RS256"` field, used at `backend/service/shared/tokens.py:49` and `:73`), so an HS256 value here changes nothing. It records the contract and is a candidate for deletion. | yes | `RS256` | `RS256` |
+| `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH` | Mount targets inside the container, not host paths. These two keys **win** when set and non-empty (resolved in `backend/service/models/auth_models.py`, the `_key_path()` helper); the fallback when both are unset is `backend/service/certs/`, which is what a bare checkout uses. | yes | `/app/secrets/certs/…` | same |
 
 Both are read at **import time**, not per request: an invalid value prevents the process
 from starting at all, and a change requires a container restart.
@@ -192,7 +192,7 @@ The signing keys are **not** environment variables — they are files:
 - `infra/certs/jwt-private.pem` → `/app/secrets/certs/jwt-private.pem`
 - `infra/certs/jwt-public.pem` → `/app/secrets/certs/jwt-public.pem`
 
-Paths are resolved at `backend/service/domain/models.py:37-48`; the algorithm is fixed to
+Paths are resolved in `backend/service/models/auth_models.py`; the algorithm is fixed to
 `RS256` in the token layer. Generation and rotation are covered in
 [SECRETS.md](SECRETS.md).
 
@@ -221,7 +221,7 @@ So the key is live but never mandatory: an empty value falls through to the same
 path. See [ADR/0003-nginx-rewrites.md](ADR/0003-nginx-rewrites.md).
 
 `DADATA_TOKEN` is the opposite case: **reserved and wired end to end, read by nothing.**
-The chain is complete — `docker/.env.example:192` declares it, the prod compose file passes
+The chain is complete — `docker/.env.example:196` declares it, the prod compose file passes
 it as the build argument `REACT_APP_DADATA_TOKEN: ${DADATA_TOKEN:-}`
 (`docker/docker-compose.yaml:312`; dev injects it as a runtime variable at
 `docker/docker-compose.dev.yaml:223`), and `frontend/docker/Dockerfile:102-103` declares
@@ -288,8 +288,9 @@ starts lying:
 
 | Layer | Wired to the request path? |
 |-------|----------------------------|
-| ML transport (`backend/service/services/ml_client.py`) | **Yes, always** — `upload_video()` calls `get_user_embedding` (`backend/service/services/matching.py:202`), and the client is HTTP-only, so there is no flag to get wrong and no in-process branch to fall back to |
-| cache, storage, mail and jobs facades (`backend/service/infrastructure/*`, `service/services/jobs.py`) | **No** — complete and tested, used by the worker tasks, but no route calls them yet ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)) |
+| ML transport (`backend/service/infrastructure/ml_sidecar.py`) | **Yes, always** — `upload_video()` calls `get_user_embedding` (the `matching` slice's application service,
+`backend/service/services/matching/`), and the client is HTTP-only, so there is no flag to get wrong and no in-process branch to fall back to |
+| cache, storage, mail and jobs facades (`backend/service/infrastructure/*` and the `jobs` slice under `service/services/jobs/`) | **No** — complete and tested, used by the worker tasks, but no route calls them yet ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)) |
 
 > **Where these keys live today.** All of them are manifest keys, in sections 11-15 of
 > `docker/.env.example`: **89 keys in total, the four profile switches included** (there is
@@ -355,9 +356,9 @@ Redis db **1**, not 0, because the celery broker lives in the same instance; a d
 
 **What breaks without it:** nothing. `CACHE__BACKEND=memory` is a complete
 implementation — but it is **per process**, which is why job state
-(`jobs_services.status`) only knows about jobs enqueued in the same process until the
-redis backend is in use. That is the one place where the cache backend is not merely an
-optimisation.
+(`JobService.status()`, or the `status()` function on the jobs application module) only
+knows about jobs enqueued in the same process until the redis backend is in use. That is the
+one place where the cache backend is not merely an optimisation.
 
 ### 8.2 `storage`
 
@@ -443,7 +444,7 @@ adds `docker/docker-compose.gpu.yaml`, whose only content is the `nvidia` device
 reservation. `GPU=0` on a CPU-only host is a working, slow deployment, not a broken one.
 
 **What breaks without it:** every upload. `ml` is the only inference path, so with the
-container down `upload_video()` (`backend/service/services/matching.py:202`) fails with `MLUnavailable`
+container down `upload_video()` (the `matching` slice's application service) fails with `MLUnavailable`
 (`ml_service_unreachable`, a 503) instead of falling back to a local model. That is the
 accepted cost of the split, recorded in [KNOWN_GAPS.md §23](KNOWN_GAPS.md#23-the-sidecar-is-the-only-inference-path-and-it-serialises-gpu-work).
 The proof that a request really crossed the network is
@@ -602,7 +603,7 @@ Two rules bite when you edit that file, and neither is enforced by a guard:
 Almost every key in that table now has a reader. The short list that does **not** is:
 
 - `JWT_ALGORITHM` — the token layer hardcodes `RS256`
-  (`backend/service/domain/models.py:101`, used at `backend/service/shared/tokens.py:49`);
+  (`backend/service/shared/tokens.py:49`);
   the key documents the contract and nothing reads it.
 - `APP_DOMAIN`, `NGINX_PUBLISH_HTTP`, `NGINX_PUBLISH_HTTPS` — consumed by compose when it
   interpolates `infra/nginx/templates/site.conf.template` and the published ports, never by
@@ -612,8 +613,8 @@ Everything that used to sit on that list has acquired a reader, and this is the 
 had rotted: `CORS_ALLOW_ORIGINS` is read by `_cors_settings()` (§3.2), `STORAGE__*` by
 `backend/service/infrastructure/storage.py:440-454`, `WEIGHTS_DIR` / `PRETRAINED_CKPT_DIR` /
 `HF_HOME` by the sidecar (§8.3), `INIT_DB` by the startup gate
-(`backend/service/main.py:75`), and `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH` by
-`backend/service/domain/models.py:86-88`. Every section above marks its own keys.
+(`backend/service/main.py:75`), and `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH` by the
+`_key_path()` helper in `backend/service/models/auth_models.py`. Every section above marks its own keys.
 
 ## 10. Validating your env file
 

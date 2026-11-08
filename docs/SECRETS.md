@@ -49,7 +49,8 @@ Three subtleties, each of which has bitten a real repository:
 ## 3. JWT keys (RS256)
 
 The backend signs and verifies tokens with an RSA key pair whose **path** is resolved when
-the model is constructed, in one function (`backend/service/domain/models.py:37-48`):
+the model is constructed, in one function (`backend/service/models/auth_models.py`,
+`_key_path()`):
 
 ```python
 def _key_path(variable: str, filename: str):

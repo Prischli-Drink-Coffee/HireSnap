@@ -20,7 +20,7 @@ consequence, and the mitigation this stack applies.
 
 - `frontend/src/shared/api/apiConsts.js:46` — the last-resort fallback,
   `return "http://localhost:8080/api/";` (still the value in effect on plain localhost)
-- `backend/service/api/app.py:128` — `app.mount("/server", app_server)`
+- `backend/service/api/app.py:178` — `app.mount("/server", build_server_app())`
 
 **Consequence.** Pointed at each other directly, every API call 404s. The bug is
 invisible in local development because the frontend's hardcoded URL points at
@@ -133,13 +133,13 @@ and nothing in the lock snapshot records that pair, so a reproducible build of a
 image is not yet expressible with the artifacts in the repository.
 
 One dependency is neither list names, and it does not need to be: `python-multipart`
-arrives transitively because `fastapi==0.111.0` declares it as a hard requirement, and
-`backend/service/api/routers/auth.py:20-23` declares `Form(...)` parameters that raise
-`RuntimeError: Form data requires "python-multipart" to be installed` at route definition
-when it is absent. The image is therefore correct today and fragile tomorrow: narrowing
-`requirements.txt` to an explicit audited list must add `python-multipart` back, or the
-container dies at import - before it can answer a healthcheck - in a way no gate here
-models.
+arrives transitively because `fastapi==0.111.0` declares it as a hard requirement. The `auth`
+slice's router — `service/services/auth/presentation/routers/auth_api/` — declares `Form(...)`
+parameters, and defining such a route without the package raises
+`RuntimeError: Form data requires "python-multipart" to be installed`. The image is therefore
+correct today and fragile tomorrow: narrowing `requirements.txt` to an explicit audited list
+must add `python-multipart` back, or the container dies at import - before it can answer a
+healthcheck - in a way no gate here models.
 
 ## 5. No migrations
 
@@ -236,7 +236,9 @@ and treat a torch upgrade as an application project rather than a deployment twe
 ## 9. Errors have no stable code
 
 **Defect.** The API returns FastAPI's default envelope, `{"detail": "..."}`, with no
-machine-readable error code.
+machine-readable error code. The envelope is now produced in one place -
+`ServiceError` and its four subclasses in `service/shared/errors.py`, rendered by the single
+handler on the `/server` sub-app - but it is still a `detail` string and nothing else.
 
 **Consequence.** Clients must string-match `detail` to distinguish outcomes, and the
 strings are sentences (`"Invalid token or expired token."`) that may be reworded.
@@ -244,8 +246,20 @@ Full inventory in
 [SERVICE_CONTRACTS.md](SERVICE_CONTRACTS.md#22-what-the-backend-actually-returns-partial-gap).
 
 **Mitigation.** The target contract (`{"error","detail"}`) is specified, and the gateway
-normalizes its *own* errors to it. Application errors are left as-is; adding one
-exception handler would fix them, and that is an application change.
+normalizes its *own* errors to it. Application errors are left as-is, but the refactor left
+the cost of fixing them at one file: every rule now raises a `ServiceError` subclass from
+`service/shared/errors.py`, and **one** handler on the `/server` sub-app renders it
+([SERVICE_CONTRACTS.md](SERVICE_CONTRACTS.md#22-what-the-backend-actually-returns-partial-gap)).
+Adding the code is a change to that handler and to the four exception classes, not a sweep
+over the tree.
+
+**A 404 that stays wrong on purpose.** `Email already exist` - the duplicate-signup failure -
+has always answered 404 with a message that reads like a 409. The refactor keeps both, because
+changing the status would break every client that already special-cases it and this pass was
+supposed to change no path, no method and no response. If the wire contract is ever allowed a
+breaking change, that is where a `ConflictError` belongs - and `ConflictError.status_code` is
+**404** for exactly that reason (`service/shared/errors.py:58-61`), not because anyone thinks a
+duplicate is a missing resource.
 
 ## 10. No health endpoint (closed: `GET /server/health` exists)
 
@@ -255,7 +269,7 @@ router on every call, run every 30 seconds for the life of the container - and t
 gateway's own `/health` proved only that nginx was alive.
 
 **Status: fixed.** `build_server_app()` now registers
-`GET /server/health` on the `/server` sub-app (`backend/service/api/app.py:88-100`,
+`GET /server/health` on the `/server` sub-app (`backend/service/api/app.py:136-151`,
 decorator at `:93`), returning `{"status":"ok","service":"backend","version":__version__}`
 (`:96`): three keys, no I/O, the same shape the gateway and the `ml` sidecar answer with.
 Both images probe it - `backend/docker/Dockerfile:229-230` and the compose override at
@@ -277,9 +291,9 @@ deployment had no way to narrow the origin list, and the pair the middleware emi
 `Access-Control-Allow-Origin: *` together with `Access-Control-Allow-Credentials: true` -
 is one browsers **reject**, so a credentialed cross-origin request never worked anyway.
 
-**Status: fixed.** `_cors_settings()` (`backend/service/api/app.py:92-142`) resolves the
+**Status: fixed.** `_cors_settings()` (`backend/service/api/app.py:67-117`) resolves the
 key and `create_app()` splats the result into `CORSMiddleware`
-(`backend/service/api/app.py:175-183`, `**_cors_settings()` at `:182`).
+(`backend/service/api/app.py:169-177`, `**_cors_settings()` at `:176`).
 
 | `CORS_ALLOW_ORIGINS` | `allow_origins` | `allow_credentials` |
 |----------------------|-----------------|---------------------|
@@ -295,7 +309,7 @@ illegal header pair that could never have worked.
 `*`. That is survivable only because the SPA is served same-origin through the gateway, so
 CORS is not what protects the API - the Bearer token is. An explicit list is the
 configuration a real deployment should use, and the manifest ships one
-(`docker/.env.example:112`).
+(`docker/.env.example:116`).
 
 **What would have caught it.** Nothing did: the old value was legal Python, the API
 answered same-origin requests perfectly, and the failure needed a *cross-origin credentialed*
@@ -334,29 +348,32 @@ deployment, pre-seed the Hugging Face cache (`hf_cache` volume); see
 ## 13. The platform layer is delivered but its call sites are thin
 
 **Defect.** `backend/service/infrastructure/` (cache, storage, mail),
-`backend/service/infrastructure/messaging/` (celery app, tasks, beat schedule) and
-`backend/service/services/jobs_services.py` exist and are tested, and the containers that
-host them now ship. **The API still does not call them.** Every request is answered from
-MySQL and the local filesystem, exactly as before the layer landed.
+`backend/service/infrastructure/messaging/` (celery app, tasks, beat schedule) and the `jobs`
+slice (`service/services/jobs/application/job_service.py`, the module that used to be
+`jobs_services.py`) all exist and are tested, and the containers that host them ship. **No
+HTTP route calls them.** Every request is still answered from MySQL and the local filesystem,
+exactly as before the layer landed.
 
 - `backend/service/api/app.py` mounts twelve routers and none of them is a `/server/jobs`
-  route; grepping the package for `send_now_or_later`, `get_cache` and `get_storage` finds
-  the facades and their tests, not a caller.
-- Signup (`backend/service/api/routers/auth.py:19-33`) calls `auth_services.signup` and
-  returns; no welcome mail is sent, because no caller reaches
-  `mail.send_now_or_later`.
+  route. The jobs slice does reach the cache - `job_service.py:111` resolves it through
+  `state.get_cache()` - and that is the sharpest way to see the shape of the gap: the one
+  consumer of the platform layer is a subsystem no route can reach, so `send_now_or_later`,
+  `get_storage` and the rest still have the facades and their tests as their only callers.
+- Signup (`service/services/auth/presentation/routers/auth_api/`) calls the auth
+  application service's `signup()` and returns; no welcome mail is sent, because no caller
+  reaches `mail.send_now_or_later`.
 - The listing endpoints query MySQL on every request; the cache facade is never consulted.
 
 **Mitigation.** Document the dormancy instead of advertising the feature (this entry and
 [SIDECARS.md](SIDECARS.md)). The layer's own tests
-(`backend/tests/test_infra_fallbacks.py`, `test_jobs_services.py`,
-`test_worker_routing.py`) prove the facades work; they cannot prove a route uses them.
+(`backend/tests/test_infra_fallbacks.py`, `test_jobs_services.py`, `test_worker_routing.py`,
+`test_ports_contracts.py`) prove the facades work; they cannot prove a route uses them.
 The wiring is an application change with its own review: add the route, then the flag, then
 the test that fails when the neighbour is down.
 
 **Residual risk.** The failure semantics are the inverse of what a reader expects in two
 places. Cache fails **open** (a miss), but job state lives in the cache too: with
-`CACHE__BACKEND=memory` — the pre-cache default — `jobs_services.status()` only knows
+`CACHE__BACKEND=memory` — the pre-cache default — `JobService.status()` only knows
 about jobs enqueued in the **same process**, so a job id handed to a different worker, or
 read after a restart, reports `unknown`. `CACHE=1` fixes that; a deployment that runs
 celery without it does not. Storage fails **closed** (`StorageError`), so an S3 outage is
@@ -365,24 +382,24 @@ a 500 on the upload path once uploads use it, not a silent write to the local di
 ## 14. The sidecar is the only inference path
 
 **Defect, from the other side.** The API has no in-process inference path. There used to be
-one: `backend/service/services/ml_client.py` imported the ML pipeline in-process when
+one: `backend/service/infrastructure/ml_sidecar.py` imported the ML pipeline in-process when
 `ML__SERVICE_URL` was unset and POSTed to the sidecar when it was set. That branch is
 gone - the module is HTTP-only, with a docstring at the top saying why
-(`ml_client.py:1-43`).
+(`ml_sidecar.py:1-43`).
 
-- `service_url()` (`ml_client.py:101-120`) returns the first non-empty of
+- `service_url()` (`ml_sidecar.py:101-120`) returns the first non-empty of
   `ML_SERVICE_URL` / `ML__SERVICE_URL`, and otherwise `DEFAULT_SERVICE_URL` =
   `http://127.0.0.1:8080` (`:65`). Nothing branches on "is it set"; `is_remote()`
   (`:123-131`) returns `True` unconditionally.
-- `backend/service/services/matching.py:22` imports `get_user_embedding` from the client
-  and `upload_video()` calls it at `:202` - the only wired call site.
+- The `matching` slice's application service imports `get_user_embedding` from the client
+  and `upload_video()` calls it - the only wired call site.
 - The four celery services take the same variable and `depends_on: ml`
   (`docker/docker-compose.yaml:104`, `:256-263`).
 
 That default is not a fallback worth having. Inside the API container,
 `127.0.0.1:8080` is the API itself, which serves no `/v1/*` route, so an emptied key
 turns every upload into `ml_service_unreachable` rather than into local inference.
-`ML__SERVICE_URL` ships **non-empty** (`http://ml:8080`, `docker/.env.example:263`) for
+`ML__SERVICE_URL` ships **non-empty** (`http://ml:8080`, `docker/.env.example:267`) for
 exactly that reason.
 
 **Consequence, and it is the accepted cost of the split.** While `ml` is down, still
@@ -456,22 +473,25 @@ against it:
 - The module probe looked for `modelling.ml_client` and `ml.client`, neither of
   which exists, and fell back to `ML__BASE_URL` instead of `ML_SERVICE_URL`.
 
-**Status: fixed.** The task now goes through `backend/service/services/ml_client.py` only —
-the same transport the request path uses, so there is one place that knows the sidecar's
-contract:
+**Status: fixed.** The task now goes through the ML client only — the same transport the
+request path uses, so there is one place that knows the sidecar's contract. (The module was
+`service/services/ml_client.py` when this was fixed; [ADR/0008](ADR/0008-vertical-slice-services.md)
+has since moved it to `service/infrastructure/ml_sidecar.py`, which is why the names below
+read as they did at the time.)
 
-- `_ml_client()` lazily imports `service.services.ml_client` and wraps a failure in
-  `TaskUnavailable("ml_client_unavailable: ...")`. A task cannot silently fall back to
-  a transport that does not exist.
+- `_ml_client()` lazily imports `service.infrastructure.ml_sidecar` and wraps an
+  import failure in `TaskUnavailable("ml_sidecar_unavailable: ...")`
+  (`tasks.py:85-91`). A task cannot silently fall back to a transport that does not
+  exist. The helper keeps its old name; the module it returns does not.
 - `_local_media_path(storage, file_key, source_path=None)` returns `(path,
   temporary)`: an existing `source_path` as-is; else `storage.path_for(key)` when
   that is a file (a local backend already holds the bytes, so no copy); else
   `storage.read_bytes(key)` materialised into a `NamedTemporaryFile` with the
   **original extension**, because ffmpeg picks its demuxer from the filename.
-- `embed_candidate()` calls `ml_client.get_user_embedding(media_path)`, stores the
+- `embed_candidate()` calls `get_user_embedding(media_path)` on that client, stores the
   `.npy` through the storage facade, and deletes the temporary file in a `finally`
   that logs `temp_cleanup_failed` instead of masking the original error. The reported
-  embedder is `ml_client:<transport>`, so a job record says which path ran.
+  embedder is `<transport>`, so a job record says which path ran.
 
 The sidecar is never handed a URL or a credential: it receives bytes that the worker
 already had, which is why the object store stays private.
@@ -480,8 +500,10 @@ already had, which is why the object store stays private.
 sidecar and no weights: a real path is not copied, a local path is not copied, an
 object-store object is materialised **with its extension**, the temporary file is removed on
 success **and** on failure, the key and the bytes are deterministic, the module actually
-imported is `service.services.ml_client`, and a blocked import raises `TaskUnavailable`.
-The backend suite is 109 passed.
+imported is `service.infrastructure.ml_sidecar` (`test_worker_ml_seam.py:154-159`), and a
+blocked import raises `TaskUnavailable` with `ml_sidecar_unavailable` in the message
+(`:161-175`). No pass count is quoted here on purpose: the suite is being extended in the same
+change and a number in prose is stale the day after.
 
 **Residual risk.** The task is still only reachable from a code path nothing calls
 ([§13](#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)), so the fix is proven by tests
@@ -520,7 +542,7 @@ grep -nE '^(CREATE DATABASE|USE )' backend/database/HireSnap.sql   # must print 
 
 and confirm the loader still passes `DB_NAME` as an argument rather than relying on the
 file (`infra/mysql/init/00-init.sh:89`). The default database name is `hiresnap` in
-the manifest (`docker/.env.example:131`), in the MySQL image (`MYSQL_DATABASE`) and
+the manifest (`docker/.env.example:135`), in the MySQL image (`MYSQL_DATABASE`) and
 in the init script's fallback chain.
 
 **Residual risk.** `lower_case_table_names` differs between a Linux container and a
@@ -545,19 +567,21 @@ written together and never exercised with real data; the loop variable in
 `get_all_vacancies()` was even spelled `smaple` while the body read `sample.`, so that
 branch raised `NameError` before it could sort anything.
 
-**Status: fixed in the package move.** The two functions live at
-`backend/service/services/matching.py:261-280` (`get_all_vacancies`) and `:283-292`
-(`get_all_candidates`), and both now sort by an explicit key:
+**Status: fixed in the package move.** The two functions live in the `matching` slice's
+application service (`backend/service/services/matching/application/matching_service.py`,
+`get_all_vacancies()` at `:356` and `get_all_candidates()` at `:370`), and both now
+sort by an explicit key:
 
 ```python
-user_vacancies.sort(key=lambda row: row.get("distance") or 0, reverse=True)
-vacancy_candidates.sort(key=lambda row: row.get("distance") or 0, reverse=True)
+rows.sort(key=lambda row: row.get("distance") or 0, reverse=True)   # matching_service.py:367
+rows.sort(key=lambda row: row.get("distance") or 0, reverse=True)   # matching_service.py:382
 ```
 
 `distance` is the similarity score the matching matrix writes (`decimal(6,6)` in
 `backend/database/HireSnap.sql`), so the ordering is "closest first" and the intent is
 stated rather than inferred from a comparison. The misspelled loop variable is renamed, and
-the reason is recorded in the code comment at `:266-268`.
+the reason is recorded in the docstring of each function (`matching_service.py:357-363` and
+`:371-376`), not in a comment.
 
 **Why no gate caught it, and why that has not changed.** The ruff configuration runs a
 narrow rule set; the rules that are enabled (undefined names, unused imports) are
@@ -580,13 +604,14 @@ key" - it is that a shape-only test suite reads as coverage.
 guard that is supposed to reject an empty payload raised `NameError` — a 500 — instead
 of the intended 400:
 
-- `backend/service/repositories/candidate_vacancy_repository.py`
-- `backend/service/repositories/personality_candidate_repository.py`
-- `backend/service/repositories/personality_vacancy_repository.py`
+- `service/services/candidate_vacancies/persistence/candidate_vacancy_repository.py`
+- `service/services/personality_candidates/persistence/personality_candidate_repository.py`
+- `service/services/personality_vacancies/persistence/personality_vacancy_repository.py`
 
 **Status: fixed.** Each module now has `from fastapi import HTTPException, status`
-(line 5 in all three) with a comment saying why the import exists, so an empty
-`update_*()` payload returns 400 with the module's own message. The note stays here
+(**line 6** in all three; the import moved down one line when the slice moved) with a
+comment at `:3-5` saying why it exists, so an empty `update_*()` payload returns 400 with
+the module's own message. The note stays here
 because the shape of the failure is instructive: a guard branch that no test exercised
 looked correct in review for as long as it existed.
 
@@ -599,7 +624,7 @@ additions. Nothing else about these modules changed.
 
 ## 20. The HTTP contract is narrower than the old function signatures
 
-**Defect.** `backend/service/services/ml_client.py` keeps the signatures the in-process
+**Defect.** `backend/service/infrastructure/ml_sidecar.py` keeps the signatures the in-process
 implementations had, and the HTTP transport cannot honour every keyword. The differences
 are silent - the call succeeds and returns a vector - which is worse than an error:
 
@@ -608,7 +633,7 @@ are silent - the call succeeds and returns a vector - which is worse than an err
 | `num_frames` | honoured (default 16) | **ignored**; the sidecar runs its fixed 16-frame path | the client warns when it is not 16 |
 | `frames_temp_folder`, `audio_temp_folder` | honoured | **ignored**; the sidecar spools into its own scratch dir | the client debug-logs it |
 | `unet_weights_path` | honoured | **ignored**; `WEIGHTS_DIR` inside the sidecar decides | dropped on purpose: a backend-relative path means nothing in another container |
-| `output_embedding_path` | writes the `.npy` | **still works** - the client decodes the response and saves it | `ml_client.py` |
+| `output_embedding_path` | writes the `.npy` | **still works** - the client decodes the response and saves it | `ml_sidecar.py` |
 | per-word speech CSV (`path_to_table_speech`) | could be written | **not reachable**: `audio2text` is always called with `save_table=False` | `ml/service/engine.py` transcribe path |
 
 **Consequence.** A caller that tuned an embedding - a shorter clip, a custom weight file, a
@@ -643,7 +668,7 @@ different errors from different components:
 **What does *not* happen:** the sidecar does **not** buffer the body in memory. Both media
 routes spool to a file under `DATA_PATH/ml-incoming`, falling back to the system temp dir
 (`ml/service/app.py:197-215`), so a 300 MB video streams to disk. The **backend client**
-is the one that reads the file into memory before posting (`ml_client.py`
+is the one that reads the file into memory before posting (`ml_sidecar.py`
 `media.read_bytes()`), so the API container's memory ceiling must fit the largest video
 even though the sidecar's does not. The multipart branch does read the part into memory
 (`ml/service/app.py:305-320`) - one more reason the raw-bytes form is the documented one.
@@ -695,7 +720,7 @@ Three consequences followed, and they are why this entry is kept rather than del
 An earlier version of this entry understated it, calling `ml` a mis-provisioned container.
 The sharper statement is that the service built the same backend image **and** published no
 `ML__SERVICE_URL`, so the seam the sidecar exists for -
-`backend/service/services/ml_client.py` - provably ran **in-process** in every deployed
+the ML client, now `backend/service/infrastructure/ml_sidecar.py` - provably ran **in-process** in every deployed
 configuration, profile on or off.
 
 **What closed it.** The compose integration landed, and the shape is now:
@@ -741,7 +766,7 @@ submodule` with `failures=1`).
 
 **Two facts that belong together, because they fail in the same scenario.**
 
-**23.1 No second path.** `backend/service/services/ml_client.py` is HTTP-only
+**23.1 No second path.** `backend/service/infrastructure/ml_sidecar.py` is HTTP-only
 (§14). The consequence is availability coupling that did not exist before the split: while
 `ml` is down, starting, or degraded, an upload fails - `503 service_unavailable` when the
 sidecar is up but cannot load a model, `MLUnavailable`/`ml_service_unreachable` when
@@ -786,12 +811,12 @@ tree was unreachable from `src/index.js` (86 of the frontend's 121 files were, s
 rewritten. Measured after that deletion, `grep -rn process.env frontend/src` has exactly one
 hit - `frontend/src/shared/api/apiConsts.js:16`, reading `REACT_APP_BASE_URL` - so **no code
 in the tree reads the dadata key today**, and its value is empty in the manifest
-(`docker/.env.example:192`).
+(`docker/.env.example:196`).
 
 **What survives, and where.** The token itself survives **only in `frontend`'s git history**,
 in every clone and every fork of the remote; cleaning the working tree does not reach it. The
 plumbing survives on purpose and is wired end to end: the manifest key
-(`docker/.env.example:192`) is passed as a build argument
+(`docker/.env.example:196`) is passed as a build argument
 (`docker/docker-compose.yaml:312`, and as a runtime variable in dev at
 `docker/docker-compose.dev.yaml:223`) into `frontend/docker/Dockerfile:102-103`, which
 declares `ARG REACT_APP_DADATA_TOKEN=` and re-exports it as `ENV`. The Dockerfile comment states the
@@ -816,6 +841,152 @@ rate-limited public client key, which bounds the damage to quota theft rather th
 disclosure - which is also why the empty default is the normal state and not a
 misconfiguration.
 
+## 25. The vertical slices are a package boundary, not a domain model
+
+[ADR/0008](ADR/0008-vertical-slice-services.md) moves the backend from three sibling layer
+directories into thirteen directories, one per bounded context. It is worth being explicit about
+what that does **not** buy, because "we have vertical slices now" invites three assumptions the
+tree does not support.
+
+**25.1 The repository returns rows, not aggregates.** Each
+`persistence/<domain>_repository.py` still holds raw SQL and hands back dictionaries or
+model rows - the same SQL that lived in `service/repositories/` before the move, with a new
+import path. There is no aggregate root, no identity map and no unit of work: the slice groups
+the code that changes together, it does not define a consistency boundary. Consequence: a rule
+that spans two tables in one slice is enforced by the application service, in Python, and
+nothing prevents a second caller from reaching the repository directly.
+
+**25.2 There is no service-level transaction boundary.** A connection is opened per call
+(`service/infrastructure/database/connection.py`) and every query commits on its own, so an
+operation that writes twice is not atomic. This was true before the refactor and is unchanged by
+it - the slices did not introduce the problem and do not fix it. It is cheap to revisit
+precisely because the writes now sit in one `persistence/` module per domain: wrapping them
+in an explicit transaction is a change to that file plus the service that calls it, not a
+search across the tree.
+
+**25.3 The verticals share their entities.** `service/models/db_models.py` is one module for
+every domain; `candidates` does not own its row model. So the *behaviour* is sliced while
+the *data shape* is not, and a change to a shared model still touches every slice that uses it.
+That is a deliberate stopping point: thirteen copies of a schema that must agree is worse than one
+file that is obviously shared, and splitting it is only worth doing when a domain's model
+genuinely stops being shared.
+
+**Why these are recorded rather than fixed.** All three are invisible to the gates and would
+each be a multi-day refactor with no user-visible change. Recording them keeps the honest
+reading of the layout - the slice is the unit of *ownership*, not the unit of *consistency* -
+and it tells the next reader which questions the tree already answers (where does a vacancies
+change go?) and which it does not (is this write atomic?).
+
+**What would change the answer.** A domain that grows a real invariant across tables earns a
+transaction boundary (25.2) and possibly its own model module (25.3). A domain whose repository
+grows past a few queries earns an aggregate (25.1). None of that should be imposed uniformly:
+see the second rejected alternative in [ADR/0008](ADR/0008-vertical-slice-services.md), where
+full hexagonal ports and protocols for a 40-line repository are rejected for the same reason.
+
+## 26. The personality-vacancy link is written against the wrong personality
+
+**Defect, preserved on purpose.** `similarity_for_user()` scores one candidate against every
+personality and every vacancy, then writes two link tables. The second loop is wrong:
+
+```python
+for j, personality in enumerate(personalities):        # j ends at len(personalities) - 1
+    ...create_personality_candidate(personality_id=personality.ID, ...)
+
+for similarity, vacancy in zip(P[0, :], vacancies):
+    ...create_personality_vacancy(personality_id=personalities[j].ID, ...)   # j is stale
+```
+
+`personalities[j]` reads the index left over from the **previous** loop instead of the
+personality the `C`/`P` row actually belongs to
+(`backend/service/services/matching/application/matching_service.py:247-266`, `j` reused at
+`:262`). `P` is vacancy-vs-personality (`:72`, built at `:78` inside `build_matrix()`), so the
+score is right and the personality it is attributed to is arbitrary - whichever one the first
+loop happened to stop on.
+
+**Why it is not fixed here.** Correcting it changes rows that are already stored: the
+`personality_vacancies` table would need a backfill, which is a migration, not a refactor.
+The docstring says so in the code itself (`matching_service.py:222-227`: *"KNOWN DEFECT,
+PRESERVED ON PURPOSE ... Fixing it changes stored data, which is a migration"*), so a reader
+who finds the loop is told why it is still there rather than assuming it was missed.
+
+**Why it is invisible today.** Nothing calls the function. It has no route of its own - the
+four `inference` routes call `upload_video`, `upload_vacancy`, `get_all_vacancies` and
+`get_all_candidates` - and a tree-wide search finds exactly one occurrence of the name, its
+own `def` at `matching_service.py:216`. So the wrong rows were never written by this
+deployment; the defect is a trap for whoever wires the pipeline back up, which is the
+reason it is recorded here rather than silently fixed or silently dropped.
+
+**Mitigation.** Fix it in the same change that gives the function a caller, together with
+the backfill for rows already written by the old `main_services.py`: the pair is one
+migration and one loop. Until then the honest statement is that the link table cannot be
+trusted if it has any rows in it, and a fresh database has none.
+
+**What would have caught it.** Nothing in the tree does. It is not a syntax error, it is not
+a type error (`j` is an `int` and `personalities[j]` type-checks), and no test exercises the
+function. ruff and mypy are both clean on it, which is the same lesson as §18 from the other
+side: a shape-only suite reads as coverage.
+
+## 27. The `jobs` slice has no HTTP route, on purpose
+
+**Not a defect, an omission with a reason.** `jobs` is the one slice with no `presentation/`
+layer: `service/services/jobs/` holds `application/job_service.py` and nothing else
+(`job_service.py:37-39`: *"WHY THERE IS NO presentation/ LAYER: no route exposes a job
+today ... adding a `/server/jobs` endpoint is a contract change that needs the snapshot
+regenerated, so it is a separate decision rather than a hole in this slice"*).
+
+The layout guard knows the exception by name rather than by accident:
+`SLICES_WITHOUT_PRESENTATION = {"jobs"}`
+(`backend/scripts/check_backend_layout.py:121`), so a slice that loses its router fails the
+build while `jobs` stays valid.
+
+**Consequence.** The job machinery is reachable only from Python: `enqueue()` and `status()`
+are called by nothing in the request path, which is the dormancy recorded in §13. Two
+different facts are being stated and it is worth keeping them apart - §13 says the platform
+layer has no call sites; this entry says one slice will never have one until the contract
+changes.
+
+**What adding it costs.** A new route under `/server/jobs` is a public contract change: the
+OpenAPI snapshot (`backend/tests/snapshots/critical_endpoint_openapi.json`) has to be
+regenerated with `python -m tests.snapshot_tool --write`, `ml/README.md` and
+[SERVICE_CONTRACTS.md](SERVICE_CONTRACTS.md) grow a section, and the router has to be listed
+in `service/api/registry.py`. That is the whole reason it is a decision instead of a
+20-line patch.
+
+## 28. The four inference routes raised `NameError` on every call (closed)
+
+**Defect, as it stood.** The inference handlers called `main_services.upload_video(...)` and
+its three siblings. `main_services` was the module that held those functions
+(`service/services/main_services.py`, now the `matching` slice's application service), and the
+router never imported it, so every one of the four routes answered 500 with
+`NameError: name 'main_services' is not defined` the first time it was called - not on a bad
+payload, on any payload.
+
+**Why it survived review.** The name looked imported, because the same module name was
+imported in the neighbouring routers, and because nothing exercised these routes: there is no
+test that calls `/upload_video/inference/{user_id}`, and the API-prefix contract guard checks
+paths and methods against the gateway, not the inside of a handler body. A path can be
+correct and the handler still unable to run.
+
+**Status: fixed.** Each handler takes its collaborator as a `Depends` parameter instead of
+touching a module-level name - `service=Depends(get_matching_service)` from
+`service/composition/state.py` - so the name is resolved by the framework at request time and
+a missing wiring is an import error at collection, not a 500 in production
+(`backend/service/services/matching/presentation/routers/inference_api/inference_api.py:46-59`,
+`:71-85`, `:94-102`, `:111-123`). The history is recorded in the module itself
+(`inference_api.py:27-30`), including what caught it: *"ruff's F821 found it, not a test, which
+is why the api-prefix contract alone was not enough."*
+
+**Consequence if it regresses.** The four `inference` routes are the product - upload a video,
+get a profile; add a vacancy; list matches - so a recurrence is a total outage of the feature
+behind a 500, invisible to every healthcheck because `/server/health` does no I/O.
+
+**Mitigation.** The `Depends` shape makes the regression loud at import time, and the
+`matching` slice's application service is exercised by
+`backend/tests/test_service_boundary.py` for import direction rather than behaviour. An
+end-to-end test of these four routes still needs MySQL and the sidecar, so it belongs to the
+integration suite (`backend/tests/integration/pipeline_smoke.py`, behind
+`HIRESNAP_INTEGRATION=1`), not to the unit run.
+
 ## What is *not* on this list
 
 Three changes to application source ship with this stack, and they are deliberately excluded
@@ -825,12 +996,13 @@ from the list above because they are fixed. All three are enumerated in
 1. `frontend/src/shared/api/apiConsts.js` - the base URL becomes configurable.
 2. `backend/service/shared/urls.py` - `PUBLIC_BASE_URL` is honored, with the old
    behavior as fallback.
-3. `backend/service/repositories/{candidate_vacancy,personality_candidate,personality_vacancy}_repository.py`
-   - the missing `fastapi` import that turned a 400 into a 500.
+3. the three vacancy/personality `persistence/` repositories — `candidate_vacancies`,
+   `personality_candidates` and `personality_vacancies` under
+   `backend/service/services/` — the missing `fastapi` import that turned a 400 into a 500.
 
 All three are backwards compatible: with no new configuration they behave exactly as before.
 
-Eight entries above are **closed** rather than open, and they are kept because *how* they
+Nine entries above are **closed** rather than open, and they are kept because *how* they
 failed is the useful part - each was invisible to the gates and would have surfaced first in
 production:
 
@@ -844,20 +1016,30 @@ production:
   and `backend/tests/test_import_without_infra.py:74-85` asserts the exact body.
 - §11 - CORS was hardcoded to `['*']` **with** credentials, an illegal header pair, while
   `CORS_ALLOW_ORIGINS` was read by nothing. `_cors_settings()`
-  (`backend/service/api/app.py:92-142`) resolves it and turns credentials off for the
+  (`backend/service/api/app.py:67-117`) resolves it and turns credentials off for the
   wildcard; `backend/tests/test_cors_settings.py` pins the rule and the middleware wiring.
 - §16 - the celery ML client posted to a route the sidecar does not serve. Now routed
-  through `service.services.ml_client` and covered by `backend/tests/test_worker_ml_seam.py`.
+  through `service.infrastructure.ml_sidecar` and covered by `backend/tests/test_worker_ml_seam.py`.
 - §18 - `get_all_candidates()` sorted dictionaries and raised `TypeError`; it sorts on the
   distance key the way `get_all_vacancies()` already did.
 - §19 - a missing `fastapi` import that turned a 400 into a 500.
 - §22 - the `ml` service built the API image and published no URL, so the sidecar was never
   used in any deployed configuration. Now enforced by
   `scripts/check_compose_parity.py` rule 6.
+- §28 - the four `inference` routes called a module they never imported, so every one of them
+  answered `NameError`. ruff's F821 found it; the `Depends` wiring makes a recurrence an
+  import error rather than a 500.
 
-Two entries are new in this revision and are about the *shape* of the deployment rather than
-a bug: §23 (one inference path, serialised GPU work) and §24 (a credential rotated at the
-issuer, still in history).
+Five entries are new in this revision. §23 (one inference path, serialised GPU work),
+§24 (a credential rotated at the issuer, still in history) and §25 (the vertical slices are a
+package boundary, not a domain model - raw-SQL repositories, no transaction boundary, shared
+entity models) are about the *shape* of the tree rather than a bug. §26 (the personality-vacancy
+link is written against the stale index) and §27 (`jobs` has no route, on purpose) are the two
+the slice move made worth writing down: one is a real defect preserved because fixing it is a
+migration, the other is a deliberate absence the layout guard names at
+`backend/scripts/check_backend_layout.py:121`. All five are listed here rather than closed
+because nothing about them is fixed or fixable by a test: they are the deliberate stopping
+point of the refactor that [ADR/0008](ADR/0008-vertical-slice-services.md) records.
 
 Everything else is documented here rather than patched, so that the next reader can tell
 "the stack works around this" from "the stack is broken here".

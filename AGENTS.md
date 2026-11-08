@@ -1,27 +1,47 @@
 HireSnap is a Git superproject. Product code lives in three submodules that are also
 valid standalone checkouts:
 
-- `backend/` — FastAPI application (Python 3.9) and **business logic only**, arranged as a
-  package rather than a script tree. `service/main.py` is the entry point: it configures
-  logging, optionally bootstraps the schema, and hands the ASGI callable to uvicorn
-  (`python -m service.main` from `backend/`). The app is built by
-  `service/api/app.py`, which mounts a `/server` FastAPI sub-app, an empty `/public` app
-  and a static `/data` directory on the root app; the twelve route modules live in
-  `service/api/routers/`. Rules sit in `service/services/`, SQL in
-  `service/repositories/`, swappable I/O (cache, storage, mail, database, celery) in
-  `service/infrastructure/`, configuration in `service/configuration/`, models in
-  `service/domain/` and cross-cutting helpers in `service/shared/`. Persistence is raw
-  PyMySQL against MySQL. It contains **no** GPU framework: inference is an HTTP call to
-  `ml/` (`service/services/ml_client.py`), and `scripts/check_ml_boundary.py` fails a
-  commit that puts torch back in here.
-- `frontend/` — Create React App (react-scripts 5.0.1, React 18, Chakra UI) with a
-  purpose-based tree: `src/app/` holds the router and providers, `src/pages/` the screens,
-  `src/shared/` components, hooks, utils and the one API layer, and `src/theme/` the
-  Chakra theme. `jsconfig.json` sets `baseUrl` to `src`, so imports are absolute from
-  `src/` and no file climbs with `../../../`. The axios instance is
-  `src/shared/api/instance.js` and the API base URL is resolved in
+- `backend/` — FastAPI application (Python 3.9) and **business logic only**, organised as
+  **vertical slices**: `service/services/<domain>/` holds one directory per bounded context
+  (`auth`, `users`, `candidates`, `vacancies`, `magics`, `personalities`,
+  `personality_vacancies`, `personality_candidates`, `candidate_vacancies`, `files`,
+  `embeddings`, `matching`, `jobs`), and inside a slice the layers are
+  `application/<domain>_service.py` (the rules, framework-free),
+  `persistence/<domain>_repository.py` (the SQL), and `presentation/routers/<domain>_api/`
+  (the router module exposing `router`, plus a `schemas.py` only where a router needs a model
+  the domain does not own). A `domain/` layer is permitted and **no slice needed one** - the
+  entities are the pydantic models in `service/models/`, shared across slices. Router module
+  names follow the route they serve, not the slice:
+  `candidates` serves `/info_candidates/` from `presentation/routers/info_candidates_api/`,
+  `matching` serves the four `/.../inference/` routes from `inference_api/`, and `jobs` has
+  no presentation layer at all. `service/main.py` is the entry point — `python -m service.main`
+  from `backend/`; `service/api/app.py` builds the app, mounts `/server`, an empty `/public`
+  and a static `/data`, includes the routers listed in `service/api/registry.py`, and
+  registers the single exception handler that renders a `ServiceError` as `{'detail': ...}`
+  with its own status. So the application layer raises `NotFoundError`, `ConflictError`,
+  `InvalidPayloadError` or `UnauthorizedError` (`service/shared/errors.py`) and imports no
+  framework; the HTTP mapping exists in exactly one place. `service/settings.py` is a frozen
+  dataclass built once by `get_settings()` over the same env keys, `service/composition/` the
+  only place wiring happens, `service/models/` the pydantic models, `service/configuration/`
+  process config (`env.py` survives as the `Env` compatibility shim), `service/shared/`
+  cross-cutting helpers, and `service/infrastructure/` the swappable I/O — cache, storage,
+  mail, uploads, database, celery, and `ml_sidecar.py`, the HTTP client for `ml/`. Persistence
+  is raw PyMySQL against MySQL. It contains **no** GPU framework:
+  `scripts/check_ml_boundary.py` fails a commit that puts torch back in here.
+- `frontend/` — Create React App (react-scripts 5.0.1, React 18, Chakra UI), layered
+  pages → features → shared. `src/pages/` composes screens, `src/features/<domain>/` owns
+  one domain's components and is imported through its `index.js` barrel, `src/shared/` holds
+  the common components, hooks, auth helpers, the one API layer, and `src/app/` the router
+  (`router/index.js` building the hash router, `router/routes.jsx` the table,
+  `router/guards.jsx` the access checks) plus the providers. Route paths, roles and
+  pagination numbers come from `src/constants.js`. `jsconfig.json` sets `baseUrl` to `src`,
+  so imports are absolute from `src/` and no file climbs with `../../../`. The axios
+  instance is `src/shared/api/instance.js`, the base URL is resolved in
   `src/shared/api/apiConsts.js`. The router is a **hash** router (`createHashRouter`),
-  because the bundle is static files behind nginx with no SPA fallback for deep paths.
+  because the bundle is static files behind nginx with no SPA fallback for deep paths, and
+  every file under `src/` must be reachable from `src/index.js` —
+  `npm run find:unreachable` fails the build if one is not. `frontend/DESIGN.md` is the
+  canonical description of the tree and the theme contract.
 - `ml/` — the inference sidecar (Python 3.9, FastAPI, CUDA image) and the **owner of the
   model code**, in the flat layout the other sidecars use: `service/app.py` is the whole
   HTTP surface (`/health`, `/v1/capabilities`, `/v1/embed/video`, `/v1/embed/text`,
@@ -55,7 +75,7 @@ bash scripts/adopt-submodules.sh           # write .gitmodules, stage all three 
 The script reads each `origin` URL and the branch that checkout is on (`backend`,
 `frontend`, `ml`), records `branch = <name>` in `.gitmodules` so `git submodule update --remote`
 follows the right line, and refuses a dirty or detached service checkout rather than
-quietly adopting `HEAD` (`scripts/adopt-submodules.sh:218-232`). It is idempotent and
+quietly adopting `HEAD` (`scripts/adopt-submodules.sh:200-233`). It is idempotent and
 never commits. After it runs, `git status` shows `.gitmodules` plus three `160000` entries;
 review that diff and commit it. From then on the root repo tracks one commit per service
 and a pointer bump is the only way a submodule change reaches the superproject.
@@ -118,7 +138,7 @@ ML sidecar, inside `ml/`:
   gone and `scripts/check_ml_boundary.py` fails a commit that brings it back.
 - `make ml-test` — the contract tests, and the form all three callers agree on: the
   Makefile target, the CI job and the docs all run `python -m pytest ml/tests -q` from
-  the **repository root** (`Makefile:306-307`, `.github/workflows/ci.yml:471`). `cd ml &&
+  the **repository root** (`Makefile:350-351`, `.github/workflows/ci.yml:534`). `cd ml &&
   python -m pytest tests -q` gives the same result, because `ml/pyproject.toml` sets
   `pythonpath = ["service"]` and `testpaths = ["tests"]`; running from the root is
   preferred so `backend/tests/` fixtures cannot leak in. They must pass with **no**
@@ -130,36 +150,64 @@ ML sidecar, inside `ml/`:
 
 ## Coding Style & Naming Conventions
 
-Python targets 3.9, four-space indentation. Keep route handlers thin — the modules in
-`service/api/routers/` validate the request and delegate; SQL belongs in
-`service/repositories/`, rules in `service/services/`, and swappable I/O in
-`service/infrastructure/`. A module may import downward (api → services → repositories →
-infrastructure) and never back up. Use the `Env` helper
-(`service/configuration/env.py`) for configuration instead of reading `os.environ`
-directly, so behavior stays consistent with how the container injects values, and take
-loggers from `service/configuration/logging.py` (`get_logger`) instead of calling
-`logging.getLogger` yourself.
+Python targets 3.9, four-space indentation. Put a change inside the slice that owns it:
+`service/services/<domain>/` holds `application/`, `persistence/` and `presentation/`
+(twelve slices have the router; `matching` keeps an empty `persistence/` placeholder and
+`jobs` has neither), and a module may import downward — presentation → application →
+persistence — never back up and never sideways into another slice's layers; `shared/`
+imports no framework, and a slice that ever does need entities gets a framework-free
+`domain/` of its own. **A rule that fails raises a domain error, not an
+`HTTPException`**: `service/shared/errors.py` defines `ServiceError(status_code, detail)`
+with `NotFoundError`, `ConflictError`, `InvalidPayloadError` and `UnauthorizedError`
+underneath it, and the one exception handler registered on the `/server` sub-app turns any of
+them into `{'detail': ...}` with its own status. That is the only place HTTP status codes are
+decided; an application module that imports `fastapi` is a bug, and so is a handler that
+returns a tuple because it wanted a 202. Wiring belongs in `service/composition/`, the only
+place a concrete cache, storage backend, mailer, job runner or service object is constructed.
+Route handlers validate and delegate, SQL belongs in `persistence/`, rules in
+`application/`. A layer directory that contains only `__init__.py` is a placeholder, not a
+to-do list. Read deployment configuration through `service/settings.py` (a frozen dataclass
+built once by `get_settings()`) — or through the `Env` shim
+(`service/configuration/env.py`) where code predates it — instead of `os.environ`, and take
+loggers from `service/configuration/logging.py` (`get_logger`). Two gates enforce the shape:
+`backend/tests/test_service_boundary.py` with the suite, and
+`backend/scripts/check_backend_layout.py` without it — the second is the one
+`make structure` runs, which is what makes the layout checkable in a commit hook that has
+no virtualenv.
 
-React uses function components, two-space indentation, and `.jsx` for components.
-Reuse Chakra primitives and `src/theme/theme.js` tokens rather than hard-coded colors.
-Network calls go through `src/shared/api/instance.js` and the route table in
-`src/shared/api/apiConsts.js` — do not create a second axios client with its own base
-URL. Import from the `src/` root (`shared/components/...`), never by climbing out of
-the current directory.
+React uses function components, two-space indentation, and `.jsx` for components. The tree
+is layered pages → features → shared: `src/pages/` composes screens, `src/features/<domain>/`
+owns one domain's components and is imported through its `index.js` barrel (never by
+reaching into `components/`), and `src/shared/` is the common layer. Reuse Chakra
+primitives and the raw tokens in `src/theme/tokens.js` (mapped onto Chakra scales by
+`src/theme/theme.js`, widget recipes in `src/theme/components.js`) rather than hard-coded
+colors, and take route paths and pagination numbers from `src/constants.js`. Network calls
+go through `src/shared/api/instance.js` and the route table in `src/shared/api/apiConsts.js`
+— do not create a second axios client with its own base URL. Imports are absolute from
+`src/` (`shared/components/...`), never by climbing out of the current directory, and a
+root module is written `constants.js` rather than a bare `constants`, because Jest resolves
+the bare specifier differently from webpack.
 
 Shell and Python files are LF-only; `.gitattributes` enforces this. A CRLF
 `#!/bin/bash` breaks container entrypoints with `bash\r: No such file or directory`.
 
 ## Testing Guidelines
 
-Place backend tests under `backend/tests/` as `test_*.py`. Frontend unit tests live
-beside the code as `*.test.js` (CRA convention) — `src/App.test.js` is the existing
-example. Add regression coverage when you touch auth (`service/api/security.py`),
-upload handling (`service/infrastructure/uploads.py`), the ML boundary
-(`service/services/ml_client.py`), or URL construction (`service/shared/urls.py`),
+Place backend tests under `backend/tests/` as `test_*.py`. Two of them are structural and
+must stay green while you move code: `test_service_boundary.py` (the slice layout and the
+import direction) and `test_import_without_infra.py` (the app imports with no MySQL, no
+`.env` and no torch). Frontend unit tests live beside the code as `*.test.js` (CRA
+convention) — `src/App.test.js` is the existing example. Add regression coverage when you
+touch auth (`service/api/security.py`), upload handling
+(`service/infrastructure/uploads.py`), the ML boundary
+(`service/infrastructure/ml_sidecar.py`), or URL construction (`service/shared/urls.py`),
 because those paths are shared by every screen. Backend tests import the package, not a
 script: `conftest.py` puts `backend/` on the path, so `python -m pytest -q` from
-`backend/` is the whole command.
+`backend/` is the whole command, and `python scripts/check_backend_layout.py` runs the
+layout rules without pytest. The route surface is pinned by
+`backend/tests/snapshots/critical_endpoint_openapi.json`: a test compares the generated
+document against it, and you regenerate it with `python -m tests.snapshot_tool --write`
+(from `backend/`) only when the contract change is intended.
 
 Keep assertions deterministic: do not depend on network access, on pretrained model
 weights, or on a live MySQL instance in unit tests. Integration behavior against the
@@ -186,7 +234,10 @@ exists because the alternative silently loses work.
   integrity, api-prefix contract, dockerfile pinning, healthcheck coverage, generated
   state, the ML boundary — and fails on the first violation it finds. `make structure`
   is the cheap subset for a move inside the tree: `scripts/check_ml_boundary.py` plus any
-  `scripts/check_*structure*.py`, no docker and no env file needed. `make lint` is a
+  `scripts/check_*structure*.py`, then the two submodule layout guards
+  (`backend/scripts/check_backend_layout.py`, `ml/scripts/check_ml_service_layout.py`,
+  skipped when the checkout does not have them) — no docker and no env file needed
+  (`Makefile:280-282`). `make lint` is a
   different gate: it runs `pre-commit run --all-files`, which invokes those same guards
   plus the formatting, YAML/JSON, gitleaks and large-file hooks. Both are required before
   a PR; `make lint` fails loudly when `pre-commit` is not installed instead of reporting

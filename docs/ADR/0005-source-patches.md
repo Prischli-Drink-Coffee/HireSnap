@@ -3,8 +3,11 @@
 - **Status:** accepted
 - **Date:** 2026-11-07
 - **Affects:** `frontend/src/shared/api/apiConsts.js`, `backend/service/shared/urls.py`,
-  `backend/service/repositories/{candidate_vacancy,personality_candidate,personality_vacancy}_repository.py`
-  — the paths as they read after [ADR/0007](0007-sidecar-package-layout.md) moved both trees
+  and the three vacancy/personality repositories — the paths as they read after
+  [ADR/0007](0007-sidecar-package-layout.md) moved both trees. [ADR/0008](0008-vertical-slice-services.md)
+  moved the repositories again, into their slices' `persistence/` directories
+  (`service/services/{candidate_vacancies,personality_candidates,personality_vacancies}/persistence/`);
+  the patches themselves are unchanged and only their location reads differently now
 
 ## Context
 
@@ -31,8 +34,8 @@ this work.
 |------|--------|---------------|
 | `frontend/src/shared/api/apiConsts.js` | Precedence: `REACT_APP_BASE_URL` → same-origin `/api/` when the host is not loopback → the original `http://localhost:8080/api/` | With no new variable and a `localhost` browser, behavior is byte-identical |
 | `backend/service/shared/urls.py` | Prefer a non-empty `PUBLIC_BASE_URL` (trailing slashes stripped), else the original `HOST`:`SERVER_PORT` expression | Unset variable reproduces the old output exactly |
-| `backend/service/repositories/candidate_vacancy_repository.py` | Add `from fastapi import HTTPException, status` | No behavior change where the guard already worked |
-| `backend/service/repositories/personality_candidate_repository.py`, `.../personality_vacancy_repository.py` | Same one-line import | Same |
+| `service/services/candidate_vacancies/persistence/candidate_vacancy_repository.py` | Add `from fastapi import HTTPException, status` | No behavior change where the guard already worked |
+| `service/services/personality_candidates/persistence/personality_candidate_repository.py`, `service/services/personality_vacancies/persistence/personality_vacancy_repository.py` | Same one-line import | Same |
 
 ## Rationale
 

@@ -98,7 +98,7 @@ on a machine that has internet.
 - Because `ml` downloads its own weights, the two host directories are mounted into it
   and nowhere else: the torch checkpoints from `infra/models/`
   (`docker/docker-compose.yaml:520-521`) and the Hugging Face cache through the `hf_cache`
-  named volume, which only `ml` mounts (`:525`). Before the split the API mounted the same
+  named volume, which only `ml` mounts (`:529`). Before the split the API mounted the same
   two directories and also held the cache, because it could run the pipeline itself. With
   the in-process path gone the API opens no model file, so the mount moved with the code
   (`docker/docker-compose.yaml:132-137`).

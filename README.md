@@ -21,13 +21,14 @@ documentation are owned by the superproject and are described below.
 > five-service core (`mysql`, `backend`, `frontend`, `gateway`, `ml`). `ml/` is **not**
 > one of those profiles: it is a core service of both stacks, because the API has no
 > in-process inference path left to fall back to. Inference is one HTTP call from
-> `backend/service/services/ml_client.py`; whether the host has a GPU is a separate switch
-> (`GPU=1`, which merges a one-block override file). It wraps the existing application
-> code without restructuring it apart from that boundary, which
+> `backend/service/infrastructure/ml_sidecar.py`; whether the host has a GPU is a
+> separate switch (`GPU=1`, which merges a one-block override file). It wraps the existing
+> application code without restructuring it apart from that boundary, which
 > [ADR/0006](docs/ADR/0006-ml-sidecar-owns-inference.md) records; the application's known
 > defects are documented rather than silently patched. The backend carries a platform layer
 > (cache, storage, mail, celery) whose facades and workers are wired while its business
-> **call sites are still thin** — no route uses them yet. Read
+> **call sites are still thin** — no route uses them yet, and the vertical slices are a
+> package boundary rather than an aggregate model (§25 of the same file). Read
 > [docs/KNOWN_GAPS.md](docs/KNOWN_GAPS.md) before you deploy, and
 > [docs/RUNBOOK.md](docs/RUNBOOK.md) before you operate it.
 
@@ -35,8 +36,8 @@ documentation are owned by the superproject and are described below.
 
 | Path                    | Owned by    | What lives there |
 |-------------------------|-------------|------------------|
-| `backend/`             | submodule   | FastAPI app as a Python package: `service/main.py` is the entry point, `service/api/` the HTTP layer, `service/services/` the rules, `service/repositories/` the SQL, `service/infrastructure/` the swappable I/O. Schema dump `database/HireSnap.sql`; tests under `tests/`, run as `python -m pytest -q` from `backend/`. |
-| `frontend/`            | submodule   | CRA app. `npm start` / `npm run build`; `jsconfig.json` makes imports absolute from `src/`; API base URL in `frontend/src/shared/api/apiConsts.js` and the single axios client in `frontend/src/shared/api/instance.js`. |
+| `backend/`             | submodule   | FastAPI app in **vertical slices**: `service/services/<domain>/` holds one directory per business domain, with `domain/`, `application/` (the rules), `persistence/` (the SQL) and `presentation/` (the router and its schemas) inside it. `service/main.py` is the entry point, `service/api/` the HTTP assembly, `service/composition/` the only wiring root, `service/models/` the pydantic models. Schema dump `database/HireSnap.sql`; tests under `tests/`, run as `python -m pytest -q` from `backend/`. |
+| `frontend/`            | submodule   | CRA app layered pages → features → shared: `src/pages/` composes screens, `src/features/<domain>/` owns one domain's components behind an `index.js` barrel, `src/shared/` is the common layer and the single API client. `npm start` / `npm run build`; `jsconfig.json` makes imports absolute from `src/`; API base URL in `frontend/src/shared/api/apiConsts.js`. |
 | `docker/`              | superproject| Stack code: `docker-compose.yaml` (prod), `docker-compose.dev.yaml` (dev), `.env.example` (the only committed manifest), `run.sh`, `build.sh`, `sync_env.py`, `sidecar_profiles.sh`, `compose_preflight.sh`. |
 | `infra/`               | superproject| Host-mounted configuration and data: `infra/nginx/` (gateway config, templates, certs), `infra/mysql/` (init SQL), `infra/storage/` (uploads, embeddings), `infra/certs/` (JWT keys). |
 | `backend/docker/`      | submodule   | Backend `Dockerfile` (build context is the repo root, `..`). |
@@ -120,10 +121,11 @@ command-line flag — `docker/run.sh` reads them and passes the matching `--prof
 `ml/docker/Dockerfile` with the build context set to `../ml`, so the image can only ever
 see its own submodule. It listens on **8080**, publishes no host port in either mode, sits
 on both networks and is stateless. The API has no in-process inference path left to fall
-back to: `backend/service/services/ml_client.py` posts to `ML_SERVICE_URL`, taken from
-`ML__SERVICE_URL` in the manifest (`http://ml:8080` there, and `docker/sidecar_profiles.sh`
-defaults it to the same when a deployment file leaves it empty). Why the boundary is
-drawn there is [ADR/0006](docs/ADR/0006-ml-sidecar-owns-inference.md).
+back to: `backend/service/infrastructure/ml_sidecar.py` posts to `ML_SERVICE_URL`,
+taken from `ML__SERVICE_URL` in the manifest (`http://ml:8080` there, and
+`docker/sidecar_profiles.sh` defaults it to the same when a deployment file leaves it
+empty). Why the boundary is drawn there is
+[ADR/0006](docs/ADR/0006-ml-sidecar-owns-inference.md).
 
 The defaults encode risk: the two cheap stateless containers start unless you say
 otherwise, and the two that need extra infrastructure do not. One ordering rule is worth
@@ -150,9 +152,8 @@ The backend also carries a **platform layer** (cache facade, object storage, mai
 workers). The facades and the workers are wired and reachable; the **call sites are still
 thin** — no business route reads the cache, stores to the bucket, or sends mail yet — so
 turning a flag on buys working infrastructure, not new behaviour. Job state is the one
-exception worth caring about: `CACHE=1` is what makes `jobs_services.status()` shared
-across processes. See
-[docs/KNOWN_GAPS.md §13](docs/KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)
+exception worth caring about: `CACHE=1` is what makes `JobService.status()` agree across
+processes. See [docs/KNOWN_GAPS.md §13](docs/KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)
 and the layer's own reference
 [backend/docs/PLATFORM_LAYER.md](backend/docs/PLATFORM_LAYER.md).
 

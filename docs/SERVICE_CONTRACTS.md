@@ -151,29 +151,35 @@ Rules:
 
 ### 2.2 What the backend actually returns (partial GAP)
 
-The application returns FastAPI's default error envelope, which is:
+The application answers with **`detail` alone, with no `error` code** — half of the
+contract above:
 
 ```json
 {"detail": "Vacancy not found"}
 ```
 
-That is, **`detail` alone, with no `error` code.** It matches the contract for exactly
-half of the fields. The behavior is at least consistent — the application raises
-`HTTPException(status_code=404, detail="Vacancy not found")` and similar across
-`backend/service/services/` — so clients can rely on `detail` being present and being a string.
+`detail` is therefore the field a client can rely on: it is always present and always a
+string. The `error` code is missing, and adding it is an application change recorded in
+[KNOWN_GAPS.md](KNOWN_GAPS.md#9-errors-have-no-stable-code) rather than done here.
 
-Observed detail strings today (from `backend/service/`):
+**How the envelope is produced.** A rule that fails raises a domain error, not a
+`HTTPException`: `service/shared/errors.py` defines `ServiceError(status_code, detail)`
+with `NotFoundError`, `ConflictError`, `InvalidPayloadError` and `UnauthorizedError`
+beneath it, and **one** handler registered on the `/server` sub-app renders any of them as
+`{"detail": <detail>}` with its own status. So `domain/` and `application/` modules import
+no HTTP framework — the framework is a leaf at the edge of the process — and the status
+each failure carries is decided in exactly one place. FastAPI's own request-validation
+failure is the one exception: it never becomes a `ServiceError` and keeps its `422`.
+
+Observed statuses and detail strings, unchanged by that refactor (preserving the wire
+contract beat tidying it):
 
 | Status | Detail strings in use |
 |--------|-----------------------|
-| 400 | Validation failures raised from the candidate and personality repositories. |
+| 400 | Validation failures from the candidate and personality repositories (`InvalidPayloadError`). |
 | 401 | `Invalid password`, `Invalid type user`, `User not found`, `Invalid token error`, `Have not access` |
 | 403 | `Invalid authentication scheme.`, `Invalid token or expired token.`, `Invalid authorization code.` |
-| 404 | `<Entity> not found` — Candidate vacancy, Embedding, File, Info candidate, Magic, Personality, Personality candidate, Personality vacancy, User, Vacancy |
-
-Adding the `error` code is an application change (a single exception handler would do
-it) and therefore outside this stack's mandate; it is listed in
-[KNOWN_GAPS.md](KNOWN_GAPS.md#9-errors-have-no-stable-code).
+| 404 | `<Entity> not found` — Candidate vacancy, Embedding, File, Info candidate, Magic, Personality, Personality candidate, Personality vacancy, User, Vacancy. **Also `Email already exist`**, which reads like a 409 and has always been a 404: the refactor keeps it because changing it would break every client that already special-cases the 404. |
 
 ### 2.3 What the gateway returns
 
@@ -243,7 +249,7 @@ client / SPA axios               (no timeout configured — browser default)
                ├── MySQL query          (no explicit budget)
                └── ML transport        connect 10 s / read 900 s
                                        ML_SERVICE_CONNECT_TIMEOUT / ML_SERVICE_TIMEOUT
-                                       (docker/.env.example:265,:269)
+                                       (docker/.env.example:269,:273)
    └── gateway client_body_timeout      10 s     infra/nginx/nginx.conf:72
    └── gateway client_header_timeout    10 s     infra/nginx/nginx.conf:73
 ```
@@ -309,6 +315,21 @@ reference to align with, and so that an operator seeing `503` knows which layer 
 - Backwards compatibility is the frontend's problem: the SPA and the API are deployed
   together from the same superproject commit, so there is no independent client to keep
   compatible.
+- **The route surface is snapshotted.** `backend/tests/snapshots/critical_endpoint_openapi.json`
+  records the paths, methods, status codes and response models of the endpoints the SPA
+  calls, plus `/server/health`. A test regenerates the document from the running app and
+  compares it, so moving a route, renaming a field or changing a response model fails in the
+  backend suite instead of in a browser.
+- **Regenerating is a deliberate act**, and the command is run from `backend/`:
+
+  ```bash
+  python -m tests.snapshot_tool            # compare; what the test and CI do
+  python -m tests.snapshot_tool --write    # accept the new contract, then read the diff
+  ```
+
+  The snapshot covers a chosen subset rather than the whole generated document: a full dump
+  changes whenever a description is reworded, which trains a reviewer to accept it without
+  reading. `docs/RUNBOOK.md` §16.1 has the same recipe from the operator's side.
 
 ## 6. Gateway-specific contract
 

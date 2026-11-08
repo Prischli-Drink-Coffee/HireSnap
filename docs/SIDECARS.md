@@ -127,10 +127,11 @@ so enabling the profile does not speed up a single request today.
 (`docker/sidecar_profiles.sh:129-134`), so the facade the workers already use switches
 from a per-process dict to shared state. That is the difference between a job id that only
 the process that created it can read and one any container can read — see
-[RUNBOOK.md §15.1](RUNBOOK.md#151-is-a-worker-consuming) and `jobs_services.status()`.
+[RUNBOOK.md §15.1](RUNBOOK.md#151-is-a-worker-consuming) and
+the jobs slice's `JobService.status()`.
 
 **It is also the celery broker and result backend** (`CELERY__BROKER_URL` defaults to
-`redis://cache:6379/1` in the manifest, `docker/.env.example:236`). That is why
+`redis://cache:6379/1` in the manifest, `docker/.env.example:330`). That is why
 `CELERY=1` forces `CACHE=1` with a warning rather than starting workers with no broker
 (`docker/sidecar_profiles.sh:52-59`).
 
@@ -138,7 +139,7 @@ the process that created it can read and one any container can read — see
 
 - You wire a route to the cache facade (personality catalogues and vacancy lists are the
   obvious candidates — they are re-queried per request).
-- You need job state to survive a restart (`jobs_services.status` with the memory backend
+- You need job state to survive a restart (`JobService.status()` with the memory backend
   only knows about jobs enqueued in the same process).
 - You run more than one `backend` container and need shared rate-limit counters; an
   in-process counter cannot work across processes.
@@ -209,9 +210,9 @@ serve logins and uploads but cannot produce a single embedding.
 | Command | `CMD ["python3", "app.py"]` — never `uvicorn app:app` | `ml/docker/Dockerfile:130` (why: `:124-129`) |
 | Workdir | `/app/service`, `PYTHONPATH=/app/service` — the modules are flat, there is no package | `ml/docker/Dockerfile:74`, `:112` |
 | User | `app` (uid/gid 999) | `ml/docker/Dockerfile:88-89`, `:113` |
-| Port | `8080` inside the network (`ML_PORT`); `EXPOSE 8080`; **published nowhere** | `ml/docker/Dockerfile:115`, `docker/.env.example:256` |
+| Port | `8080` inside the network (`ML_PORT`); `EXPOSE 8080`; **published nowhere** | `ml/docker/Dockerfile:115`, `docker/.env.example:260` |
 | State | **stateless**; request scratch in `/app/ml-scratch`, nothing else to persist | `ml/service/app.py:197-215` |
-| Profile | `profiles: ["prod"]` / `["dev"]` — the core profile, not a flag | `docker/docker-compose.yaml:444`, `docker/docker-compose.dev.yaml:340` |
+| Profile | `profiles: ["prod"]` / `["dev"]` — the core profile, not a flag | `docker/docker-compose.yaml:444`, `docker/docker-compose.dev.yaml:341` |
 | Healthcheck | image: `curl -fsS http://127.0.0.1:${ML_PORT:-8080}/health`, 30s / 10s / **start period 60s** / 5 (`ml/docker/Dockerfile:121-122`); both compose files raise the start period to **300s** | `docker/docker-compose.yaml:538-546`, `docker/docker-compose.dev.yaml:399-409` |
 
 > **Compose wiring.** Both stacks build the sidecar from `../ml` with
@@ -250,7 +251,7 @@ Three properties of that contract are load-bearing for the deployment:
    `POST /v1/transcribe` read the body as `application/octet-stream` (a multipart `file`
    field is also accepted), because the sidecar has no access to the backend's storage
    mount and must not be given one. Filename metadata travels in `X-Filename`
-   (`backend/service/services/ml_client.py:265-268`).
+   (`backend/service/infrastructure/ml_sidecar.py:265-268`).
 3. **Errors are `{"error", "detail"}` with a stable code.** The registry is closed
    (`ml/service/app.py:64-76`): `invalid_request` 422, `empty_body` 400,
    `request_too_large` 413, `unsupported_media_type` 415, `not_found` 404,
@@ -264,21 +265,40 @@ compose network and has no authentication of its own.
 
 ### 4.2 How the backend reaches it
 
-`backend/service/services/ml_client.py` is **HTTP-only**. There is no second transport and no
-import of the pipeline anywhere in `backend/`:
+`backend/service/infrastructure/ml_sidecar.py` is **HTTP-only**. There is no second
+transport and no import of the pipeline anywhere in `backend/`. The module is
+infrastructure rather than a business rule - it adapts another process's HTTP API, which is
+the definition of an adapter, and it is the only reason the API image carries no GPU
+framework at all ([ADR/0008](ADR/0008-vertical-slice-services.md) records the move from
+`service/services/`).
 
 | `ML_SERVICE_URL` (manifest: `ML__SERVICE_URL`) | Behavior |
 |------------------------------------------------|----------|
-| set — the manifest ships `http://ml:8080` | POST to the sidecar |
-| unset, empty, or hand-emptied | falls back to the client default `http://127.0.0.1:8080` (`backend/service/services/ml_client.py:65`), which **inside the API container is the API itself** — every upload then fails with `ml_service_unreachable` |
+| set - the manifest ships `http://ml:8080` | POST to the sidecar |
+| unset, empty, or hand-emptied | falls back to the client default `http://127.0.0.1:8080` (`backend/service/infrastructure/ml_sidecar.py:65`), which **inside the API container is the API itself** - every upload then fails with `ml_service_unreachable` |
 
 | Property | Value | Evidence |
 |----------|-------|----------|
-| Variable | `ML__SERVICE_URL` → `ML_SERVICE_URL`, read per call | `backend/service/services/ml_client.py:101-120` |
-| Connect / read timeout | 10 s / 900 s | `backend/service/services/ml_client.py:59-60`, `:134-146` |
-| Errors | `MLUnavailable` / `MLRejected` / `MLContractError` | `backend/service/services/ml_client.py:149-161` |
-| Transport report | always `"http"`; the URL can still be wrong | `backend/service/services/ml_client.py:418-434` |
-| Only wired call site | `upload_video()` → `get_user_embedding()` | `service/services/matching.py:202` |
+| Variable | `ML__SERVICE_URL` → `ML_SERVICE_URL`, read per call | `backend/service/infrastructure/ml_sidecar.py:101-120` |
+| Connect / read timeout | 10 s / 900 s | `backend/service/infrastructure/ml_sidecar.py:59-60`, `:134-146` |
+| Errors | `MLUnavailable` / `MLRejected` / `MLContractError`, all under `MLClientError` | `backend/service/infrastructure/ml_sidecar.py:71`, `:86`, `:90`, `:94` |
+| Transport report | always `"http"`; the URL can still be wrong | `backend/service/infrastructure/ml_sidecar.py:414-431` |
+| Only wired call site | `upload_video()` → `get_user_embedding()` | the `matching` slice's application service (under `backend/service/services/matching/`) |
+
+**Where the call sits in the tree is part of the contract.** Under
+[ADR/0008](ADR/0008-vertical-slice-services.md) the backend is thirteen vertical slices, and
+none of them may reach a GPU framework or even import the client at the wrong layer:
+`service/infrastructure/ml_sidecar.py` is infrastructure, the `matching` slice's
+`application/matching_service.py:42` imports `get_user_embedding` from it, and the router in
+`presentation/routers/inference_api/` only validates and delegates through
+`Depends(get_matching_service)`. The gates enforce the shape from two directions:
+`scripts/check_ml_boundary.py` fails a commit that puts `torch` back in `backend/`, and
+`backend/tests/test_service_boundary.py` fails a `presentation/` module that reaches into
+`persistence/` or `infrastructure/` (`test_service_boundary.py:14-18`) - a router may import
+its own slice's application layer and the composition accessor, and nothing below them. A new
+inference route therefore has one place to call the sidecar, the `matching` slice's
+application service, and a handler that imports `ml_sidecar` itself is the mistake that rule
+is built to catch.
 
 The 900-second read timeout is not generosity: a long video embedding runs for minutes, and
 the gateway's `proxy_read_timeout 86400s` (`infra/nginx/nginx.conf:120-122`) is sized for
@@ -286,7 +306,7 @@ the same reason. The client timeout is deliberately shorter so a hung sidecar ra
 `MLUnavailable` instead of the gateway severing a request the backend still believes in.
 
 **What this costs.** `ml` is now the only inference path, so while it is down or still
-starting, uploads fail — a 503 `service_unavailable` when it is up but degraded, a 503
+starting, uploads fail - a 503 `service_unavailable` when it is up but degraded, a 503
 `ml_service_unreachable` when it cannot be reached at all. Every other route keeps working.
 See [KNOWN_GAPS.md §23](KNOWN_GAPS.md#23-the-sidecar-is-the-only-inference-path-and-it-serialises-gpu-work).
 
@@ -328,11 +348,11 @@ satisfy makes `up` fail. `nvidia-container-toolkit` is the requirement, and
 
 **Nothing in the API can infer in-process**, so the interesting question is not *whether*
 the sidecar is used but *which URL the client dials*. `describe_transport()` inside the API
-container answers it (`backend/service/services/ml_client.py:418-434`):
+container answers it (`backend/service/infrastructure/ml_sidecar.py:414-431`):
 
 ```bash
 ./docker/run.sh --dev exec backend python -c \
-  "import json;from service.services.ml_client import describe_transport;print(json.dumps(describe_transport()))"
+  "import json;from service.infrastructure.ml_sidecar import describe_transport;print(json.dumps(describe_transport()))"
 #   {"transport": "http", "service_url": "http://ml:8080", "timeouts": [10.0, 900.0]}
 ```
 

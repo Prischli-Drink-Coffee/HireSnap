@@ -208,7 +208,7 @@ log file.
   `../backend/service` onto `/app/service` (`docker/docker-compose.dev.yaml:91`) — because
   `/app/service` is the only importable package in the image and uvicorn's reloader only
   watches paths it can stat. The dev `ml` service binds `../ml/service:/app/service:ro`
-  (`docker/docker-compose.dev.yaml:378`). An edit to `ml/service/app.py`, `engine.py` or
+  (`docker/docker-compose.dev.yaml:379`). An edit to `ml/service/app.py`, `engine.py` or
   `settings.py`, or to any module under `backend/service/`, is therefore picked up on the next
   request instead of the next image build. Earlier revisions bound `backend/src`,
   `backend/env.py` and `backend/create_sql.py` individually; all three are deleted, and the
@@ -261,7 +261,7 @@ failure to a bare key name for exactly this reason — it captures both streams 
 
 **The backend does have a health route.** `GET /server/health` answers
 `{"status":"ok","service":"backend","version":"<__version__>"}` — three keys, no I/O,
-registered on the `/server` sub-app (`backend/service/api/app.py:88-100`) and reached through
+registered on the `/server` sub-app (`backend/service/api/app.py:136-151`) and reached through
 the gateway as `/api/health`. Both images probe it: `backend/docker/Dockerfile:229-230`
 (`--start-period=180s`) and the compose overrides at
 `docker/docker-compose.yaml:272-282`. It replaced the `/server/openapi.json` probe because
@@ -443,7 +443,7 @@ act, never a side effect of stopping a stack.
 
 | Mount | Host path | Container path | Needed by | Failure mode if missing |
 |-------|-----------|----------------|-----------|-------------------------|
-| JWT keys | `infra/certs/` | `/app/secrets/certs` (ro) | every authenticated route | The pair is resolved from `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH`, which the manifest points at `/app/secrets/certs/*.pem` (`docker/.env.example:88`, `:90`), read before the packaged fallback (`backend/service/domain/models.py:37-48`, `:85-88`). Missing keys are not an import failure — signing and verifying fail, so login and every guarded route answer 500. |
+| JWT keys | `infra/certs/` | `/app/secrets/certs` (ro) | every authenticated route | The pair is resolved from `JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH`, which the manifest points at `/app/secrets/certs/*.pem` (`docker/.env.example:92`, `:94`), read before the packaged fallback (the `_key_path()` helper in `backend/service/models/auth_models.py`). Missing keys are not an import failure — signing and verifying fail, so login and every guarded route answer 500. |
 | Uploads and embeddings | `infra/storage/` | `$DATA_PATH` (`/app/data`) | upload, embedding, media | Uploads 500; `/data/` returns 404. |
 | Model weights | `infra/models/weights/` | `/app/models/weights` (ro) | **`ml` only** | `Unet3D.pth` is missing: `/health` still answers but `/v1/embed/video` returns 503 and names the path. |
 | Pretrained checkpoints | `infra/models/pretrained_ckpts/` | `/app/models/pretrained_ckpts` (ro) | **`ml` only** | The Cosmos tokenizer will not load; the first embedding returns 503. |
@@ -471,9 +471,9 @@ openssl rsa -pubout -in infra/certs/jwt-private.pem \
 chmod 600 infra/certs/jwt-private.pem
 ```
 
-The filenames are fixed by the application (`backend/service/domain/models.py:85-88`):
+The filenames are fixed by the application (`backend/service/models/auth_models.py`):
 `jwt-private.pem` and `jwt-public.pem`, algorithm `RS256`
-(`backend/service/domain/models.py:101`). A differently named file is simply not found
+(the model's `algoritm` field). A differently named file is simply not found
 unless the matching `JWT_*_KEY_PATH` variable points at it. Never overwrite an existing
 pair: replacing it invalidates every token already issued. Full key handling is in [SECRETS.md](SECRETS.md).
 
@@ -619,8 +619,8 @@ profile (`prod` / `dev`), and the API has no in-process inference path left to f
 ([ADR/0006](ADR/0006-ml-sidecar-owns-inference.md)). So the question is no longer "is it
 enabled" but "is the API dialling the right name, and did the request actually cross the
 network". `ML__SERVICE_URL` ships **non-empty** in the manifest — `http://ml:8080`
-(`docker/.env.example:263`) — because an empty value would fall through to the client's own
-default `http://127.0.0.1:8080` (`backend/service/services/ml_client.py:65`), where nothing is
+(`docker/.env.example:267`) — because an empty value would fall through to the client's own
+default `http://127.0.0.1:8080` (`backend/service/infrastructure/ml_sidecar.py:65`), where nothing is
 listening inside the API container.
 
 The decisive observation is a pair of log lines on both sides of one upload (§14.1 is the
@@ -644,7 +644,7 @@ docker compose -f docker/docker-compose.dev.yaml --env-file docker/.env.dev \
 ./docker/run.sh --dev exec ml curl -fsS http://127.0.0.1:8080/v1/capabilities
 ```
 
-Note the port in that probe: the sidecar listens on `ML_PORT` (`8080`, `docker/.env.example:256`)
+Note the port in that probe: the sidecar listens on `ML_PORT` (`8080`, `docker/.env.example:260`)
 and both compose files map it literally, so a wrong number inside the container is a
 connection refusal, not a timeout. `make ml-shell` gives you a shell in the same container.
 
@@ -654,7 +654,7 @@ strings from the code, so they are greppable:
 ```bash
 ./docker/run.sh --dev logs backend | grep -i 'ml sidecar'
 #   INFO  ml sidecar /v1/embed/video answered for abc.mp4 (4194304 bytes)
-#         ^ backend/service/services/ml_client.py:281-283
+#         ^ backend/service/infrastructure/ml_sidecar.py:278
 ./docker/run.sh --dev logs ml | grep -i 'embed/video'
 #   INFO  embed/video begin name=abc.mp4 bytes=4194304
 #   INFO  embed/video done name=abc.mp4 dim=384
@@ -688,11 +688,11 @@ on the next request, which is the value to quote in an incident note:
 
 ```bash
 ./docker/run.sh --dev exec backend python -c \
-  "import json;from service.services.ml_client import describe_transport;print(json.dumps(describe_transport()))"
+  "import json;from service.infrastructure.ml_sidecar import describe_transport;print(json.dumps(describe_transport()))"
 #   {"transport": "http", "service_url": "http://ml:8080", "timeouts": [10.0, 900.0]}
 ```
 
-`describe_transport()` (`backend/service/services/ml_client.py:418-434`) reports what
+`describe_transport()` (`backend/service/infrastructure/ml_sidecar.py:414-431`) reports what
 `service_url()` (`:101-120`) resolved, and it strips any userinfo from the URL before
 printing it, so the output is safe to paste. The `service_url` field is the part that can
 still be wrong: `transport` is always `http`, because the second transport no longer exists.
@@ -791,26 +791,36 @@ result backend:
 
 ### 15.2 Reading a job through the application
 
-The `jobs` contract is `queued -> running -> succeeded|failed` and it lives in
-`backend/service/services/jobs_services.py`. Nothing in the request path enqueues today, so the
-honest way to exercise it is a one-off in the API container:
+The `jobs` contract is `queued -> running -> succeeded|failed` and it lives in the `jobs`
+slice's application layer
+(`backend/service/services/jobs/application/job_service.py`). Nothing in the request path
+enqueues today, so the honest way to exercise it is a one-off in the API container:
 
 ```bash
 ./docker/run.sh --dev exec backend python -c "
-from service.services import jobs_services as j
-job = j.enqueue('hiresnap.health')          # inline when CELERY=0, queued when CELERY=1
+from service.composition import state
+service = state.get_job_service()
+job = service.enqueue('send_email', {'to': 'a@example.com', 'subject': 's', 'body': 'b'})
 print('job', job)
-print(j.status(job))
+print(service.status(job))
 "
 ```
 
+The four job kinds are `embed_candidate`, `reindex_embeddings`, `cleanup_orphan_uploads`
+and `send_email` (`job_service.py:64-69`; `supported_kinds()` at `job_service.py:122`
+returns the same list). `hiresnap.send_email` is a *task* name a worker registers, not a
+job kind — passing it to `enqueue()` raises `ValueError: unknown job kind
+'hiresnap.send_email'; supported: ...` (`job_service.py:212-215`). The module-level
+functions `enqueue()` and `status()` remain and are what the slice's own tests call, so
+`from service.services.jobs.application.job_service import enqueue, status` works too;
+the composition accessor is the form a route would use.
+
 With `CELERY=0` the call runs inline and `status()` answers immediately from the in-process
-cache. With `CELERY=1` the id goes to the broker and `status()` refreshes from the worker;
+cache. With `CELERY=1` the id goes to the broker and `status()` refreshes from the worker
+through `infrastructure/messaging/queue.py` (`CeleryDispatcher.state()` at `queue.py:72-85`);
 `None` means "unknown or expired" and is a real answer — with the `memory` cache backend a
-job is only visible to the process that created it
-(`backend/service/services/jobs_services.py:259-277`). `enqueue()` raises `ValueError` for an
-unknown kind and records `fallback_reason` when the broker refuses and the work ran inline
-instead (`:171-212`).
+job is only visible to the process that created it. When the broker refuses the submission the
+record keeps a `fallback_reason` and the work runs inline instead (`job_service.py:234-242`).
 
 ### 15.3 The mail inbox
 
@@ -835,3 +845,58 @@ Without the profile, `MAIL__BACKEND=file` appends to `MAIL__FILE_PATH` —
 Nothing in the API calls the mailer yet ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)),
 so an empty outbox is the expected state, not a broken configuration. A send failure is
 swallowed by design: mail is never allowed to fail a request.
+
+## 16. The backend's own gates, and the contract snapshot
+
+Two commands answer "is the backend tree still what the docs say it is", and neither needs
+Docker, an env file or a running stack:
+
+```bash
+cd backend
+python -m pytest -q                      # the suite, including the layout and boundary tests
+python scripts/check_backend_layout.py   # the same layout rules without pytest
+```
+
+`python scripts/check_backend_layout.py` is stdlib-only on purpose: it imports nothing from
+the application, so it runs before `pip install -r requirements.txt` has finished and on a
+machine whose interpreter has no pytest. It asserts eight rules
+(`backend/scripts/check_backend_layout.py:1-63`): `service/` is the only package at the
+backend root, no loose script or dump sits beside `pyproject.toml`, no flat module survives
+under `service/services/`, a directory under it that has any layer has `application/` and
+`presentation/` (`jobs` is the documented exception), every router module is named in the
+`ROUTERS` tuple, the retired `service/domain/`, `service/repositories/` and
+`service/api/routers/` stay gone, `models/` and `shared/` import no upward layer, and there is
+exactly one pytest configuration. The GPU boundary is the other guard, not this one. From the
+superproject root `make structure` runs both in one command (`Makefile:280-282`). That target is
+honest about absence in two different ways, and the difference matters: the superproject half
+errors when **no** layout guard is present (`scripts/check_ml_boundary.py` missing), while the
+submodule half prints `SKIP` for a `backend/scripts/check_backend_layout.py` that is not in this
+checkout — a checkout made without `--recursive` lacks the file, and a missing file is a missing
+prerequisite, not a broken tree.
+
+Use the repository's own interpreter if you have one — the tests need the application's
+dependencies, and a bare `python` on Windows is often the Microsoft Store stub that exits 49
+(§10). On this workstation that is
+`R:/HireSnap/.venv-refactor/Scripts/python.exe -m pytest -q` from `backend/`.
+
+### 16.1 Regenerating the OpenAPI contract snapshot
+
+The public shape of the API is recorded in
+`backend/tests/snapshots/critical_endpoint_openapi.json`: the paths, the methods, the
+status codes and the response models of the endpoints a client is allowed to depend on. A
+test compares the running app's document against that file, so a refactor that moves a route
+or renames a field fails locally instead of in a client.
+
+Regenerate it **only** when the contract change is intended, and read the diff before you
+commit it:
+
+```bash
+cd backend
+python -m tests.snapshot_tool --write     # rewrite the snapshot from the current app
+python -m tests.snapshot_tool             # check without writing: what CI and the test do
+```
+
+The snapshot is deliberately partial — it covers the endpoints the SPA calls and the
+health route, not the whole generated document — because a full dump changes on every
+description edit and would be re-accepted reflexively. [SERVICE_CONTRACTS.md §5](SERVICE_CONTRACTS.md#5-versioning)
+states the same rule from the client's side.

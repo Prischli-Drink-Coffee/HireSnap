@@ -24,10 +24,13 @@ Four measurable problems came out of that shape:
 | The sidecar image copied the other repository's source | `ml/Dockerfile:218-220` copies `backend/src` to `/app/src`, `backend/cosmos_tokenizer` to `/app/cosmos_tokenizer`, then only three `ml/*.py` files | The image tag pins `ml/`, but its behaviour is whatever `backend/src/modelling/**` was at build time. A backend commit changed the sidecar's output with no `ml/` change and no sidecar rebuild |
 | The backend image still installed the whole CUDA stack | `backend/requirements.txt` named torch, torchvision, transformers, sentence-transformers, moviepy, librosa, torchmetrics and torcheval for a REST API that, on the sidecar path, imports none of them | Deleting packages from a requirements file is a source change; no build arg, image layer or compose setting removes an import that is still in the code |
 
-The `sys.path` insert itself is `ml/engine.py:95-102`. Nothing here is a bug in the sense
-of a wrong line — every piece was defensible when `ml/` was a directory inside the backend.
-The defect is the ownership: two deployables, one copy of the code, and the copy was
-resolved by path ordering at runtime.
+The `sys.path` insert itself was `ml/engine.py:95-102`. **The paths in the table above are
+the ones the defect had at the time.** `ml/engine.py` is now `ml/service/engine.py`,
+`user_embedding.py` is `ml/service/user_embedding.py`, and
+`backend/src/services/ml_client.py` is `backend/service/infrastructure/ml_sidecar.py`.
+Nothing here was a bug in the sense of a wrong line — every piece was defensible when `ml/`
+was a directory inside the backend. The defect was the ownership: two deployables, one copy
+of the code, and the copy resolved by path ordering at runtime.
 
 ## Decision
 
@@ -42,7 +45,7 @@ modules under `ml/service/`, in the layout the GPTHub sidecar uses:
 | The model code moves into `ml/service/` | `app.py`, `engine.py`, `settings.py`, `frames.py`, `text_embedding.py`, `video_embedding.py`, `video_to_text.py`, `user_embedding.py` and `cosmos_tokenizer/`, imported as top-level modules — no `src.` prefix, no `sys.path` insert |
 | The shim goes | The `sys.path` insert and the AST rewrite are deleted. The module-scope demo call is replaced by a `if __name__ == "__main__":` guard, and the checkpoint path is read from configuration instead of the working directory, so `_ensure_checkpoint_layout` has nothing left to work around |
 | `backend/` loses the pipeline | `backend/src/modelling/` and `backend/cosmos_tokenizer/` are deleted; `backend/src/pipeline/train.py` goes with them; the `torch` import in `src/utils/seed.py` becomes optional; `backend/requirements.txt` drops the ML stack and keeps `numpy`, `pandas` and `scikit-learn`, because candidate–vacancy matching is business logic |
-| The client is HTTP-only | `backend/src/services/ml_client.py` keeps its public functions and drops the in-process branch. `ML_SERVICE_URL` unset now means `http://127.0.0.1:8080` (`ml_client.py:65`), not "import torch here" |
+| The client is HTTP-only | `backend/src/services/ml_client.py` keeps its public functions and drops the in-process branch. `ML_SERVICE_URL` unset now means `http://127.0.0.1:8080` (`backend/service/infrastructure/ml_sidecar.py:65` today; the same constant sat at line 65 of the old `ml_client.py`), not "import torch here" |
 | `ml` becomes a core service | Both compose files build it from `context: ../ml`, `dockerfile: docker/Dockerfile`, on 8080, unpublished, on the `default` and `internal` networks — `profiles: ["prod"]` / `["dev"]` like the API, not an optional sidecar. The API and the three celery services take `ML__SERVICE_URL=http://ml:8080` and `depends_on: ml` with `condition: service_started` |
 | The GPU requirement becomes an override | `docker/docker-compose.gpu.yaml` holds the `deploy.resources.reservations.devices` block and is layered on when `GPU=1`; a CPU-only host runs the same stack with `GPU=0` and the sidecar answers `degraded` |
 | The boundary becomes executable | `scripts/check_ml_boundary.py` fails a commit when a module under `backend/src/` imports a GPU framework or the deleted `src.modelling`, when `backend/requirements.txt` names one of those distributions, or when either deleted tree reappears |
@@ -115,7 +118,7 @@ modules under `ml/service/`, in the layout the GPTHub sidecar uses:
   and the shim, and the reason this ADR exists is that the shim was the defect.
 - A change to the route surface now needs three edits in one commit: `ml/service/app.py`,
   `ml/README.md` and `ml/tests/test_contract.py`, plus the client's expectations in
-  `backend/service/services/ml_client.py` when the payload shape moves.
+  `backend/service/infrastructure/ml_sidecar.py` when the payload shape moves.
 
 ## Addendum — the backend package moved afterwards
 
@@ -124,16 +127,19 @@ changes; one path in it does. [ADR/0007](0007-sidecar-package-layout.md) moved
 `backend/src/` to `backend/service/` and gave the API a `create_app()` that imports with no
 MySQL, no `.env` and no GPU. The consequences for this ADR are mechanical:
 
-- The HTTP client this ADR keeps is now `backend/service/services/ml_client.py` (was
-  `backend/src/services/ml_client.py`). Its behaviour is unchanged: HTTP only, no in-process
-  branch, `ML_SERVICE_URL` unset meaning `http://127.0.0.1:8080`.
+- The HTTP client this ADR keeps is now `backend/service/infrastructure/ml_sidecar.py`
+  (was `backend/src/services/ml_client.py`, then `backend/service/services/ml_client.py`).
+  [ADR/0008](0008-vertical-slice-services.md) moved it out of `service/services/` because an
+  adapter to another process is infrastructure, not a business rule. Its behaviour is
+  unchanged: HTTP only, no in-process branch, `ML_SERVICE_URL` unset meaning
+  `http://127.0.0.1:8080`.
 - The guard that makes the boundary executable is unchanged in name and purpose
   (`scripts/check_ml_boundary.py`); its backend-side rule now reads `backend/service/`. The
   `src.modelling` / `backend/cosmos_tokenizer/` trees this ADR deleted must not reappear
   anywhere under `backend/`, and the guard fails the commit if they do.
 - The tests that assert the boundary is real moved with the package.
   `backend/tests/test_ml_client.py:174-202` starts a fresh interpreter, imports
-  `service.services.ml_client` and asserts that neither `torch` nor `src.modelling` reached
+  `service.infrastructure.ml_sidecar` and asserts that neither `torch` nor `src.modelling` reached
   `sys.modules` and that `service_url()` still falls back to `http://127.0.0.1:8080`; the
   test immediately after it parses the client's own AST, so a re-added import is caught on
   the line rather than in the graph. `backend/tests/test_import_without_infra.py:74-93`
