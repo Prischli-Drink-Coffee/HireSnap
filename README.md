@@ -206,7 +206,7 @@ superproject and no generated mirror of one.
   here it must be listed in the PR so it can be re-applied on the next vendoring.
 - Everything else in `service/` is first-party and is where a pipeline change belongs.
 - `backend/` keeps business logic only. It reaches this service over HTTP through
-  `backend/src/services/ml_client.py` and contains no ML import.
+  `backend/service/services/ml_client.py` and contains no ML import.
 
 **One sentence, because it is the invariant:** *`ml/` imports nothing from `../backend/`*
 - no `sys.path` insert, no `ML_BACKEND_ROOT`, no reach into `src.modelling`; the process
@@ -279,7 +279,7 @@ the defects instead, which is why the trees it came from are deleted:
 | a fresh `SentenceTransformer` per call | `modelling/get_text_embedding.py` | cached in `engine.py` (`service/text_embedding.py`) |
 
 `scripts/check_ml_boundary.py` enforces the result: no ML distribution in
-`backend/requirements.txt`, no ML import under `backend/src/`, no `sys.path` rewrite and
+`backend/requirements.txt`, no ML import under `backend/service/`, no `sys.path` rewrite and
 no reach into `backend/` from `ml/service/`, and neither of the deleted trees may
 reappear.
 

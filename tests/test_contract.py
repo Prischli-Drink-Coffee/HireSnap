@@ -422,7 +422,9 @@ def test_every_emitted_code_is_declared():
     assert "invalid_request" in app_module.ERROR_CODES
     assert "request_too_large" in app_module.ERROR_CODES
     assert "inference_failed" in app_module.ERROR_CODES
-    # Codes the transport in backend/src/services/ml_client.py maps by name.
+    # Codes the backend transport maps by name (backend/service/services/ml_client.py,
+    # a separate checkout - named here as prose only, this suite imports nothing
+    # from it).
     for required in ("service_unavailable", "request_too_large", "not_found"):
         assert required in app_module.ERROR_CODES
 

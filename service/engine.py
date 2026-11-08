@@ -24,7 +24,7 @@ different hat. Owning the modules outright is the honest version: one copy, in o
 repository, with those defects actually fixed (see the module docstrings for each).
 
 backend/ now holds business logic only: it calls this service over HTTP through
-backend/src/services/ml_client.py and contains no ML import at all, which is what
+service/services/ml_client.py and contains no ML import at all, which is what
 scripts/check_ml_boundary.py enforces.
 
 This module is the ONE place that decides whether a dependency is present, keeps
