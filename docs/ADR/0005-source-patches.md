@@ -63,9 +63,11 @@ this work.
 
 ## Consequences
 
-- The superproject's `git status` shows four modified files inside two submodules. That
-  is expected and is called out in [AGENTS.md](../../AGENTS.md): commit inside the submodule
-  first, then bump the pointer.
+- The six edited files are ordinary commits inside `backend/` and `frontend/`, landed
+  before the first superproject commit. The superproject's `git status` therefore shows a
+  clean tree and only the three gitlinks; any future re-application of these patches is a
+  fresh commit in the owning submodule followed by a pointer bump, per
+  [AGENTS.md](../../AGENTS.md).
 - The patches must be re-applied (or kept as a branch) if either repository is reset to
   upstream. [scripts/adopt-submodules.sh](../../scripts/adopt-submodules.sh) refuses to
   adopt a dirty checkout for exactly this reason.

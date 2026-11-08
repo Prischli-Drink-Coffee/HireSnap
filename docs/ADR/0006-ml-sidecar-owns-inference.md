@@ -91,17 +91,20 @@ modules under `ml/service/`, in the layout the GPTHub sidecar uses:
 ## Consequences
 
 - The superproject now has **three** submodules, and a change that touches the pipeline and
-  the API is two commits plus a pointer bump in each — the rule in
-  [AGENTS.md](../../AGENTS.md) applies to `ml/` exactly as it does to the other two.
-- `ml/` must be adopted before the first commit that references it; until
-  `scripts/adopt-submodules.sh` runs, `git status` shows an untracked directory and a
-  root-only commit would record nothing.
+  the API is one commit in each of two submodules plus one pointer bump in the
+  superproject — the rule in [AGENTS.md](../../AGENTS.md) applies to `ml/` exactly as it
+  does to the other two.
+- `ml/` had to be adopted before the first commit that referenced it, because until
+  `scripts/adopt-submodules.sh` ran, `git status` showed an untracked directory and a
+  root-only commit would have recorded nothing. Adoption is done: `.gitmodules` names all
+  three services and the root repo tracks three gitlinks.
 - **Accepted cost: the sidecar still serialises GPU work.** One uvicorn process, one model
   cache and one lock means one inference at a time; concurrent uploads queue
   ([KNOWN_GAPS.md §23](../KNOWN_GAPS.md#23-the-sidecar-is-the-only-inference-path-and-it-serialises-gpu-work)).
-- **Accepted cost: a CPU-only host is degraded, not equivalent.** With `GPU=0` the stack
-  starts and `/health` answers, but the video path answers `service_unavailable` because
-  `autocast` is unconditional ([KNOWN_GAPS.md §7](../KNOWN_GAPS.md#7-autocast-was-unconditional-fixed-the-cpu-path-is-real)).
+- **Accepted cost: a CPU-only host is slow, not equivalent.** With `GPU=0` the stack
+  starts, `/health` answers and the video path *works*, in float32 and minutes per video
+  instead of seconds, because the once-unconditional `autocast` is now decided per device
+  ([KNOWN_GAPS.md §7](../KNOWN_GAPS.md#7-autocast-was-unconditional-fixed-the-cpu-path-is-real)).
 - **Accepted cost: weights are still not in the repository.** A fresh host must be given
   `infra/models/weights` and `infra/models/pretrained_ckpts` before the video path works;
   `/v1/capabilities` names what is missing without loading anything.
