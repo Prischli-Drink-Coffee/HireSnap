@@ -106,6 +106,7 @@ help:
 	  "  make db-shell       mysql client inside the mysql container" \
 	  "  make backend-shell  bash inside the backend container" \
 	  "  make ml-shell       bash inside the ml sidecar container" \
+	  "  make coverage       backend branch coverage against the floor in backend/pyproject.toml" \
 	  "  make ml-test        the ml contract tests only (no torch, no weights, no GPU)" \
 	  "  make smoke          curl the gateway /health and the API chain, assert JSON" \
 	  "" \
@@ -331,6 +332,29 @@ test: _require-python
 	@if [ ! -d backend/tests ]; then printf '%s\n' "test    : SKIP backend - backend/tests/ does not exist"; elif ! $(PYTHON) -c 'import pytest' >/dev/null 2>&1; then printf '%s\n' "test    : SKIP backend - pytest is not importable by $(PYTHON)" "          install it:  $(PYTHON) -m pip install -r backend/requirements.txt"; else printf '%s\n' "test    : backend pytest"; ( cd backend && $(PYTHON) -m pytest -q ) || exit 1; fi
 	@$(MAKE) --no-print-directory ml-test
 	@if [ -d frontend/node_modules ]; then printf '%s\n' "test    : frontend jest (CI mode, no watch)"; ( cd frontend && CI=true npm test -- --watchAll=false ) || exit 1; else printf '%s\n' "test    : SKIP frontend - frontend/node_modules is absent (run: cd frontend and npm ci)"; fi
+
+# WHY a coverage target at all, and why it is NOT the test target: 'make test' is
+# the fast loop a developer runs while working, and a coverage run is measurably
+# slower (branch tracing on every line). More importantly the two answer different
+# questions - 'test' answers "does it pass", 'coverage' answers "how much of this
+# tree has any test at all" - and folding the second into the first makes the
+# first slower for everyone in order to inform one person.
+#
+# WHY 'coverage run' AND NOT 'pytest --cov': measured on this host, pytest-cov
+# leaves a SECOND, statement-shaped data file behind when it cannot find its
+# configuration (it reads .coveragerc by default and ignores pyproject.toml), and
+# the next invocation that does read the branch setting dies with
+# "Can't combine statement coverage data with branch data" - a crash that names a
+# plugin, not a test, and that only reproduces when the two runs interleave. The
+# coverage CLI has one entry point, reads --rcfile when told to, and can be run
+# twice in a row without the second run inheriting the first one's format.
+#
+# WHY the threshold is not passed here: it lives in pyproject.toml
+# ([tool.coverage.report] fail_under = 65), so this target, CI and a developer's
+# own command all read ONE number instead of three that drift. Measured: 65.32%
+# on Python 3.9 (the CI interpreter) with branch coverage on.
+coverage: _require-python
+	@if [ ! -d backend/tests ]; then printf '%s\n' "coverage: SKIP backend - backend/tests/ does not exist"; elif ! $(PYTHON) -c 'import coverage' >/dev/null 2>&1; then printf '%s\n' "coverage: SKIP backend - coverage is not importable by $(PYTHON)" "          install it:  $(PYTHON) -m pip install coverage"; else printf '%s\n' "coverage: backend branch coverage (floor from backend/pyproject.toml)"; ( cd backend && $(PYTHON) -m coverage run --branch --source=service --rcfile=pyproject.toml -m pytest -q && $(PYTHON) -m coverage report --rcfile=pyproject.toml ) || exit 1; fi
 
 # WHY ml-test is its own target and not three lines inside test: the sidecar is a
 # submodule with its own test contract (ml/README.md is canonical), and a change

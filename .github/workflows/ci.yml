@@ -384,6 +384,42 @@ jobs:
           python -m pip install "pytest==8.2.2"
           python -m pytest -q
 
+      # THE COVERAGE FLOOR, and why it is a gate rather than a badge. The suite
+      # passed at 46% while every single application and persistence module sat at
+      # zero: the routers answered, the business rules behind them were never
+      # executed by a test, and nothing said so. A number that is only printed is
+      # a number nobody protects; the floor is what turns it into a contract.
+      #
+      # WHY 65 AND WHY THE INTERPRETER DECIDES: the floor is what THIS job measures
+      # (Python 3.9 + requirements.txt only), rounded down - 65.32% on the commit
+      # that introduced the gate. The refactor venv on 3.10 measures 66% because a
+      # few stdlib-only branches differ between the two pythons; pinning 66 would be
+      # a gate that is red for a reason nobody can fix. 65 is a FLOOR, not a target:
+      # it gets raised in the same commit that adds the coverage, and the number
+      # lives in backend/pyproject.toml ([tool.coverage.report] fail_under) so the
+      # Makefile target and this step cannot drift.
+      #
+      # WHY 'coverage run' AND NOT 'pytest --cov': measured on this host, pytest-cov
+      # resolves its configuration from .coveragerc by default, ignores
+      # pyproject.toml, records STATEMENT data when it finds nothing, and a later
+      # run that does read the branch setting then dies with "Can't combine
+      # statement coverage data with branch data". The CLI has one entry point and
+      # --rcfile makes the configuration explicit, so the number is a property of
+      # the code instead of a property of which file got discovered.
+      #
+      # WHY branch = true at all: half of this tree's rules ARE the error branch -
+      # a 404 that no test ever triggers is untested work that a line-coverage
+      # number happily counts as covered.
+      - name: Coverage floor (branch coverage of service/)
+        run: |
+          if [ ! -d tests ]; then
+            echo "SKIP: backend/tests/ does not exist yet (docs/KNOWN_GAPS.md)"
+            exit 0
+          fi
+          python -m pip install "coverage==7.16.2"
+          python -m coverage run --branch --source=service --rcfile=pyproject.toml -m pytest -q
+          python -m coverage report --rcfile=pyproject.toml
+
   # ===========================================================================
   # 4b. ML sidecar - the contract tests that must pass with no torch and no GPU.
   #
