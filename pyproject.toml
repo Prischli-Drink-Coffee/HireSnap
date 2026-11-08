@@ -91,13 +91,17 @@ follow_imports = "silent"
 # code, and branch = true counts the not-taken branch, because half of this tree's rules ARE
 # the error branch - a 404 that no test ever triggers is not tested.
 #
-# WHY THE CI FLOOR IS 65 AND NOT THE 67 OF THE TEMPLATE: the FLOOR IS THE NUMBER THE CI
-# INTERPRETER MEASURES, rounded down. CI runs Python 3.9 (.github/workflows/ci.yml:237) and
-# that venv measures 65% branch coverage on this commit; the 3.10 refactor venv measures 66%
-# (a few stdlib-only branches differ between the two pythons, so pinning the higher number
-# would be a gate that is red for reasons nobody can fix). A gate that is red on the day it
-# lands teaches people to pass --no-verify instead of writing a test. 65 is a FLOOR, not a
-# target: raise it in the same commit that adds the coverage.
+# WHY THE FLOOR IS 76 AND NOT THE 67 OF THE TEMPLATE: the FLOOR IS THE NUMBER THE CI
+# INTERPRETER MEASURES, rounded down. CI runs Python 3.9 (.github/workflows/ci.yml) and that
+# venv measures 76.69% branch coverage on this commit; the 3.10 refactor venv measures a
+# fraction more (76.8%) because a few stdlib-only branches differ between the two pythons, so
+# pinning the higher number would be a gate that is red for reasons nobody can fix. A gate
+# that is red on the day it lands teaches people to pass --no-verify instead of writing a
+# test. History: 46% (gate introduced at 65 - every application and persistence module was at
+# zero), then 73 with the slice and deployment-module tests, then 76 with the settings,
+# schema-bootstrap, JWT, entry-point, connection-recovery, composition and S3 tests. Each time
+# the floor moved in the SAME commit that added the coverage. Keep that rule: raise it WITH
+# the tests, never without them and never ahead of them.
 [tool.coverage.run]
 source = ["service"]
 branch = true
@@ -116,4 +120,4 @@ show_missing = true
 #
 # fail_under lives HERE and nowhere else: the Makefile 'coverage' target, the CI step and a
 # developer's own command all read this number, so they cannot drift apart.
-fail_under = 65
+fail_under = 76

@@ -64,6 +64,21 @@ PyMySQL==1.1.1
 
 # --- auth -----------------------------------------------------------------
 PyJWT==2.8.0
+# cryptography is NOT optional here, even though PyJWT marks it as one.
+# JWT_ALGORITHM defaults to RS256 (service/models/auth_models.py:95), and PyJWT
+# only registers RSA backends when cryptography is importable. Without it
+# jwt.encode() raises
+#   NotImplementedError: Algorithm 'RS256' could not be found.
+#   Do you have cryptography installed?
+# so /signin and /signup answer 500 and the API cannot mint a single token.
+# This pin was dropped during the vertical-slice refactor along with the ML tail
+# that used to pull cryptography in transitively (twisted, textattack,
+# aiobotocore, and an explicit 'cryptography' line in the original file); the
+# AST walk that produced the trimmed list cannot see a dynamic import inside
+# PyJWT, so the loss only shows up at request time. Keep it pinned directly:
+# a dependency the only code path needs must not be inherited from a package
+# that is one 'why is this here?' cleanup away from being removed.
+cryptography==42.0.8
 bcrypt==4.1.3
 
 # --- matching and ranking (business logic, not inference) -----------------

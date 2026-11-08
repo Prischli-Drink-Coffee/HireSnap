@@ -1,0 +1,5 @@
+{
+  "_comment": "Recorded module-size and cyclomatic-complexity debt for backend/. This file may only shrink: a measurement that is not listed here fails as new debt, and a value larger than the one recorded here fails as debt that grew. Paying debt off means deleting the entry, never editing the ceiling in check_module_complexity.py.",
+  "_note_2026-11-08_initial": "Empty on purpose. Every module under backend/service is currently under all five ceilings (longest file 555 lines, longest function 70, highest cyclomatic complexity 15), so the ratchet is armed at zero and the first split will not need a baseline edit. The file is committed anyway so the first genuine exception has somewhere to go that a reviewer will see.",
+  "allowed": {}
+}
