@@ -1,0 +1,13 @@
+/* The only global stylesheet. Everything else is a CSS module next to its
+   component, or a Chakra prop. */
+
+body {
+  margin: 0;
+  /* Deliberately duplicated from theme.js fonts.body: this rule applies before
+     Chakra's runtime <style> tag exists, so a first paint without it flashes
+     the browser's default serif. */
+  font-family: Montserrat, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Roboto", "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

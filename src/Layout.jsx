@@ -1,39 +1,20 @@
-import React, { useEffect } from "react";
+import React from "react";
 import { VStack } from "@chakra-ui/react";
-import Header from "./components/header/header";
 import { Outlet } from "react-router-dom";
-import Footer from "./components/footer";
-import { useCookies } from "react-cookie";
-import UserService from "./API/services/user_service";
-import { deleteUser } from "./API/helper/userCookie";
-import Helper from "./components/helper_button_modal";
+import Header from "shared/components/layout/Header";
+import Footer from "shared/components/layout/Footer";
+import HelperButtonModal from "shared/components/feedback/HelperButtonModal";
+import useCurrentUser from "shared/hooks/useCurrentUser";
 
 function Layout() {
-  const [cookie, setCookie] = useCookies();
-  const getUser = async () => {
-    try {
-      const response = await UserService.me();
+  // The identity is loaded (and, when the cookie is missing or stale, refreshed)
+  // by the hook so the pages below and the navigation read one source.
+  useCurrentUser();
 
-      if (!(response.data.warehouseId === cookie.warehouseId)) {
-        setCookie("warehouseId", response.data.warehouseId);
-      } else if (!response.data.role === cookie.role) {
-        setCookie("role", response.data.role);
-      } else if (response.data.userName !== cookie.userName) {
-        setCookie("userName", response.data.userName);
-      }
-    } catch (e) {
-      if (e.response.status === 401) {
-        deleteUser();
-      }
-    }
-  };
-  useEffect(() => {
-    getUser();
-  }, [cookie]);
   return (
-    <VStack backgroundColor="menu_white" width="100%" minH={"100VH"}>
+    <VStack backgroundColor="menu_white" width="100%" minH="100VH">
       <Header />
-      <Helper/>
+      <HelperButtonModal />
       <Outlet />
       <Footer />
     </VStack>

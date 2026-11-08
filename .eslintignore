@@ -1,0 +1,11 @@
+# Paths ESLint must never walk. Mirrors R:\GPTHub\frontend\.eslintignore:1-12.
+#
+# WHY these four and no more: the lint contract is "every file a developer edits",
+# which is src/ only. Everything else is either generated (build/), vendored
+# (node_modules/), or plain Node tooling outside the browser bundle (scripts/ is
+# an .mjs dependency checker, not application code, and it is not part of the
+# CRA eslint-config chain).
+build/
+node_modules/
+scripts/
+coverage/

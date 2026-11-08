@@ -22,7 +22,7 @@
 # node:18-alpine: react-scripts 5.0.1 needs Node >= 14 and is known-broken on
 # Node 20+ for some of its webpack 5 plugins; 18 is the version the lockfile was
 # generated against. Alpine (musl) is fine because nothing here compiles native
-# addons - the C# leftovers (client.sln/client.esproj) are not used.
+# addons - the bundle is pure JavaScript plus CSS.
 FROM node:18-alpine AS base
 
 WORKDIR /app
@@ -87,14 +87,18 @@ COPY . .
 ARG REACT_APP_BASE_URL=/api/
 ARG NPM_REGISTRY=https://registry.npmjs.org
 ENV REACT_APP_BASE_URL=${REACT_APP_BASE_URL}
-# DaData client token for the supplier-requisites autocomplete
-# (src/components/forms/suppliers/requisites.js). Same mechanism as the base
-# URL and the same consequence: CRA inlines REACT_APP_* into the bundle, so
-# this value SHIPS TO THE BROWSER and is not a secret - it must be a
-# rate-limited client key. It is deliberately an ARG with an EMPTY default and
-# not a required one: unset is a supported state in which the form degrades to
-# manual entry, so a missing token must not fail the build. Passed from the
-# compose build args as ${DADATA_TOKEN}; see docker/.env.example section 8.
+# DaData client token, reserved for a company-lookup autocomplete. Same
+# mechanism as the base URL and the same consequence: CRA inlines REACT_APP_*
+# into the bundle, so this value SHIPS TO THE BROWSER and is not a secret - it
+# must be a rate-limited client key. Deliberately an ARG with an EMPTY default
+# and not a required one.
+#
+# NOTHING READS IT. `grep -rn process.env src/` returns exactly one hit, the
+# base URL above; the supplier form that consumed this token was dead code and
+# was deleted with the frontend restructure. The ARG is kept wired end-to-end
+# (manifest -> compose build arg -> here) so that adding the lookup later needs
+# no image change - not because a feature depends on it today.
+# Passed from the compose build args as ${DADATA_TOKEN}; see docker/.env.example.
 ARG REACT_APP_DADATA_TOKEN=
 ENV REACT_APP_DADATA_TOKEN=${REACT_APP_DADATA_TOKEN}
 # Source maps off: GENERATE_SOURCEMAP=false keeps the whole frontend source tree
