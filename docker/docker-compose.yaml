@@ -93,12 +93,12 @@ x-backend-env: &backend-env
   # key is a one-line change, documented in docs/KNOWN_GAPS.md.
   STORAGE__BACKEND: ${STORAGE__BACKEND:-local}
 
-  # --- ml sidecar (service/services/ml_client.py) -----------------------------
+  # --- ml sidecar (service/infrastructure/ml_sidecar.py) -----------------------------
   # ML_SERVICE_URL is the FLAT name the client reads (the manifest declares
   # ML__SERVICE_URL). The sidecar is a CORE service of this stack - it is not
   # behind a profile - so the default is the service DNS name and NOT empty.
   # The old meaning of an empty value, "run inference in the API process", is
-  # gone: the client is HTTP-only (backend/service/services/ml_client.py). A URL
+  # gone: the client is HTTP-only (backend/service/infrastructure/ml_sidecar.py). A URL
   # that does not answer is a visible error on the inference routes rather than
   # a silent second copy of the CUDA stack inside the API.
   ML_SERVICE_URL: ${ML__SERVICE_URL:-http://ml:8080}
@@ -116,7 +116,7 @@ x-backend-env: &backend-env
   MAIL__FROM: ${MAIL__FROM:-no-reply@hiresnap.local}
 
   # --- celery (service/infrastructure/messaging/celery_app.py) ---------------------------------
-  # CELERY__ENABLED=false keeps service/services/jobs_services.py on INLINE
+  # CELERY__ENABLED=false keeps service/services/jobs/application/job_service.py on INLINE
   # execution: no worker, no broker, and the API still answers. Turning it on
   # without the workers running would leave jobs 'queued' forever, so the flag
   # and the profile are derived from one another in sidecar_profiles.sh.
@@ -143,10 +143,10 @@ x-backend-volumes: &backend-volumes
   - ../infra/storage:/app/data
   # JWT key pair, read-only, at a path the image does not own. The backend reads
   # JWT_PRIVATE_KEY_PATH / JWT_PUBLIC_KEY_PATH (docker/.env.example section 5) and
-  # falls back to a path derived from service/domain/models.py's __file__ only when
+  # falls back to a path derived from service/models/auth_models.py's __file__ only when
   # they are unset - so mounting into the source tree, as /app/src/certs did, tied
   # a secret to a directory name the refactor changed. /app/secrets is not part of
-  # any package and no move can invalidate it (service/domain/models.py,
+  # any package and no move can invalidate it (service/models/auth_models.py,
   # infra/certs/README.md).
   - ../infra/certs:/app/secrets/certs:ro
   # service/configuration/logging.yaml writes logs/app.log; without this mount
@@ -427,7 +427,7 @@ services:
   # It is a SEPARATE SERVICE with its own image and its own contract, not a
   # second copy of the API. It serves /health, /v1/capabilities,
   # /v1/embed/video, /v1/embed/text and /v1/transcribe (ml/service/app.py) and the API
-  # reaches it through backend/service/services/ml_client.py.
+  # reaches it through backend/service/infrastructure/ml_sidecar.py.
   #
   # WHY split out at all: the ML stack is the reason the backend image is
   # gigabytes and the reason a cold start took minutes. Keeping inference in the
@@ -570,7 +570,7 @@ services:
   # that holds a GPU for minutes must not delay either.
   #
   # Same image as the API, different command: service/infrastructure/messaging/
-  # tasks.py imports service.services.jobs_services -> service.services/ml_client,
+  # tasks.py imports service.services.jobs.application.job_service -> service.infrastructure.ml_sidecar,
   # so the worker IS the API image (the platform dependencies are installed by
   # backend/docker/Dockerfile). A separate worker image would drift from
   # requirements.lock.txt and then a task would run against a build the API never
@@ -588,7 +588,7 @@ services:
     environment:
       <<: *backend-env
       # The broker the anchor already points at definitely exists here: this
-      # container IS the consumer. Saying so explicitly keeps jobs_services from
+      # container IS the consumer. Saying so explicitly keeps job_service from
       # taking its inline path inside a worker and running the task twice.
       CELERY__ENABLED: "true"
     # --queues names ONE queue per worker, matching QUEUES in
@@ -676,7 +676,7 @@ services:
   # sidecar: the worker decides WHAT to embed (storage, database, retries) and
   # the sidecar does the arithmetic. This container needs NO GPU and carries
   # no torch: ML_SERVICE_URL is set for it by the wiring block above, and
-  # backend/service/services/ml_client.py has no in-process branch, so an
+  # backend/service/infrastructure/ml_sidecar.py has no in-process branch, so an
   # unreachable sidecar is a retryable error rather than a local import.
   celery-worker-ml:
     profiles: ["celery"]
@@ -708,7 +708,7 @@ services:
         condition: service_started
     volumes: *backend-volumes
     # NO GPU reservation here any more. This worker decides WHAT to embed and
-    # posts the bytes to the sidecar (service/services/ml_client.py); the arithmetic
+    # posts the bytes to the sidecar (service/infrastructure/ml_sidecar.py); the arithmetic
     # happens in ml, which is where the card is reserved
     # (docker-compose.gpu.yaml). Keeping a reservation here as well would make
     # this container unstartable on a host without the NVIDIA runtime for no

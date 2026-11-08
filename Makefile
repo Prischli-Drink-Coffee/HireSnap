@@ -135,7 +135,7 @@ _require-openssl:
 # contract this target relies on (docker/sync_env.py:1-27).
 #
 # WHY the JWT key pair belongs here: the backend resolves the key files AT IMPORT
-# TIME (backend/service/domain/models.py, the certs path is derived from
+# TIME (backend/service/models/auth_models.py, the certs path is derived from
 # __file__) and RS256 is hardcoded, so
 # without the files every authenticated route fails at startup. "The environment
 # exists" therefore includes the keys. They are generated ONLY when missing:
@@ -219,8 +219,27 @@ config: env _require-docker
 # pre-commit environment (on a machine with no Node, for instance). A guard that
 # cannot run prints [SKIP] with a reason and exits 0; a guard that finds a
 # violation exits non-zero and this target propagates it.
+#
+# WHY it also runs the SUBMODULES' own guards: the superproject can see a submodule
+# only as one commit hash, so every check here is blind to what is inside it. The
+# layout rules that matter after a move - does the backend still have its
+# vertical slices, does the sidecar still keep its modules flat - are shipped by
+# the owners of those trees (backend/scripts/check_backend_layout.py,
+# ml/scripts/check_ml_service_layout.py) precisely because they know the shape
+# better than a cross-repo guard can. Running them from here means ONE command
+# answers "is this whole checkout consistent" instead of three.
+# WHY they go through scripts/run_guard.sh instead of $(PYTHON): that script is
+# the repository's single answer to "which interpreter actually starts" (a
+# Microsoft Store python3 name resolves and then exits 49 - Makefile:66-78), and a
+# second copy of that probe here would drift from the one pre-commit uses. It also
+# gives the [SKIP]-on-no-python behaviour for free: a missing interpreter is a
+# missing local prerequisite, not a broken tree.
+# WHY a missing guard is a SKIP and not a failure: these files live in the
+# submodules, and a checkout made without --recursive legitimately does not have
+# them. The SKIP says so out loud; a guard that IS present and fails still fails.
 guards: _require-python
 	@set -e; failed=""; ran=0; for script in scripts/check_*.py; do [ -f "$$script" ] || continue; ran=$$((ran + 1)); printf '%s\n' "---- $$script"; $(PYTHON) "$$script" || failed="$$failed $$script"; done; if [ "$$ran" -eq 0 ]; then printf '%s\n' "guards  : ERROR no scripts/check_*.py found" >&2; exit 1; fi; if [ -n "$$failed" ]; then printf '%s\n' "guards  : FAILED$$failed" >&2; exit 1; fi; printf '%s\n' "guards  : all $$ran guard(s) passed"
+	@set -e; failed=""; ran=0; for script in backend/scripts/check_backend_layout.py ml/scripts/check_ml_service_layout.py; do if [ ! -f "$$script" ]; then printf '%s\n' "guards  : SKIP $$script - the submodule guard is not in this checkout (nothing was checked)"; continue; fi; ran=$$((ran + 1)); printf '%s\n' "---- $$script (submodule guard)"; bash scripts/run_guard.sh "$$script" || failed="$$failed $$script"; done; if [ -n "$$failed" ]; then printf '%s\n' "guards  : FAILED (submodule guards)$$failed" >&2; exit 1; fi; printf '%s\n' "guards  : $$ran submodule guard(s) passed"
 
 # WHY a separate target for the layout gate: 'make guards' runs seven checks, five
 # of which want docker (compose parity, healthcontracts) and a populated env file,
@@ -235,6 +254,23 @@ guards: _require-python
 # once), and a target with a hard-coded file list would silently stop covering a
 # guard that was added later. The glob means a new structure guard runs the day it
 # lands, with no Makefile edit and no chance to forget one.
+#
+# WHY the two SUBMODULE layout guards are named here and not globbed: they live
+# outside this repository (backend/ and ml/ are separate checkouts), so a glob over
+# scripts/ can never see them, and the names are a contract the submodules owe this
+# target. backend/scripts/check_backend_layout.py asserts the vertical-slice shape
+# (service/services/<domain>/{domain,application,persistence,presentation}) and
+# ml/scripts/check_ml_service_layout.py asserts the sidecar's flat layout; both are
+# stdlib-only by design, so this target still needs no docker, no env file and no
+# service dependencies - that is what makes it the right command to run after a
+# module move. A guard that is absent (a checkout without --recursive) prints SKIP
+# and does not fail the target; one that is present and fails does.
+#
+# WHY they run through scripts/run_guard.sh and not $(PYTHON): the same reason the
+# guards target does - that script is the repository's one answer to "which
+# interpreter actually starts", it is what pre-commit calls, and a second copy of
+# the probe here would let `make structure` and the hook disagree about whether the
+# guard ran at all.
 # WHY every shell variable is written "$$name" and not "$name": make expands a
 # single "$" ITSELF, and a bare "$script" is read as the make variable "$s"
 # followed by the literal text "cript". The recipe below therefore used to run
@@ -243,6 +279,7 @@ guards: _require-python
 # reason the arithmetic is "$$((ran + 1))": make would otherwise eat "$((".
 structure: _require-python
 	@set -e; ran=0; failed=""; for script in scripts/check_ml_boundary.py scripts/check_*structure*.py; do [ -f "$$script" ] || continue; ran=$$((ran + 1)); printf '%s\n' "---- $$script"; $(PYTHON) "$$script" || failed="$$failed $$script"; done; if [ "$$ran" -eq 0 ]; then printf '%s\n' "structure: ERROR no layout guard found (scripts/check_ml_boundary.py is missing)" >&2; exit 1; fi; if [ -n "$$failed" ]; then printf '%s\n' "structure: FAILED$$failed" >&2; exit 1; fi; printf '%s\n' "structure: all $$ran layout guard(s) passed"
+	@set -e; ran=0; failed=""; for script in backend/scripts/check_backend_layout.py ml/scripts/check_ml_service_layout.py; do if [ ! -f "$$script" ]; then printf '%s\n' "structure: SKIP $$script - the submodule layout guard is not in this checkout"; continue; fi; ran=$$((ran + 1)); printf '%s\n' "---- $$script"; bash scripts/run_guard.sh "$$script" || failed="$$failed $$script"; done; if [ -n "$$failed" ]; then printf '%s\n' "structure: FAILED (submodule layout guards)$$failed" >&2; exit 1; fi; printf '%s\n' "structure: $$ran submodule layout guard(s) passed"
 
 # WHY no "|| true": a lint that cannot fail holds nothing (R:\GPTHub\Makefile:337-340
 # makes the same argument). When pre-commit is missing this target FAILS with the

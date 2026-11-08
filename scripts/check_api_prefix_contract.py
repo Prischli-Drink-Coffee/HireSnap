@@ -21,6 +21,18 @@ the routing comment in R:\GPTHub\infra\nginx\templates\site.conf.template:40-52)
   importing the FastAPI app would drag in the database, the mailer and the whole
   service package - the guard exists to be runnable on a bare interpreter.
 
+WHAT THIS GUARD DOES *NOT* ENUMERATE, and why: it does not list the router
+modules. The routers move from one api/routers/ package into one vertical slice each
+(service/services/<domain>/presentation/routers/<domain>_api/) and are collected by
+service/api/registry.py, but the URL contract is not "this list of modules" - it is
+"api/app.py mounts /server and the gateway rewrites /api/ to it". Reading the
+registry would make this guard fail every time a router is renamed, which is a
+different question owned by backend/scripts/check_backend_layout.py and by the
+import test in CI (an unimportable registry is an ImportError, not a routing bug).
+The one thing that would silently break the contract is a mount disappearing, so
+the guard asserts a mount EXISTS and treats "no app.mount(...) matched at all" as a
+failure rather than an empty pass - see the mount_sources branch.
+
 What is asserted:
   1. the browser-facing prefix is exactly /api/ (the value in apiConsts.js and the
      default of REACT_APP_BASE_URL in the compose file must be the same string);
@@ -58,13 +70,19 @@ BACKEND_SERVER_CANDIDATES = [
     Path("backend/service/api/app.py"),
     Path("backend/service/main.py"),
 ]
+
 NGINX_TEMPLATE = Path("infra/nginx/templates/site.conf.template")
 COMPOSE_PROD = Path("docker/docker-compose.yaml")
 
 # "/api/" in a JS string literal, as the fallback branch of resolveBaseUrl().
 JS_API_LITERAL = re.compile(r"['\"]((?:https?://[^'\"]*)?/api/)['\"]")
-# app.mount("/server", app_server) - the first argument is the public path.
-MOUNT = re.compile(r"app\.mount\(\s*['\"](?P<path>/[^'\"]*)['\"]")
+# ANY identifier, not the literal name "app". create_app() builds a local FastAPI()
+# instance on purpose (importing the module must not construct one) and mounts on
+# whatever that local is called - app, root_app, application. A regex keyed to the
+# name "app" would match nothing the day the local is renamed, and a guard that
+# matches nothing must FAIL, never pass (see the mount_sources branch below).
+# <app>.mount("/server", app_server) - the first argument is the public path.
+MOUNT = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\.mount\(\s*['\"](?P<path>/[^'\"]*)['\"]")
 # rewrite ^/api/(.*)$ /server/$1 break;
 REWRITE = re.compile(
     r"rewrite\s+(?P<pattern>\^?/[A-Za-z0-9_./()-]*\(\.\*\)\$?)\s+"

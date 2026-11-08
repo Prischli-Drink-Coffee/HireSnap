@@ -17,7 +17,7 @@ can see that - ruff does not know which imports are architecturally forbidden an
 the compose guards read YAML, not Python - so the rule has to be executable.
 
 The scan uses ast, not a grep. A grep would fire on every comment that explains
-the rule (this file's own docstring, backend/service/services/ml_client.py's history)
+the rule (this file's own docstring, backend/service/infrastructure/ml_sidecar.py's history)
 and would miss nothing else; a real import, including one nested inside a
 function - which is exactly how the in-process fallback is written - is an
 ImportFrom node and cannot hide from the parser.
@@ -37,7 +37,9 @@ WHAT IS ASSERTED, for backend/
            named after the old location is the easy case; the expensive one is
            backend/service/modelling/ quietly growing back in the new tree, and
            a check that only knows the old paths would watch it do so.
-  4. WARN  service/services/ml_client.py still carries an in-process transport
+  4. WARN  the backend ML client (service/infrastructure/ml_sidecar.py, called
+           service/services/ml_client.py before the vertical-slice move) still
+           carries an in-process transport
            (a fallback that imports the ML stack locally). That fallback is the
            one path that can silently re-link the API against torch, so it must
            stay explicit and visible rather than quietly deleted from the check.
@@ -52,9 +54,9 @@ WHAT IS ASSERTED, for backend/
 Tests are excluded from the import scan: a test may legitimately assert that
 "importing the route module does not import torch", and the only way to write
 that assertion is usually to name the module it must not import. Files inside a
-DELETED_TREES directory are not scanned either - their existence is already the
-failure, and reporting every line inside them would bury the one line that
-matters.
+FORBIDDEN_DIR_NAMES directory are not scanned either - the directory's existence is
+already the failure, and reporting every line inside it would bury the one line
+that matters.
 
 Failures are deduplicated per (file, top-level module): one import of torch in a
 file is a violation, forty lines of torch calls below it are the same violation.
@@ -110,18 +112,42 @@ WALK_SKIP_DIRS = {
 # Loose files the backend ROOT is allowed to keep. Everything else with one of the
 # extensions below belongs in a subdirectory: code in service/, entry points in
 # scripts/, the schema in database/, assets in docs/. Each entry is here because a
-# tool demands that exact path - packaging and lint configuration are read from the
+# tool demands that exact path - configuration and metadata are read from the
 # project root, and README/LICENSE are conventions no tool can relocate - and the
 # list is kept tiny on purpose: a generous allowlist is a guard that documents the
 # mess it permits.
+#
+# WHY the three packaging files are legitimate and not a loophole: a Python
+# project's root IS where its metadata lives, and moving any of these breaks a tool
+# rather than tidying the tree.
+#   pyproject.toml   PEP 621 metadata plus [tool.ruff], [tool.mypy] and
+#                    [tool.pytest.ini_options]; every one of those tools searches
+#                    upward from the file it is run on and STOPS at this file, so a
+#                    copy under service/ would silently stop applying to the root
+#                    files it also governs.
+#   pytest.ini       pytest reads its rootdir configuration from the arguments'
+#                    first common ancestor; with the suite in tests/ the ancestor
+#                    is this root, and an ini file one level deeper would only be
+#                    found by pointing pytest at it explicitly - which is how the
+#                    Makefile, CI and a developer end up running three different
+#                    configurations.
+#   .python-version  the toolchain pin (pyenv, uv, asdf and mise all read this exact
+#                    path). It records the interpreter the project is tested on and
+#                    cannot live under service/ without the pin silently lapsing to
+#                    whatever the shell happens to have.
+# None of the three is code, none is importable, and none is the "stray script at
+# the root" this rule exists to catch - backend/scripts/ still owns anything
+# executable.
 ROOT_FILE_ALLOWLIST = {
     ".dockerignore",
     ".gitattributes",
     ".gitignore",
     ".pre-commit-config.yaml",
+    ".python-version",
     "LICENSE",
     "README.md",
     "pyproject.toml",
+    "pytest.ini",
 }
 ROOT_FILE_PATTERNS = [
     # requirements.txt, requirements-platform.txt / requirements_platform.txt (the
@@ -376,8 +402,8 @@ def scan_backend_root(report):
     if not loose:
         report.ok.append(
             "the root of " + rel(base) + " holds no loose .py/.sh/.bat/.sql/.txt"
-            " file (only the documented allowlist: project config, requirements,"
-            " README/LICENSE)"
+            " file (only the documented allowlist: packaging metadata such as"
+            " pyproject.toml/pytest.ini/.python-version, requirements, README/LICENSE)"
         )
         return
     for path in loose:
@@ -414,9 +440,9 @@ def source_files():
 def dotted_from_relative(level, module, file_path):
     """Resolve "from ..x import y" against the file's own package path.
 
-    backend/service/services/ml_client.py lives in package service.services, so
-    level 1 (a single dot) means service.services.<module> and level 2 means
-    service.<module>. Without this, "from . import modelling" would slip past a
+    backend/service/infrastructure/ml_sidecar.py lives in package
+    service.infrastructure, so level 1 (a single dot) means
+    service.infrastructure.<module> and level 2 means service.<module>. Without this, "from . import modelling" would slip past a
     check that only looks at absolute import names.
     """
     try:
@@ -731,16 +757,31 @@ def scan_requirements(relative, report, generated):
 
 
 def scan_inprocess_client(report):
-    relative = BACKEND_SRC / "services" / "ml_client.py"
-    path = ROOT / relative
-    if not path.is_file():
+    # THE CANDIDATE LIST, not one hardcoded path. The vertical-slice move renamed
+    # service/services/ml_client.py to service/infrastructure/ml_sidecar.py, and when
+    # this function kept the old path it degraded into a permanent [SKIP]: the guard
+    # still exited 0, still printed a summary, and checked nothing at all. A rule that
+    # can only ever skip is worse than no rule, because the skip line reads like an
+    # environment problem rather than a stale assertion.
+    #
+    # Both spellings are listed, in the order the tree evolved, so the check follows the
+    # module through the rename instead of having to be retargeted by hand. The first one
+    # that exists wins; if neither does, the SKIP below says so and names both.
+    candidates = [
+        BACKEND_SRC / "infrastructure" / "ml_sidecar.py",
+        BACKEND_SRC / "services" / "ml_client.py",
+    ]
+    path = next((ROOT / relative for relative in candidates if (ROOT / relative).is_file()), None)
+    if path is None:
         report.skips.append(
-            rel(path) + " does not exist, so the in-process fallback could not be"
-            " checked. NOT a pass."
+            "neither " + " nor ".join(rel(ROOT / c) for c in candidates)
+            + " exists, so the in-process fallback could not be checked. NOT a pass -"
+            " if the ML client was renamed again, add the new path to the candidate"
+            " list in scripts/check_ml_boundary.py:scan_inprocess_client"
         )
         return
     text = path.read_text(encoding="utf-8", errors="replace")
-    # Prose is not evidence. ml_client.py says "in-process" in the module docstring
+    # Prose is not evidence. The ML client says "in-process" in the module docstring
     # that PROVES the fallback was removed ("WHY THERE IS NO IN-PROCESS PATH ANY
     # MORE") and again in method docstrings that explain what the old signature was.
     # Matching markers against raw lines would warn about exactly the text that
@@ -843,7 +884,7 @@ def main():
             report.failures.append(
                 rel(path) + ":" + str(lineno) + " imports " + dotted + " (" + reason
                 + ")" + extra + ". ML work is the sidecar's job: the API must call"
-                " its HTTP routes (backend/service/services/ml_client.py), not link"
+                " its HTTP routes (backend/service/infrastructure/ml_sidecar.py), not link"
                 " library. This is the boundary, not a style preference - an"
                 " in-process model turns a GPU OOM into an API outage"
                 " (docs/KNOWN_GAPS.md)"

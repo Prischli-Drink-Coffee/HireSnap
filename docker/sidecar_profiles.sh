@@ -134,7 +134,7 @@ export_sidecar_wiring() {
     fi
 
     if [[ "${CELERY:-0}" == "1" ]]; then
-        # jobs_services.enqueue() runs tasks INLINE unless this is true, so a
+        # job_service.enqueue() runs tasks INLINE unless this is true, so a
         # worker container with this unset would sit idle while the API did the
         # work in the request thread.
         export CELERY__ENABLED=true

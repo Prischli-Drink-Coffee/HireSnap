@@ -162,6 +162,34 @@ repos:
         pass_filenames: false
         always_run: true
 
+      # WHY the submodules' OWN layout guards are hooks here too: the superproject
+      # sees a submodule as one commit hash, so check_ml_boundary.py can assert what
+      # must NOT be inside backend/ but cannot know what the tree SHOULD look like -
+      # the vertical-slice convention (service/services/<domain>/{domain,
+      # application, persistence, presentation}) is a rule only the backend can
+      # state, and it ships its own stdlib guard for exactly that reason
+      # (backend/scripts/check_backend_layout.py). Running it here means the rule is
+      # enforced at the same moment as the cross-repo ones instead of in a CI job
+      # nobody watches.
+      #
+      # WHY absent is a SKIP: the file lives in the backend gitlink, so a clone
+      # without submodules does not have it, and run_guard.sh exits 2 on a missing
+      # script (it cannot tell "typo" from "not checked out"). The -f test makes
+      # that distinction here and says which one it is. WHY it needs nothing
+      # installed: the guard is stdlib-only by contract, so this hook cannot be the
+      # "needs a built package" hook that turns a fresh clone red.
+      - id: check-backend-layout
+        name: guard - backend vertical-slice layout
+        entry: >-
+          bash -lc 'for guard in backend/scripts/check_backend_layout.py
+          ml/scripts/check_ml_service_layout.py; do
+          if [ ! -f "$guard" ]; then
+          echo "SKIP $guard: not in this checkout (the submodule is absent or the guard has not landed) - nothing was checked"; continue; fi;
+          bash scripts/run_guard.sh "$guard" || exit 1; done'
+        language: system
+        pass_filenames: false
+        always_run: true
+
       # --- compose and env validation ---------------------------------------
       # WHY these are here AND in CI: `docker compose config -q` is the only
       # thing that proves a compose file is not merely valid YAML but RESOLVABLE
@@ -240,15 +268,24 @@ repos:
       # ever reappears under service/ the gate will fail - correctly: an unexecuted
       # notebook inside the importable package is exactly the dead weight the
       # layout rule (scripts/check_ml_boundary.py) exists to keep out.
-      # `ruff format --check` is deliberately NOT here: it would reformat 90 of 106
-      # files, which is a separate decision with its own commit.
+      # `ruff format --check` is NOT here either, and the reason is scope, not
+      # laziness: the tree WAS formatted (backend commit c16ef3a) and CI enforces
+      # both `ruff check .` and `ruff format --check .` (.github/workflows/ci.yml).
+      # The hook keeps the four fatal rules because it must stay fast and offline;
+      # a formatting rule here would rewrite files during a commit, which is the
+      # job of the formatter the developer runs, not of a gate.
       - id: backend-ruff
         name: backend - ruff (fatal rules)
         entry: >-
           bash -lc 'cd backend || exit 2;
-          command -v ruff >/dev/null 2>&1 || { echo "SKIP backend ruff: ruff is not on PATH (install: python -m pip install ruff)"; exit 0; };
           [ -d service ] || { echo "SKIP backend ruff: backend/service/ is absent (the package refactor has not landed in this checkout) - nothing was checked"; exit 0; };
-          ruff check --select E9,F63,F7,F82 service'
+          ruff_cmd="";
+          for candidate in "$HIRESNAP_PYTHON" .venv-refactor/Scripts/python.exe ../.venv-refactor/Scripts/python.exe .venv-refactor/bin/python ../.venv-refactor/bin/python python3 python3.13 python; do
+          [ -n "$candidate" ] || continue;
+          if "$candidate" -m ruff --version >/dev/null 2>&1; then ruff_cmd="$candidate -m ruff"; break; fi; done;
+          [ -n "$ruff_cmd" ] || { echo "SKIP backend ruff: no interpreter on this host has ruff importable (tried HIRESNAP_PYTHON, .venv-refactor, python3, python) - NOTHING was verified. Install it with: python -m pip install ruff"; exit 0; };
+          echo "backend ruff interpreter: $ruff_cmd";
+          $ruff_cmd check --select E9,F63,F7,F82 service'
         language: system
         pass_filenames: false
         always_run: true
@@ -262,7 +299,8 @@ repos:
       # clean, so a finding there is actionable and a green run means something.
       # The paths were retargeted with the package refactor (src/infra ->
       # service/infrastructure, src/workers -> service/infrastructure/messaging,
-      # src/services/jobs_services.py -> the jobs service module). Deliberately
+      # src/services/jobs_services.py -> service/services/jobs/application/
+      # job_service.py). Deliberately
       # NOT widened to service/domain or service/api: those are the legacy modules
       # this scope exists to stay out of, and a green run must keep meaning the
       # deployment code is clean rather than that the backlog shrank.
@@ -278,13 +316,18 @@ repos:
         name: backend - mypy (deployment modules)
         entry: >-
           bash -lc 'cd backend || exit 2;
-          command -v mypy >/dev/null 2>&1 || { echo "SKIP backend mypy: mypy is not on PATH (install: python -m pip install mypy)"; exit 0; };
           [ -d service/infrastructure ] || { echo "SKIP backend mypy: backend/service/infrastructure is absent (the package refactor has not landed in this checkout) - nothing was checked"; exit 0; };
           scope=service/infrastructure;
-          for candidate in service/services/jobs.py service/services/jobs_services.py; do
+          for candidate in service/services/jobs/application/job_service.py; do
           if [ -e "$candidate" ]; then scope="$scope $candidate"; fi; done;
           echo "backend mypy scope: $scope";
-          mypy --follow-imports=silent --disable-error-code=import-untyped $scope'
+          mypy_cmd="";
+          for candidate in "$HIRESNAP_PYTHON" .venv-refactor/Scripts/python.exe ../.venv-refactor/Scripts/python.exe .venv-refactor/bin/python ../.venv-refactor/bin/python python3 python3.13 python; do
+          [ -n "$candidate" ] || continue;
+          if "$candidate" -m mypy --version >/dev/null 2>&1; then mypy_cmd="$candidate -m mypy"; break; fi; done;
+          [ -n "$mypy_cmd" ] || { echo "SKIP backend mypy: no interpreter on this host has mypy importable (tried HIRESNAP_PYTHON, .venv-refactor, python3, python) - NOTHING was verified. Install it with: python -m pip install mypy"; exit 0; };
+          echo "backend mypy interpreter: $mypy_cmd";
+          $mypy_cmd --no-site-packages --follow-imports=silent --disable-error-code=import-untyped $scope'
         language: system
         pass_filenames: false
         always_run: true
@@ -315,10 +358,6 @@ repos:
           [ -d tests ] || { echo "SKIP backend pytest: backend/tests/ does not exist yet (docs/KNOWN_GAPS.md)"; exit 0; };
           probe="import pytest, pymysql, fastapi, numpy";
           chosen="";
-          # Repo-root virtualenvs first, whatever they are called (.venv,
-          # .venv-refactor, venv): a checkout that has one has already paid the
-          # install cost, and its interpreter is the one the developer runs tests
-          # with. `ls -d` is safe with no matches because of the 2>/dev/null.
           toplevel="$(git rev-parse --show-toplevel 2>/dev/null)";
           local_venvs="";
           for venv in "$toplevel"/.venv* "$toplevel"/venv* ../.venv* ../venv*; do
@@ -335,28 +374,43 @@ repos:
           echo "     cd backend && python -m pytest -q   (or set HIRESNAP_PYTHON=/path/to/python)";
           exit 0; fi;
           echo "backend pytest interpreter: $chosen";
-          "$chosen" -m pytest -q tests'
+          "$chosen" -m pytest -q'
         language: system
         pass_filenames: false
         always_run: true
 
       # --- frontend ---------------------------------------------------------
-      # frontend/package.json ships only start/build/test/eject - there is NO lint
-      # script and no eslint in devDependencies, because react-scripts bundles its
-      # own ESLint. `npx --no-install eslint` is therefore the only form that works
-      # without editing a file this repository does not own (frontend is a
-      # gitlink). --no-install also refuses to download a package into the tree.
+      # frontend/package.json owns the lint command (scripts.lint = "eslint src --ext
+      # .js,.jsx"), and ESLint arrives with react-scripts rather than from a pin of
+      # its own, so the hook runs the script instead of spelling the glob out here:
+      # a copy of the command is the copy that drifts. The tree is a gitlink - this
+      # repository cannot edit it - which is exactly why the ONE definition is kept
+      # on the side that owns it.
       #
       # WHY the missing node_modules branch exits 0: without it the hook fails on
       # "Cannot find module eslint-plugin-react" - i.e. on the ABSENCE of
       # dependencies - and then every backend-only commit is blocked for an
       # unrelated reason (R:\GPTHub\.pre-commit-config.yaml:198-203).
+      # WHY 'npm run lint' and no longer 'npx --no-install eslint <glob>': the
+      # frontend now SHIPS the command (frontend/package.json scripts.lint =
+      # "eslint src --ext .js,.jsx"), so the gate, the developer and CI all run the
+      # same line. A glob spelled out here would drift from the one in package.json
+      # the first time somebody adds a directory or a .mjs file, and the drift is
+      # silent: the hook keeps passing over the files it does know.
+      #
+      # WHY the eslint PRESENCE probe stays: node_modules is not committed, so a
+      # fresh clone has no eslint and 'npm run lint' exits 127 with "eslint:
+      # command not found" - a missing local prerequisite reported as a broken
+      # commit. The SKIP names the fix (npm ci) and states that nothing was checked.
+      # WHY it is not 'CI=true npm run build': the build is deliberately NOT a lint
+      # gate - react-scripts turns every ESLint warning into a build error under
+      # CI=true, which would fail on warnings this repository has not cleared.
       - id: frontend-eslint
         name: frontend - ESLint
         entry: >-
           bash -lc 'cd frontend || exit 2;
           [ -d node_modules/eslint ] || { echo "SKIP frontend eslint: no frontend/node_modules (run: cd frontend and npm ci)"; exit 0; };
-          npx --no-install eslint "src/**/*.{js,jsx}"'
+          npm run lint --silent'
         language: system
         pass_filenames: false
         always_run: true

@@ -251,6 +251,31 @@ jobs:
       - name: Compile every module
         run: python -m compileall -q service
 
+      # THE LAYOUT GUARD IS RUN FROM THE REPOSITORY ROOT, not from backend/:
+      # the job's defaults.run working-directory is backend, so this step overrides
+      # it explicitly. The guard is a PATH assertion ("does the tree still look like
+      # this"), and a path assertion resolved against the wrong directory passes for
+      # the wrong reason - the same defect as the \"ruff src\" step that linted a
+      # directory which no longer existed and reported no files.
+      #
+      # WHY a guard that belongs to the submodule runs here at all: it is the only
+      # thing that knows the vertical-slice convention, and CI is the last place a
+      # wrong tree can be caught before it is merged. It is stdlib-only and needs
+      # nothing installed, so it runs before the toolchain is set up and its failure
+      # is never confused with a dependency problem.
+      # WHY the absence is a visible SKIP rather than a silent pass: the file lives
+      # in the backend gitlink, so a checkout made without submodules legitimately
+      # does not have it. Saying so out loud keeps a missing guard from looking like
+      # a satisfied contract (the guards job makes the same argument).
+      - name: Backend layout guard
+        working-directory: .
+        run: |
+          if [ ! -f backend/scripts/check_backend_layout.py ]; then
+            echo "SKIP: backend/scripts/check_backend_layout.py is absent - the backend submodule was not checked out, so the layout is unverified, not satisfied"
+            exit 0
+          fi
+          python backend/scripts/check_backend_layout.py
+
       - name: Install ruff
         run: python -m pip install "ruff==0.14.1"
 
@@ -337,6 +362,19 @@ jobs:
 
       # The suite is the service's own contract; it does not need a database or a
       # GPU (docs/KNOWN_GAPS.md). `-q` keeps the log readable.
+      #
+      # WHY `python -m pytest -q` WITHOUT a path: tests/ grows SUBTREES
+      # (fixtures/, integration/, snapshots/, vectors/, manual/), and an explicit
+      # path argument both skips sibling directories a later commit adds and narrows
+      # pytest's rootdir to the argument. With no argument pytest takes its rootdir
+      # from the ini file / the invocation directory (backend/, the job's
+      # working-directory), recurses into every test_*.py below it, and picks up new
+      # directories with no workflow edit. Verified locally: 131 tests collected
+      # from backend/ with the subtree layout, 0 from a single narrow directory.
+      # WHY the `-d tests` guard is still there: pytest exits 4 (not 0) when the
+      # argument does not exist, and a job that fails because a directory is absent
+      # reports a missing file as a defect. The guard converts that into an explicit
+      # SKIP - the directory is the contract, its absence is the gap.
       - name: Pytest
         run: |
           if [ ! -d tests ]; then
@@ -344,7 +382,7 @@ jobs:
             exit 0
           fi
           python -m pip install "pytest==8.2.2"
-          python -m pytest -q tests
+          python -m pytest -q
 
   # ===========================================================================
   # 4b. ML sidecar - the contract tests that must pass with no torch and no GPU.
@@ -463,6 +501,24 @@ jobs:
                                    ' tests would collect nothing and pass')
           PY
 
+      # The sidecar's OWN layout guard, before the tests. ml/service/ is a flat
+      # directory of top-level modules BECAUSE the container imports them that way
+      # (PYTHONPATH=/app/service, no package, no __init__.py); the day somebody adds
+      # ml/service/core/helpers.py and a relative import, the image still builds and
+      # the tests still pass while the documented contract in ml/README.md is gone.
+      # The guard belongs to the submodule (it knows what "flat" means for its own
+      # tree), is stdlib-only, and is named here rather than globbed so a rename is a
+      # visible edit instead of a silently skipped step.
+      # WHY absent is a visible SKIP: the file ships with ml/, so its absence means
+      # the submodule was checked out without it - unverified, not satisfied.
+      - name: Sidecar layout guard
+        run: |
+          if [ ! -f ml/scripts/check_ml_service_layout.py ]; then
+            echo "SKIP: ml/scripts/check_ml_service_layout.py is absent - the ml submodule was not checked out, so the flat layout is unverified, not satisfied"
+            exit 0
+          fi
+          python ml/scripts/check_ml_service_layout.py
+
       # The tests run from the repository ROOT, not from ml/. Two reasons, and the
       # first one is the load-bearing one: ml/pyproject.toml sets testpaths and
       # pythonpath, so pytest infers the same rootdir here as it does for
@@ -503,8 +559,27 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # WHY `npm run lint` AND NOT THE ESLINT COMMAND LINE: package.json owns one
+      # definition of what linting this tree means (`eslint src --ext .js,.jsx`),
+      # and the pre-commit hook runs that same script. Spelling the glob out here
+      # would drift the first time a directory or an .mjs file is added, and the two
+      # gates would then quietly check different files - the failure mode the fat
+      # rule set taught us to avoid. `--no-install` is unnecessary: the script is
+      # resolved from node_modules by npm itself, and `npm ci` above installed it.
       - name: ESLint
-        run: npx --no-install eslint "src/**/*.{js,jsx}"
+        run: npm run lint --silent
+
+      # WHY A REACHABILITY CHECK AND NOT ONLY ESLINT: this tree is layered
+      # pages -> features -> shared with absolute imports from `src/`, so a file can
+      # be perfectly valid, pass every rule, and still be dead - the barrel
+      # (features/<domain>/index.js) is the only thing that decides what is public,
+      # and a module nothing imports is a module nothing tests. The script walks the
+      # real import graph from src/index.js rather than grepping for the filename.
+      # It is deliberately NOT part of `npm run build`: a build that fails on an
+      # orphan file teaches people to delete the check, while a dedicated step names
+      # the file that has no importer.
+      - name: Unreachable modules
+        run: npm run find:unreachable --silent
 
       # `--watchAll=false` because watch mode never exits on a runner. CI=true also
       # makes react-scripts treat warnings as errors in the build below, which is

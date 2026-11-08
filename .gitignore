@@ -90,7 +90,7 @@ pretrained_ckpts
 # (docker/.env.example section 3), which the stack mounts from infra/certs into
 # /app/secrets/certs. Any keypair generated IN PLACE inside a service checkout -
 # the shape the fallback path (service/certs, derived from
-# service/domain/models.py's __file__) would create - must never be committed:
+# service/models/auth_models.py's __file__) would create - must never be committed:
 # it would let anyone mint valid access tokens against this deployment. The pair
 # is generated on the host (docs/SECRETS.md).
 src/certs

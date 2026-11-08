@@ -44,7 +44,7 @@ x-backend-env: &backend-env
   PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8088}
   DATA_PATH: ${DATA_PATH:-/app/data}
   # Platform layer (service/infrastructure, service/infrastructure/messaging,
-  # service/services/jobs_services.py).
+  # service/services/jobs/application/job_service.py).
   # Each of these is EMPTY or false by default in the manifest on purpose: the
   # flag section (CACHE/STORAGE/MAIL/CELERY=1) is what turns an OPTIONAL sidecar
   # on, and docker/sidecar_profiles.sh exports the wiring when it does. A key
