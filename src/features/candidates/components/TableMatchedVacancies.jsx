@@ -4,6 +4,7 @@ import UlForTable from "shared/components/tables/UlForTable";
 import CandidateService from "shared/api/services/candidateService";
 import VacancyService from "shared/api/services/vacancyService";
 import { useFetching } from "shared/hooks/useFetching";
+import { formatSimilarity } from "shared/lib/format";
 import styles from "shared/components/tables/table.module.css";
 
 // The candidate side: GET /api/get_all_vacancies/inference/candidate/{user_id}
@@ -73,7 +74,7 @@ const TableMatchedVacancies = ({ userId }) => {
                   {match.vacancy?.salary || "—"}
                 </td>
                 <td className={styles.table__td}>
-                  {Number(match.distance).toFixed(3)}
+                  {formatSimilarity(match.distance)}
                 </td>
               </tr>
             ))}

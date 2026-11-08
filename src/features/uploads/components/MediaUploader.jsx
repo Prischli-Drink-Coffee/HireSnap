@@ -9,7 +9,7 @@ import {
   Text,
 } from "@chakra-ui/react";
 
-// File picker shared by the upload flows. It owns the <input> and the client-side
+// File picker for the upload flow. It owns the <input> and the client-side
 // validation only; the caller decides the endpoint and what to do with the answer.
 const MediaUploader = ({
   label = "Загрузить файл",

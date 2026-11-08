@@ -48,8 +48,9 @@ function resolveBaseUrl() {
 
 export const baseUrl = resolveBaseUrl();
 
-// Every path below is a route that exists in the backend today (the routers under
-// backend/service/api/routers/) and is reachable through the gateway, which
+// Every path below is a route that exists in the backend today (each slice's
+// backend/service/services/<domain>/presentation/routers/<name>_api/) and is reachable
+// through the gateway, which
 // rewrites "/api/" to the backend's "/server/" mount. Trailing slashes are kept
 // exactly as the server declares them: FastAPI would answer a slashless POST
 // with a 307 redirect, and a redirected multipart upload is a needless failure

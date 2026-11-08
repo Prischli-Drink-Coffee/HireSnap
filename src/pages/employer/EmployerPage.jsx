@@ -1,8 +1,7 @@
 import React, { useState } from "react";
 import { Divider, Heading, Text, VStack } from "@chakra-ui/react";
-import VacancyCreateForm from "shared/components/forms/VacancyCreateForm";
-import TableVacancies from "shared/components/tables/TableVacancies";
-import TableCandidates from "shared/components/tables/TableCandidates";
+import { TableVacancies, VacancyCreateForm } from "features/vacancies";
+import { TableCandidates } from "features/candidates";
 
 // The employer screen: list the vacancies, create one, and for the selected
 // vacancy see the matched candidates. All three come from endpoints that exist -
@@ -20,11 +19,11 @@ const EmployerPage = () => {
       flexGrow={1}
       width="100%"
     >
-      <Heading as="h1" fontSize="22px" fontWeight={700}>
+      <Heading as="h1" fontSize="heading" fontWeight={700}>
         Вакансии
       </Heading>
 
-      <Text fontSize={14} maxW="720px">
+      <Text fontSize="body" maxW="720px">
         Список ниже показывает вакансии, которые уже есть в системе. Выберите
         вакансию, чтобы увидеть подходящих кандидатов.
       </Text>
@@ -33,7 +32,7 @@ const EmployerPage = () => {
 
       <Divider />
 
-      <Heading as="h2" fontSize="18px" fontWeight={700}>
+      <Heading as="h2" fontSize="subheading" fontWeight={700}>
         Все вакансии
       </Heading>
       <TableVacancies
@@ -43,7 +42,7 @@ const EmployerPage = () => {
 
       <Divider />
 
-      <Heading as="h2" fontSize="18px" fontWeight={700}>
+      <Heading as="h2" fontSize="subheading" fontWeight={700}>
         {selectedVacancy
           ? `Кандидаты на вакансию «${selectedVacancy.name}»`
           : "Кандидаты"}
@@ -51,7 +50,7 @@ const EmployerPage = () => {
       {selectedVacancy ? (
         <TableCandidates vacancyId={selectedVacancy.id} />
       ) : (
-        <Text fontSize={14} color="light_dark">
+        <Text fontSize="body" color="light_dark">
           Выберите вакансию в таблице, чтобы увидеть подходящих кандидатов.
         </Text>
       )}

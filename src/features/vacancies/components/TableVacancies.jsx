@@ -5,6 +5,7 @@ import UlForTable from "shared/components/tables/UlForTable";
 import VacancyService from "shared/api/services/vacancyService";
 import { useFetching } from "shared/hooks/useFetching";
 import useWindowDimensions from "shared/hooks/useWindowDimensions";
+import { PAGINATION } from "constants.js";
 import styles from "shared/components/tables/table.module.css";
 
 // GET /api/vacancies/ is a plain collection with no paging parameters, so the
@@ -15,7 +16,9 @@ const TableVacancies = ({ onSelectVacancy }) => {
   const [vacancies, setVacancies] = useState([]);
   const [sortAsc, setSortAsc] = useState(true);
   const [currentPage, setCurrentPage] = useState(1);
-  const [currentPageSize, setCurrentPageSize] = useState(10);
+  const [currentPageSize, setCurrentPageSize] = useState(
+    PAGINATION.defaultPageSize,
+  );
   const { width } = useWindowDimensions();
 
   const [getVacancies, error] = useFetching(async () => {
@@ -40,7 +43,10 @@ const TableVacancies = ({ onSelectVacancy }) => {
     return rows;
   }, [vacancies, sortAsc]);
 
-  const pageSize = currentPageSize === "" ? 5 : Number(currentPageSize) || 5;
+  const pageSize =
+    currentPageSize === ""
+      ? PAGINATION.fallbackPageSize
+      : Number(currentPageSize) || PAGINATION.fallbackPageSize;
   const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
   const page = Math.min(currentPage, totalPages);
   const visible = sorted.slice((page - 1) * pageSize, page * pageSize);
@@ -54,7 +60,11 @@ const TableVacancies = ({ onSelectVacancy }) => {
       ) : (
         <table
           className={styles.table}
-          width={width <= 944 ? "944px" : "100%"}
+          width={
+            width <= PAGINATION.horizontalScrollWidth
+              ? PAGINATION.horizontalScrollWidth + "px"
+              : "100%"
+          }
         >
           <thead>
             <tr className={styles.table__thead_tr}>

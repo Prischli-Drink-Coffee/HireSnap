@@ -3,6 +3,7 @@ import { Image, Input, Text } from "@chakra-ui/react";
 import chevronLeft from "shared/assets/images/chevron-left-pagination.svg";
 import chevronRight from "shared/assets/images/chevron-right-pagination.svg";
 import { usePagination } from "shared/hooks/usePagination";
+import { PAGINATION } from "constants.js";
 import styles from "shared/components/pagination/pagination.module.css";
 
 const Pagination = ({
@@ -16,11 +17,12 @@ const Pagination = ({
 }) => {
   const pages = usePagination(totalPages, currentPage);
 
-  // An empty box means "all rows"; a page size larger than the row count is
-  // clamped so the "shown X – Y of N" range never overruns the data.
+  // An empty box means the fallback size; a page size larger than the row count is
+  // clamped so the "shown X – Y of N" range never overruns the data. Both numbers
+  // come from constants because the table slices its rows with them too.
   const pageSize =
     currentPageSize === ""
-      ? 5
+      ? PAGINATION.fallbackPageSize
       : Math.min(currentPageSize, totalCountItem || 1);
 
   // Changing the page size keeps the reader at the same row: the old offset is

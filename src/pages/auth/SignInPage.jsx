@@ -6,6 +6,7 @@ import { ReactComponent as LoginIcon } from "shared/assets/images/authorization.
 import UserService from "shared/api/services/userService";
 import { setUser } from "shared/auth/userCookie";
 import { sessionFromTokens } from "shared/auth/session";
+import { ROUTE_PATHS } from "constants.js";
 
 const validate = (values) => {
   const errors = {};
@@ -33,7 +34,7 @@ const SignInPage = () => {
     try {
       const response = await UserService.signIn(values.email, values.password);
       setUser(sessionFromTokens(response.data, { email: values.email }));
-      navigate("/");
+      navigate(ROUTE_PATHS.home);
     } catch (error) {
       console.error("Error signIn:", error);
       toast({

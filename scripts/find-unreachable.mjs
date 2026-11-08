@@ -78,8 +78,8 @@ const resolveFromBase = (specifier, baseDir = srcRoot) => {
 // The bare specifiers suggest.baseUrl='src' turns into src/<specifier>. Keeping
 // the list explicit means a typo ('hooks/useFoo') is reported as unresolved
 // instead of being silently treated as a package.
-const ALIAS_PREFIXES = ['shared/', 'app/', 'pages/', 'components/', 'theme/', 'styles/'];
-const ALIAS_EXACT = ['App', 'Layout'];
+const ALIAS_PREFIXES = ['shared/', 'app/', 'pages/', 'features/', 'theme/', 'styles/'];
+const ALIAS_EXACT = ['App', 'Layout', 'constants.js'];
 
 /**
  * Resolve one import specifier to an absolute file path, or null.

@@ -3,6 +3,7 @@ import { Box, Text } from "@chakra-ui/react";
 import UlForTable from "shared/components/tables/UlForTable";
 import VacancyService from "shared/api/services/vacancyService";
 import { useFetching } from "shared/hooks/useFetching";
+import { formatSimilarity } from "shared/lib/format";
 import styles from "shared/components/tables/table.module.css";
 
 // GET /api/get_all_candidates/inference/vacancy/{vacancy_id} returns the
@@ -51,7 +52,7 @@ const TableCandidates = ({ vacancyId }) => {
                   Кандидат #{candidate.user_id}
                 </td>
                 <td className={styles.table__td}>
-                  {Number(candidate.distance).toFixed(3)}
+                  {formatSimilarity(candidate.distance)}
                 </td>
               </tr>
             ))}

@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Divider, Heading, Text, VStack, useToast } from "@chakra-ui/react";
-import MediaUploader from "shared/components/media/MediaUploader";
-import TableMatchedVacancies from "shared/components/tables/TableMatchedVacancies";
+import { MediaUploader } from "features/uploads";
+import { TableMatchedVacancies } from "features/candidates";
 import CandidateService from "shared/api/services/candidateService";
 import useCurrentUser from "shared/hooks/useCurrentUser";
 
@@ -53,11 +53,11 @@ const CandidatePage = () => {
       flexGrow={1}
       width="100%"
     >
-      <Heading as="h1" fontSize="22px" fontWeight={700}>
+      <Heading as="h1" fontSize="heading" fontWeight={700}>
         Подбор вакансий
       </Heading>
 
-      <Text fontSize={14} maxW="720px">
+      <Text fontSize="body" maxW="720px">
         Загрузите короткое видео о себе. Сервер извлечёт из него профиль и
         подберёт вакансии, которые подходят вам лучше всего.
       </Text>
@@ -73,7 +73,7 @@ const CandidatePage = () => {
 
       <Divider />
 
-      <Heading as="h2" fontSize="18px" fontWeight={700}>
+      <Heading as="h2" fontSize="subheading" fontWeight={700}>
         Подходящие вакансии
       </Heading>
       {/* A key rather than an effect: the table owns its own fetch, and remounting

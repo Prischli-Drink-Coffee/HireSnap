@@ -15,6 +15,7 @@ import { HamburgerIcon } from "@chakra-ui/icons";
 import { Link } from "react-router-dom";
 import logotype from "shared/assets/images/logotype.svg";
 import NavBar from "shared/components/layout/NavBar";
+import { ROUTE_PATHS } from "constants.js";
 
 // The bar itself: logo on the left, the drawer trigger on the right. The drawer
 // holds the navigation because the menu is longer than a phone-width header.
@@ -34,12 +35,12 @@ const Header = () => {
       paddingRight={["10px", "15px", "20px", "25px", "30px"]}
       paddingTop={5}
       paddingBottom={5}
-      boxShadow="0px 0px 25px 0px rgba(0, 0, 0, 0.10)"
+      boxShadow="header"
     >
       {/* A router Link, not an anchor: the header renders inside the router on
           every route including /sign_in, so an <a href="/"> would reload the
           whole bundle just to reach the page it is already on. */}
-      <Link to="/" aria-label="HireSnap - на главную">
+      <Link to={ROUTE_PATHS.home} aria-label="HireSnap - на главную">
         <Image src={logotype} alt="HireSnap" />
       </Link>
       <IconButton
@@ -58,7 +59,7 @@ const Header = () => {
         <DrawerOverlay />
         <DrawerContent>
           <DrawerCloseButton />
-          <DrawerHeader fontSize={22}>Навигация</DrawerHeader>
+          <DrawerHeader fontSize="heading">Навигация</DrawerHeader>
           <DrawerBody>
             <NavBar />
           </DrawerBody>

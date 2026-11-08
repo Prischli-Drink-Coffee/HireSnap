@@ -1,18 +1,21 @@
 import { useMemo } from "react";
-
-// How many numbered page buttons are shown at once.
-const PAGINATION_PAGES = 5;
+import { PAGINATION } from "constants.js";
 
 // Returns the visible window of page numbers for a paginator of totalPages
 // pages sitting on currentPage. The window is always contiguous and always has
-// PAGINATION_PAGES entries when totalPages is large enough.
+// PAGINATION.pageButtonCount entries when totalPages is large enough.
+//
+// The width lives in constants because the table that owns the state and this
+// hook that slices it must agree: a 4-wide window over a 5-sized page list is a
+// page number the reader can never reach.
 export const usePagination = (totalPages, currentPage) =>
   useMemo(() => {
+    const { pageButtonCount } = PAGINATION;
     const pageArray = [];
-    if (totalPages > PAGINATION_PAGES) {
+    if (totalPages > pageButtonCount) {
       if (currentPage > 3) {
         if (totalPages - 2 < currentPage) {
-          for (let i = totalPages - PAGINATION_PAGES + 1; i <= totalPages; i++) {
+          for (let i = totalPages - pageButtonCount + 1; i <= totalPages; i++) {
             pageArray.push(i);
           }
         } else {
@@ -21,7 +24,7 @@ export const usePagination = (totalPages, currentPage) =>
           }
         }
       } else {
-        for (let i = 1; i <= PAGINATION_PAGES; i++) {
+        for (let i = 1; i <= pageButtonCount; i++) {
           pageArray.push(i);
         }
       }

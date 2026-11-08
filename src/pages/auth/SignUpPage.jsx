@@ -12,13 +12,14 @@ import {
 } from "@chakra-ui/react";
 import { useFormik } from "formik";
 import { useNavigate } from "react-router-dom";
+import { ROUTE_PATHS } from "constants.js";
 import { ReactComponent as RegistrationIcon } from "shared/assets/images/registration.svg";
 import UserService from "shared/api/services/userService";
 import { setUser } from "shared/auth/userCookie";
 import { sessionFromTokens } from "shared/auth/session";
 
 // POST /api/signup/ requires type_user, which the server restricts to
-// "candidate" or "employer" (backend/service/domain/models.py:136-141). The form
+// "candidate" or "employer" (backend/service/models/db/db_models.py:30-35, TypeUser). The form
 // therefore asks for the account type instead of inventing a default.
 const validate = (values) => {
   const errors = {};
@@ -49,7 +50,7 @@ const SignUpPage = () => {
         typeUser: values.typeUser,
       });
       setUser(sessionFromTokens(response.data, { email: values.email }));
-      navigate("/");
+      navigate(ROUTE_PATHS.home);
     } catch (error) {
       console.error("Error signing up:", error);
       toast({
