@@ -149,8 +149,9 @@ python -m pytest -q
 Покрытие ветвей `service/` проверяется отдельной целью `make coverage` (из корня
 репозитория): порог лежит в `pyproject.toml` (`[tool.coverage.report] fail_under`), а
 запускается CLI `coverage`, а не `pytest --cov`, потому что pytest-cov читает
-`.coveragerc` и игнорирует `pyproject.toml`. Один тест помечен `xfail(strict=True)` — это
-известный дефект из `docs/KNOWN_GAPS.md` §26, а не зелёная галочка.
+`.coveragerc` и игнорирует `pyproject.toml`. Помеченных `xfail` тестов больше нет: дефект
+из `docs/KNOWN_GAPS.md` §26 (ссылка «вакансия — личность» писалась не той личности) закрыт
+вместе со своим `strict=True`-маркером, и теперь это обычный проходящий тест.
 
 ### Переменные среды
 

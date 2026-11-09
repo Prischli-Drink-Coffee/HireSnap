@@ -39,7 +39,15 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_distances
 
 from service.configuration.logging import get_logger
-from service.infrastructure.ml_sidecar import get_user_embedding
+from service.configuration.paths import data_dir
+from service.infrastructure.ml_sidecar import (
+    MLClientError,
+    MLContractError,
+    MLRejected,
+    MLUnavailable,
+    get_text_embedding,
+    get_user_embedding,
+)
 from service.infrastructure.uploads import (
     write_embedding_into_server,
     write_file_into_server,
@@ -51,6 +59,12 @@ from service.models import (
     InfoCandidates,
     PersonalityCandidates,
     PersonalityVacancies,
+    Vacancies,
+)
+from service.shared.errors import (
+    InvalidPayloadError,
+    ServiceError,
+    UpstreamUnavailableError,
 )
 from service.shared.urls import return_url_object
 
@@ -95,6 +109,60 @@ def filter_matrix(final_matrix, threshold=SIMILARITY_THRESHOLD):
     normalized_matrix = (normalized_matrix - row_min) / denominator
     normalized_matrix[normalized_matrix < threshold] = 0
     return normalized_matrix
+
+
+def _embedding_path(url: str) -> str:
+    """Resolve an embeddings URL from the database into a path numpy can open.
+
+    Every row stores a path RELATIVE to `DATA_PATH` ("embeddings/users/<uuid>.npy"),
+    because that is what `write_embedding_into_server` returns and what the static `/data`
+    mount serves. The old reads handed that string straight to `np.load`, so they resolved
+    against the PROCESS working directory - correct only when the process happened to be
+    started from `/app`. An absolute path (a test fixture, or a row written by the notebooks
+    under `data/`) is returned unchanged, so nothing that worked stops working.
+    """
+    if os.path.isabs(url):
+        return url
+    return str(data_dir() / url)
+
+
+def _vacancy_fields(name, description, salary, skill):
+    """Normalise the four form fields into the shape the table and the embedder expect.
+
+    WHY THIS EXISTS AT ALL: the route accepts them as `Form(...)`, so every value arrives as
+    a string, and a form posted from a browser sends `""` for a box the employer left empty.
+    `Vacancies.Name` and `.Description` are required `StrictStr`, so an empty description
+    would otherwise reach the embedder as an empty string and come back as a 400 from a
+    service several hundred lines away from the field that was actually blank. Rejecting
+    here names the field. An optional field that is blank becomes `None` so the column holds
+    NULL rather than an empty string the UI has to special-case.
+    """
+    values = {
+        "name": (name or "").strip(),
+        "description": (description or "").strip(),
+        "salary": (salary or "").strip() or None,
+        "skill": (skill or "").strip() or None,
+    }
+    missing = [field for field in ("name", "description") if not values[field]]
+    if missing:
+        raise InvalidPayloadError(
+            "Missing required vacancy field(s): %s" % ", ".join(sorted(missing))
+        )
+    return values["name"], values["description"], values["salary"], values["skill"]
+
+
+def _vacancy_document(name: str, description: str, skill) -> str:
+    """The text that gets embedded for a vacancy.
+
+    WHY NOT JUST THE DESCRIPTION: a vacancy is matched against a candidate vector that was
+    built from a transcript and a video, so it has to carry the words a candidate would say
+    about the job - the title and the required skills included. The description alone loses
+    the title, which is the single most informative token for a job posting.
+    """
+    parts = [name, description]
+    if skill:
+        parts.append("Skills: %s" % skill)
+    return "\n\n".join(part for part in parts if part)
 
 
 def _distance(value) -> Decimal:
@@ -204,14 +272,31 @@ class MatchingService:
 
     # --- scoring -----------------------------------------------------------
     def _ocean_matrix(self):
-        """The five OCEAN embeddings, stacked in the order the personalities table lists them."""
-        personalities = self._personalities.get_all_personalities()
-        rows = []
-        for personality in personalities:
-            if personality.Name in OCEAN_NAMES:
-                storage_path = self._embeddings.get_embedding_by_id(personality.EmbeddingID).Url
-                rows.append(np.load(storage_path))
-        return personalities, np.vstack(rows)
+        """The five OCEAN embeddings, stacked in the order the OCEAN axes are named.
+
+        WHY THE AXIS ROWS ARE RETURNED, NOT EVERY PERSONALITY: the matrix has one column per
+        axis, so the list that comes back has to be the list the columns belong to. The
+        previous version returned EVERY row of the personalities table beside a matrix built
+        from only the five axes, and both scoring loops then indexed the returned list with a
+        matrix column number - so a table holding one non-axis row (an MBTI profile, say)
+        silently attributed every score to the wrong personality. Filtering here means the
+        caller cannot get the two lists out of step, which is the whole defect behind
+        docs/KNOWN_GAPS.md section 26.
+        """
+        selected = [
+            personality
+            for personality in self._personalities.get_all_personalities()
+            if personality.Name in OCEAN_NAMES
+        ]
+        # Canonical axis order rather than table order: "column 0 is O" has to be a fact
+        # about this module, not about the order a row happened to be inserted in. The sort
+        # is stable, so two rows sharing a name keep their insertion order.
+        selected.sort(key=lambda personality: OCEAN_NAMES.index(personality.Name))
+        rows = [
+            np.load(_embedding_path(self._embeddings.get_embedding_by_id(row.EmbeddingID).Url))
+            for row in selected
+        ]
+        return selected, np.vstack(rows)
 
     def similarity_for_user(self, user_id: int):
         """Score one candidate against every personality and vacancy and store the rows.
@@ -219,25 +304,26 @@ class MatchingService:
         WHAT THIS RETURNS: the candidate-vs-personality matrix (C), which is what the original
         returned and what the commented-out caller expected.
 
-        KNOWN DEFECT, PRESERVED ON PURPOSE: the personality-vacancy loop reads
-        `personalities[j]` while iterating zipped P rows, so `j` is the leftover index of the
-        previous loop. The original did the same, and the row it writes is therefore not
-        always the personality the score belongs to. Fixing it changes stored data, which is
-        a migration, so it is recorded in docs/KNOWN_GAPS.md instead of being slipped into a
-        refactor whose whole claim is "behaviour unchanged".
+        THE PERSONALITY-VACANCY LINK USED TO BE WRONG IN TWO WAYS AT ONCE (docs/KNOWN_GAPS.md
+        section 26): it walked `zip(P[0, :], vacancies)` - ROW ZERO of the vacancy-vs-
+        personality matrix, i.e. the first vacancy's scores against every axis - and paired
+        those five numbers with the vacancies, three of them if the catalogue had three. The
+        personality it stored was `personalities[j]` with `j` left over from the loop above,
+        so the id was a coincidence of where that loop stopped. The pair is now read from the
+        matrix's own coordinates: row i is vacancy i, column j is axis j.
         """
         personalities, ocean = self._ocean_matrix()
 
         user = self._users.get_user_by_id(user_id)
         info_candidate = self._info_candidates.get_info_candidate_by_id(user.InfoID)
         embedding_url = self._embeddings.get_embedding_by_id(info_candidate.EmbeddingID).Url
-        user_embedding = np.load(os.path.join("./data", embedding_url))
+        user_embedding = np.load(_embedding_path(embedding_url))
 
         vacancies = self._vacancies.get_all_vacancies()
         vacancy_embeddings = np.vstack(
             [
-                np.load(self._embeddings.get_embedding_by_id(vacancy.EmbeddingID).Url)
-                for vacancy in vacancies
+                np.load(_embedding_path(self._embeddings.get_embedding_by_id(v.EmbeddingID).Url))
+                for v in vacancies
             ]
         )
 
@@ -245,25 +331,30 @@ class MatchingService:
         b = filter_matrix(a)
 
         for j, personality in enumerate(personalities):
-            similarity = C[0, j]
-            if similarity >= SIMILARITY_THRESHOLD:
+            score = C[0, j]
+            if score >= SIMILARITY_THRESHOLD:
                 self._personality_candidates.create_personality_candidate(
                     PersonalityCandidates(
                         personality_id=personality.ID,
                         user_id=user.ID,
-                        distance=_distance(similarity),
+                        distance=_distance(score),
                     )
                 )
 
-        for similarity, vacancy in zip(P[0, :], vacancies):
-            if similarity >= SIMILARITY_THRESHOLD:
-                self._personality_vacancies.create_personality_vacancy(
-                    PersonalityVacancies(
-                        personality_id=personalities[j].ID,
-                        vacancy_id=vacancy.ID,
-                        distance=_distance(similarity),
+        # One row per (vacancy, axis) pair: row i of P is vacancy i, column j is axis j.
+        # Nothing here reads an index left over from another loop, which is what made the
+        # stored personality arbitrary.
+        for i, vacancy in enumerate(vacancies):
+            for j, personality in enumerate(personalities):
+                score = P[i, j]
+                if score >= SIMILARITY_THRESHOLD:
+                    self._personality_vacancies.create_personality_vacancy(
+                        PersonalityVacancies(
+                            personality_id=personality.ID,
+                            vacancy_id=vacancy.ID,
+                            distance=_distance(score),
+                        )
                     )
-                )
 
         for j, vacancy in enumerate(vacancies):
             similarity = b[0, j]
@@ -341,16 +432,62 @@ class MatchingService:
         }
 
     def upload_vacancy(self, name, description, salary, skill):
-        """Accept a vacancy from the employer form and persist nothing yet.
+        """Embed the posted text through the sidecar, then store the vacancy and its vector.
 
-        THIS IS THE HONEST STATE OF THE FEATURE, not a stub a refactor introduced: the route
-        validates its four form fields and answers with a fixed body, because the form posts
-        text and the pipeline needs an embedding the employer has not produced. The old
-        module returned the same literal; the frontend shows a warning instead of a success
-        toast because of it (docs/KNOWN_GAPS.md).
+        The employer form posts text, not a video, so the vector comes from
+        `POST /v1/embed/text` on the ml sidecar - the same 384-dimensional space the candidate
+        vectors live in, which is what makes a vacancy comparable to a person at all. The row
+        and its embedding are written in the same order `upload_video` uses: the embedding
+        first, so a vacancy row can never point at a vector that does not exist.
+
+        WHY THIS LIVES HERE AND NOT IN `VacancyService`: the vacancy service owns the table and
+        knows nothing about the sidecar; this method is the orchestrator that already imports
+        both, and keeping the ordering in one place means the upload path reads top to bottom
+        as the contract.
+
+        FAILURES ARE TRANSLATED, NOT LEAKED (docs/KNOWN_GAPS.md section 37): the sidecar
+        transport raises `MLUnavailable` / `MLRejected` / `MLContractError`, which are
+        RuntimeErrors and would otherwise surface as a 500 with no actionable text. A stopped
+        or overloaded sidecar is the client's 503, a vector the sidecar refuses to produce for
+        the text it was given is that refusal, and anything else is a 500 that still names the
+        sidecar. The vacancy is NOT created in any of those cases - a text-only row with no
+        embedding cannot be scored, so storing it would only hide the failure.
         """
-        log.info("vacancy received but not persisted: name=%r salary=%r", name, salary)
-        return {"message": "test"}
+        name, description, salary, skill = _vacancy_fields(name, description, salary, skill)
+
+        log.info("embedding vacancy text: name=%r salary=%r", name, salary)
+        try:
+            vector = get_text_embedding(_vacancy_document(name, description, skill))
+        except MLUnavailable as error:
+            raise UpstreamUnavailableError(str(error)) from error
+        except (MLRejected, MLContractError) as error:
+            raise InvalidPayloadError(str(error)) from error
+        except MLClientError as error:
+            # The base class: anything the transport raised that is neither "down" nor "the
+            # text was refused" - a malformed answer, an expired contract. Still 500, but with
+            # the transport's own sentence rather than a bare traceback in the log.
+            raise ServiceError(str(error)) from error
+
+        unique_embedding = write_embedding_into_server("vacancies", vector)
+        embedding_entity = self._embeddings.create_embedding(
+            Embeddings(url=f"embeddings/vacancies/{unique_embedding}")
+        )
+        vacancy = self._vacancies.create_vacancy(
+            Vacancies(
+                name=name,
+                description=description,
+                salary=salary,
+                skill=skill,
+                embedding_id=embedding_entity.ID,
+            )
+        )
+        log.info(
+            "vacancy stored: id=%r name=%r embedding_id=%r",
+            vacancy.ID,
+            vacancy.Name,
+            vacancy.EmbeddingID,
+        )
+        return vacancy.model_dump(by_alias=True)
 
     # --- read models -------------------------------------------------------
     def get_all_vacancies(self, user_id):

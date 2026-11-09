@@ -12,10 +12,11 @@ one object per collaborator, so a test never has to touch the wiring root - exce
 ONE test that pins what the wiring root is asked for, which is the only reason to look at
 `state` at all.
 
-WHAT IS NOT PINNED HERE: the personality-row defect described in the service docstring is
-asserted as wrong exactly once, in `test_slices_application.py`, as a strict xfail. This
-file asserts the parts of `similarity_for_user` that are independent of it (which rows get
-written at all, and how many), never the id it stores.
+WHAT IS NOW PINNED HERE AS WELL: the personality-vacancy pairing used to be wrong (a stale
+loop index plus row zero of the matrix, docs/KNOWN_GAPS.md section 26). The exact id it
+stores is asserted once, in `test_slices_application.py`; this file asserts the axes the
+matrix is built from and that the list and the matrix come out of the same filter, which is
+the property the defect broke.
 """
 
 from __future__ import annotations
@@ -112,12 +113,20 @@ def test_an_injected_collaborator_never_reaches_the_wiring_root(monkeypatch):
 
 # --- the OCEAN matrix --------------------------------------------------------
 def test_ocean_matrix_keeps_only_the_five_axis_rows(tmp_path):
-    """The personalities table may hold rows that are not OCEAN axes; they are skipped."""
+    """The personalities table may hold rows that are not OCEAN axes; they are skipped.
+
+    THE ASSERTION THAT MATTERS IS THE PAIRING: the list and the matrix come out of the same
+    filter, so `returned[j]` is always the row whose vector is column `j`. The defect this
+    replaces (docs/KNOWN_GAPS.md section 26) returned EVERY row beside an axes-only matrix,
+    which is how a score ended up stored against the wrong personality.
+    """
     paths = _write_vectors(
         tmp_path, {index + 1: vector for index, vector in enumerate(OCEAN_VECTORS.values())}
     )
     personalities = _personalities()
-    personalities.append(types.SimpleNamespace(ID=6, Name="MBTI", EmbeddingID=99))
+    # A non-axis row BETWEEN two axes: filtering alone is not enough, the ORDER has to be
+    # the axis order rather than "whatever order the table happened to return".
+    personalities.insert(2, types.SimpleNamespace(ID=6, Name="MBTI", EmbeddingID=99))
 
     service = MatchingService(
         personalities=FakeService(get_all_personalities=lambda: personalities),
@@ -128,20 +137,25 @@ def test_ocean_matrix_keeps_only_the_five_axis_rows(tmp_path):
 
     returned, matrix = service._ocean_matrix()
 
-    assert returned is personalities  # every row is handed back, filtered or not
+    assert [row.Name for row in returned] == ["O", "C", "E", "A", "N"]
+    assert len(returned) == matrix.shape[0]
     assert matrix.shape == (5, 3)
     assert matrix.tolist() == [vector.tolist() for vector in OCEAN_VECTORS.values()]
 
 
 # --- similarity_for_user ----------------------------------------------------
-def _similarity_service(tmp_path, vacancies):
+def _similarity_service(tmp_path, vacancies, monkeypatch):
     """A service wired for `similarity_for_user` over the vectors declared above.
 
-    The user vector is loaded from "./data/<url>" (the real code's convention), so the
-    fixture chdir's into the temporary directory and writes it under data/.
+    The candidate's own vector is stored the way the real code stores it - a path RELATIVE
+    to `DATA_PATH` - and `DATA_PATH` is pointed at the temporary directory, so the test
+    exercises the resolution instead of dodging it with a `chdir`. The old fixture chdir'd
+    and relied on the process working directory, which is exactly the bug `_embedding_path`
+    removes.
     """
     (tmp_path / "data").mkdir(exist_ok=True)
     np.save(tmp_path / "data" / "user.npy", OCEAN_VECTORS["O"])
+    monkeypatch.setenv("DATA_PATH", str(tmp_path / "data"))
 
     paths = _write_vectors(
         tmp_path,
@@ -150,7 +164,7 @@ def _similarity_service(tmp_path, vacancies):
             **{vacancy["embedding_id"]: vacancy["vector"] for vacancy in vacancies},
         },
     )
-    # The candidate's own vector is the ONE path resolved relative to "./data" (that is
+    # The candidate's own vector is the ONE path resolved relative to DATA_PATH (that is
     # the real code's convention for user embeddings); every other path is absolute.
     paths["user"] = "user.npy"
     written = {"personality_candidates": [], "personality_vacancies": [], "candidate_vacancies": []}
@@ -189,12 +203,11 @@ def _similarity_service(tmp_path, vacancies):
 # so exactly three of the five clear the 0.7 threshold - which is the point: the loop has
 # both a stored row and a skipped one.
 def test_similarity_stores_one_personality_row_per_axis_over_the_threshold(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
     vacancies = [
         {"embedding_id": 101, "vector": np.array([0.0, 1.0, 0.0])},
         {"embedding_id": 102, "vector": np.array([1.0, 0.0, 0.0])},
     ]
-    service, written = _similarity_service(tmp_path, vacancies)
+    service, written = _similarity_service(tmp_path, vacancies, monkeypatch)
 
     returned = service.similarity_for_user(7)
 
@@ -210,12 +223,11 @@ def test_similarity_stores_one_personality_row_per_axis_over_the_threshold(tmp_p
 def test_similarity_stores_the_vacancy_a_candidate_matches(tmp_path, monkeypatch):
     """Two vacancies are needed: with one, per-row normalisation collapses to 0 and no
     candidate_vacancy row is ever written."""
-    monkeypatch.chdir(tmp_path)
     vacancies = [
         {"embedding_id": 101, "vector": np.array([0.0, 1.0, 0.0])},
         {"embedding_id": 102, "vector": np.array([1.0, 0.0, 0.0])},
     ]
-    service, written = _similarity_service(tmp_path, vacancies)
+    service, written = _similarity_service(tmp_path, vacancies, monkeypatch)
 
     service.similarity_for_user(7)
 
@@ -226,9 +238,8 @@ def test_similarity_stores_the_vacancy_a_candidate_matches(tmp_path, monkeypatch
 
 def test_similarity_does_not_invent_rows_when_nothing_clears_the_threshold(tmp_path, monkeypatch):
     """One vacancy makes the normalised row all zeros: a truthful "no match"."""
-    monkeypatch.chdir(tmp_path)
     vacancies = [{"embedding_id": 101, "vector": np.array([0.0, 1.0, 0.0])}]
-    service, written = _similarity_service(tmp_path, vacancies)
+    service, written = _similarity_service(tmp_path, vacancies, monkeypatch)
 
     service.similarity_for_user(7)
 
@@ -236,9 +247,8 @@ def test_similarity_does_not_invent_rows_when_nothing_clears_the_threshold(tmp_p
 
 
 def test_similarity_returns_the_candidate_matrix(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
     vacancies = [{"embedding_id": 101, "vector": np.array([0.0, 1.0, 0.0])}]
-    service, _written = _similarity_service(tmp_path, vacancies)
+    service, _written = _similarity_service(tmp_path, vacancies, monkeypatch)
 
     returned = service.similarity_for_user(7)
 
@@ -398,15 +408,154 @@ def test_upload_updates_the_existing_profile_and_formats_the_birth_date(
     assert result["date_birth"].startswith("1990-05-06")
 
 
-# --- upload_vacancy and the read models -------------------------------------
-def test_upload_vacancy_answers_the_documented_placeholder():
-    """The form posts four fields and the pipeline needs an embedding nobody produced;
-    the response body is the one the frontend already handles."""
-    assert MatchingService().upload_vacancy("Backend", "Build it", "100", "python") == {
-        "message": "test"
-    }
+# --- upload_vacancy ---------------------------------------------------------
+@pytest.fixture()
+def vacancy_io(monkeypatch):
+    """The three I/O calls the vacancy pipeline makes, recorded in the order they run."""
+    from service.models import Vacancies
+
+    order = []
+    stored = {}
+
+    def embed(text):
+        order.append(("embed", text))
+        return np.array([0.5, 0.25, 0.125])
+
+    def write_embedding(namespace, embedding):
+        order.append(("write_embedding", namespace, list(embedding)))
+        return "vacancy.npy"
+
+    def create_embedding(entity):
+        order.append(("create_embedding", entity.Url))
+        return types.SimpleNamespace(ID=77)
+
+    def create_vacancy(vacancy):
+        order.append(("create_vacancy", vacancy.Name, vacancy.EmbeddingID))
+        stored["vacancy"] = vacancy
+        # Built by ALIAS: the model declares field names (ID, Name) with snake_case aliases
+        # and does not populate by field name, which is how the repository returns rows.
+        return Vacancies(
+            id=5,
+            name=vacancy.Name,
+            description=vacancy.Description,
+            salary=vacancy.Salary,
+            skill=vacancy.Skill,
+            embedding_id=vacancy.EmbeddingID,
+        )
+
+    monkeypatch.setattr(matching_module, "get_text_embedding", embed)
+    monkeypatch.setattr(matching_module, "write_embedding_into_server", write_embedding)
+    return types.SimpleNamespace(
+        order=order,
+        stored=stored,
+        embeddings=FakeService(create_embedding=create_embedding),
+        vacancies=FakeService(create_vacancy=create_vacancy),
+    )
 
 
+def test_upload_vacancy_stores_the_embedding_before_the_row(vacancy_io):
+    """The order is the contract: a vacancy row must never point at a vector that is absent.
+
+    This replaces a test that pinned `{"message": "test"}` - the placeholder the route used
+    to answer while the employer form told the user the vacancy had been saved
+    (docs/KNOWN_GAPS.md section 37).
+    """
+    service = MatchingService(embeddings=vacancy_io.embeddings, vacancies=vacancy_io.vacancies)
+
+    result = service.upload_vacancy("Backend", "Build it", "100-200", "python")
+
+    assert [step[0] for step in vacancy_io.order] == [
+        "embed",
+        "write_embedding",
+        "create_embedding",
+        "create_vacancy",
+    ]
+    assert vacancy_io.order[1][1] == "vacancies"
+    assert vacancy_io.order[2][1] == "embeddings/vacancies/vacancy.npy"
+    # The six keys the frontend contract names, and nothing else.
+    assert set(result) == {"id", "name", "salary", "description", "skill", "embedding_id"}
+    assert result["id"] == 5
+    assert result["embedding_id"] == 77
+
+
+def test_upload_vacancy_embeds_title_description_and_skills(vacancy_io):
+    """The title is the most informative token in a posting, so it is part of the text."""
+    service = MatchingService(embeddings=vacancy_io.embeddings, vacancies=vacancy_io.vacancies)
+
+    service.upload_vacancy("Backend", "Build it", "100-200", "python, sql")
+
+    assert vacancy_io.order[0][1] == "Backend\n\nBuild it\n\nSkills: python, sql"
+
+
+def test_upload_vacancy_leaves_blank_optional_fields_null(vacancy_io):
+    """A browser posts "" for an untouched box; the column should hold NULL, not ""."""
+    service = MatchingService(embeddings=vacancy_io.embeddings, vacancies=vacancy_io.vacancies)
+
+    service.upload_vacancy("  Backend  ", " Build it ", "   ", "")
+
+    stored = vacancy_io.stored["vacancy"]
+    assert stored.Name == "Backend"
+    assert stored.Salary is None
+    assert stored.Skill is None
+    assert vacancy_io.order[0][1] == "Backend\n\nBuild it"
+
+
+@pytest.mark.parametrize("name,description", [("", "Build it"), ("Backend", "   ")])
+def test_upload_vacancy_names_the_blank_required_field(vacancy_io, name, description):
+    """Rejecting here names the field; the sidecar would answer 400 without naming it."""
+    from service.shared.errors import InvalidPayloadError
+
+    service = MatchingService(embeddings=vacancy_io.embeddings, vacancies=vacancy_io.vacancies)
+
+    with pytest.raises(InvalidPayloadError) as failure:
+        service.upload_vacancy(name, description, None, None)
+
+    assert failure.value.status_code == 400
+    assert "Missing required vacancy field" in failure.value.detail
+    assert vacancy_io.order == []
+
+
+def test_a_stopped_sidecar_is_a_503_and_creates_no_row(vacancy_io, monkeypatch):
+    """MLUnavailable is a RuntimeError; uncaught it would be an opaque 500."""
+    from service.infrastructure.ml_sidecar import MLUnavailable
+    from service.shared.errors import UpstreamUnavailableError
+
+    def explode(text):
+        raise MLUnavailable(
+            "ml_service_unreachable",
+            "cannot reach the ml sidecar at http://ml:8080: refused",
+        )
+
+    monkeypatch.setattr(matching_module, "get_text_embedding", explode)
+    service = MatchingService(embeddings=vacancy_io.embeddings, vacancies=vacancy_io.vacancies)
+
+    with pytest.raises(UpstreamUnavailableError) as failure:
+        service.upload_vacancy("Backend", "Build it", None, None)
+
+    assert failure.value.status_code == 503
+    assert "http://ml:8080" in failure.value.detail
+    assert vacancy_io.order == []  # no embedding row, no vacancy row
+
+
+def test_a_refused_text_is_a_400(vacancy_io, monkeypatch):
+    """The sidecar saying "I will not embed that" is the client's 400, not our 500."""
+    from service.infrastructure.ml_sidecar import MLRejected
+    from service.shared.errors import InvalidPayloadError
+
+    def explode(text):
+        raise MLRejected("empty_body", "text is empty", status=400)
+
+    monkeypatch.setattr(matching_module, "get_text_embedding", explode)
+    service = MatchingService(embeddings=vacancy_io.embeddings, vacancies=vacancy_io.vacancies)
+
+    with pytest.raises(InvalidPayloadError) as failure:
+        service.upload_vacancy("Backend", "Build it", None, None)
+
+    assert failure.value.status_code == 400
+    assert "empty_body" in failure.value.detail
+
+
+# --- the read models --------------------------------------------------------
 def _candidate_vacancy_row(user_id, vacancy_id, distance):
     return types.SimpleNamespace(
         UserID=user_id,

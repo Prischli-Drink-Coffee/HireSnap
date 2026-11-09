@@ -53,6 +53,7 @@ from service.shared.errors import (
     NotFoundError,
     ServiceError,
     UnauthorizedError,
+    UpstreamUnavailableError,
 )
 
 MOUNT = "/server"
@@ -62,11 +63,14 @@ MOUNT = "/server"
 #: string. Values are the first member of TypeUser and RoleEnum.
 FORM_OVERRIDES = {"type_user": "candidate", "role": "user"}
 
-#: The three errors the API is required to render, with the status each carries.
+#: The four errors the API is required to render, with the status each carries. Every
+#: route is driven with each of them, so a handler that catches only one class - or that
+#: rewrites the status it was given - fails here rather than in a client.
 SERVICE_ERRORS = (
     pytest.param(NotFoundError, 404, id="not-found-404"),
     pytest.param(InvalidPayloadError, 400, id="invalid-payload-400"),
     pytest.param(UnauthorizedError, 401, id="unauthorized-401"),
+    pytest.param(UpstreamUnavailableError, 503, id="upstream-unavailable-503"),
 )
 
 _APP = create_app()

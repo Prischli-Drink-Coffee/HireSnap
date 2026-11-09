@@ -18,12 +18,13 @@ checks is part of it too - a duplicate is rejected BEFORE the row is written, an
 row validates both foreign keys BEFORE it is inserted - so those tests assert "the
 repository was never called", not just "an exception was raised".
 
-WHAT IS DELIBERATELY NOT PINNED
--------------------------------
-`matching.similarity_for_user` has a preserved defect (it indexes `personalities[j]` with
-the loop variable left over from the previous loop; docs/KNOWN_GAPS.md). There is one
-xfail at the bottom that states the correct expectation and points at the gap entry, and
-no test that locks the wrong row in.
+WHAT USED TO BE EXCLUDED AND IS NOT ANY MORE
+-------------------------------------------
+`matching.similarity_for_user` carried a preserved defect: it indexed `personalities[j]`
+with the loop variable left over from the previous loop, and walked row zero of the
+vacancy-vs-personality matrix (docs/KNOWN_GAPS.md section 26). The bottom of this file
+states the correct expectation, and it is now a plain passing test - the `xfail(strict=True)`
+marker had to go in the same commit as the fix, which is exactly what that marker was for.
 """
 
 from __future__ import annotations
@@ -866,23 +867,24 @@ def test_distance_is_quantised_and_never_reaches_one():
     assert matching_module._distance(1.0) == matching_module.Decimal("0.999999")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KNOWN, PRESERVED DEFECT: the personality-vacancy loop indexes personalities[j] "
-        "with the index left over from the previous loop, so it stores the last "
-        "personality instead of the one the score describes (docs/KNOWN_GAPS.md). "
-        "Fixing it rewrites stored rows, so it is a migration, not a refactor."
-    ),
-)
-def test_similarity_stores_the_personality_the_score_belongs_to(tmp_path, monkeypatch):
-    """The expectation the preserved defect violates, written down exactly once.
+def test_similarity_stores_the_personality_the_score_belongs_to(tmp_path):
+    """Each stored row names the axis its own score was computed against.
+
+    THIS WAS A STRICT XFAIL UNTIL THE DEFECT WAS CLOSED (docs/KNOWN_GAPS.md section 26).
+    The old loop walked ROW ZERO of the vacancy-vs-personality matrix - the first
+    vacancy's scores against all five axes - zipped with the vacancy list, which
+    truncated it to the number of vacancies, and stored it under `personalities[j]`
+    with `j` left over from the candidate loop. The row's personality was therefore
+    decided by where an earlier loop happened to stop: for the fixture below it was id 5
+    while the score described id 1.
+
+    The vacancy is orthogonal to O and to E, so BOTH of those axes legitimately clear
+    the threshold and both rows are expected. Neither of them is 5, which is the value
+    that used to be written.
 
     Every vector is loaded from disk because that is what the real code does: the
-    personality and vacancy paths come back from the embeddings slice and are handed
-    straight to numpy, while the user vector is resolved against "./data".
+    paths come back from the embeddings slice and are handed straight to numpy.
     """
-    monkeypatch.chdir(tmp_path)
     axes = {
         1: np.array([1.0, 0.0, 0.0]),
         2: np.array([0.0, 1.0, 0.0]),
@@ -924,5 +926,9 @@ def test_similarity_stores_the_personality_the_score_belongs_to(tmp_path, monkey
 
     service.similarity_for_user(1)
 
-    # The vacancy scored against OCEAN column 0, so the stored row must name personalities[0].
-    assert [row.PersonalityID for row in written] == [1]
+    # O (column 0) and E (column 2) are both at distance 1.0 from the vacancy; C, A and N
+    # are at 0.0, 0.2929 and 0.2929 and stay under the threshold. personalities[j].ID == j+1
+    # in this fixture, so the expected ids are 1 and 3.
+    assert sorted(row.PersonalityID for row in written) == [1, 3]
+    # And every stored pair is a (vacancy, axis) coordinate that exists.
+    assert {row.VacancyID for row in written} == {1}

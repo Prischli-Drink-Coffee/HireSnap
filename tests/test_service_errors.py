@@ -39,6 +39,9 @@ EXPECTED_STATUS = {
     "ConflictError": 404,
     "InvalidPayloadError": 400,
     "UnauthorizedError": 401,
+    # 503, not 500: a stopped ml sidecar is a dependency that is down, and the client is
+    # told to retry rather than that the request was malformed or that we have a bug.
+    "UpstreamUnavailableError": 503,
 }
 
 
