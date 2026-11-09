@@ -290,7 +290,7 @@ starts lying:
 |-------|----------------------------|
 | ML transport (`backend/service/infrastructure/ml_sidecar.py`) | **Yes, always** — `upload_video()` calls `get_user_embedding` (the `matching` slice's application service,
 `backend/service/services/matching/`), and the client is HTTP-only, so there is no flag to get wrong and no in-process branch to fall back to |
-| cache, storage, mail and jobs facades (`backend/service/infrastructure/*` and the `jobs` slice under `service/services/jobs/`) | **No** — complete and tested, used by the worker tasks, but no route calls them yet ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)) |
+| cache, storage, mail and jobs facades (`backend/service/infrastructure/*` and the `jobs` slice under `service/services/jobs/`) | **Partly** — `/server/jobs/` (admin token) is the first route that reaches them; the worker tasks use the rest, and no listing or upload route reads the cache or the bucket yet ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)) |
 
 > **Where these keys live today.** All of them are manifest keys, in sections 11-15 of
 > `docker/.env.example`: **89 keys in total, the four profile switches included** (there is
@@ -391,7 +391,7 @@ fails one task at a time, days later. The compose anchor says so at
 `docker/docker-compose.yaml:94`. Switching it is a one-line change, a separate
 decision from starting the container.
 
-**What breaks without it:** nothing today — no API route calls the facade. Once one does,
+**What breaks without it:** nothing today — no API route calls the storage facade. Once one does,
 `STORAGE__BACKEND=s3` without a reachable MinIO is a **hard** failure
 (`StorageError`, a 500): storage fails closed on purpose, because a silent fallback to
 the local disk would split the media across two backends.

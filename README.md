@@ -151,11 +151,14 @@ container runtime, a stack that carries it does not start degraded, it fails to 
 workers are off — so the summary block is a quick confirmation of what you actually started.
 
 The backend also carries a **platform layer** (cache facade, object storage, mail, celery
-workers). The facades and the workers are wired and reachable; the **call sites are still
-thin** — no business route reads the cache, stores to the bucket, or sends mail yet — so
-turning a flag on buys working infrastructure, not new behaviour. Job state is the one
-exception worth caring about: `CACHE=1` is what makes `JobService.status()` agree across
-processes. See [docs/KNOWN_GAPS.md §13](docs/KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)
+workers). The facades and the workers are wired and reachable, and `/server/jobs/` — admin
+token only — is the first route that reaches them: it submits, polls and cancels the four job
+kinds. Everything wider is still thin: no business route reads the cache, stores to the bucket
+or sends mail yet, so turning those flags on buys working infrastructure rather than new
+behaviour. Job state is the exception worth caring about — `CACHE=1` is what makes
+`GET /server/jobs/{id}` agree across processes. See
+[docs/SERVICE_CONTRACTS.md §7](docs/SERVICE_CONTRACTS.md#7-the-jobs-surface),
+[docs/KNOWN_GAPS.md §13](docs/KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)
 and the layer's own reference
 [backend/docs/PLATFORM_LAYER.md](backend/docs/PLATFORM_LAYER.md).
 

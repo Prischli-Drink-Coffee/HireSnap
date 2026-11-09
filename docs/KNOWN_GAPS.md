@@ -349,18 +349,20 @@ deployment, pre-seed the Hugging Face cache (`hf_cache` volume); see
 
 ## 13. The platform layer is delivered but its call sites are thin
 
-**Defect.** `backend/service/infrastructure/` (cache, storage, mail),
+**Defect, partly closed.** `backend/service/infrastructure/` (cache, storage, mail),
 `backend/service/infrastructure/messaging/` (celery app, tasks, beat schedule) and the `jobs`
 slice (`service/services/jobs/application/job_service.py`, the module that used to be
-`jobs_services.py`) all exist and are tested, and the containers that host them ship. **No
-HTTP route calls them.** Every request is still answered from MySQL and the local filesystem,
-exactly as before the layer landed.
+`jobs_services.py`) all exist and are tested, and the containers that host them ship. When
+this entry was written **no** HTTP route called them, and every request was answered from MySQL
+and the local filesystem exactly as before the layer landed. The `/server/jobs/` surface
+(§27) gave the job half its first caller; the rest still holds.
 
-- `backend/service/api/app.py` mounts twelve routers and none of them is a `/server/jobs`
-  route. The jobs slice does reach the cache - `job_service.py:111` resolves it through
-  `state.get_cache()` - and that is the sharpest way to see the shape of the gap: the one
-  consumer of the platform layer is a subsystem no route can reach, so `send_now_or_later`,
-  `get_storage` and the rest still have the facades and their tests as their only callers.
+- `backend/service/api/app.py` now mounts thirteen routers, and the newest of them -
+  `/server/jobs/` - is the one that reaches the platform layer (§27, closed). It reaches the
+  **job** half of it only: `job_service.py` resolves the cache through `state.get_cache()`,
+  and the dispatcher through `state.get_dispatcher()`. `send_now_or_later`, `get_storage` and
+  the cache facade on a listing path still have their own tests as their only callers, so the
+  gap narrowed rather than closed.
 - Signup (`service/services/auth/presentation/routers/auth_api/`) calls the auth
   application service's `signup()` and returns; no welcome mail is sent, because no caller
   reaches `mail.send_now_or_later`.
@@ -369,9 +371,10 @@ exactly as before the layer landed.
 **Mitigation.** Document the dormancy instead of advertising the feature (this entry and
 [SIDECARS.md](SIDECARS.md)). The layer's own tests
 (`backend/tests/test_infra_fallbacks.py`, `test_jobs_services.py`, `test_worker_routing.py`,
-`test_ports_contracts.py`) prove the facades work; they cannot prove a route uses them.
-The wiring is an application change with its own review: add the route, then the flag, then
-the test that fails when the neighbour is down.
+`test_ports_contracts.py`) prove the facades work; they cannot prove a route uses them. Each
+remaining call site is an application change with its own review: add the route, then the flag,
+then the test that fails when the neighbour is down - the pattern `/server/jobs/` followed,
+where `backend/tests/test_jobs_api.py` fails if the dispatcher seam is degraded.
 
 **Residual risk.** The failure semantics are the inverse of what a reader expects in two
 places. Cache fails **open** (a miss), but job state lives in the cache too: with
@@ -950,31 +953,49 @@ error (`j` is an `int` and `personalities[j]` type-checks), and ruff and mypy ar
 on it. It took an assertion about *which* row was stored, which is why the expectation was
 written down as a failing test rather than a paragraph.
 
-## 27. The `jobs` slice has no HTTP route, on purpose
+## 27. The `jobs` slice had no HTTP route (closed)
 
-**Not a defect, an omission with a reason.** `jobs` is the one slice with no `presentation/`
-layer: `service/services/jobs/` holds `application/job_service.py` and nothing else
-(`job_service.py:37-39`: *"WHY THERE IS NO presentation/ LAYER: no route exposes a job
-today ... adding a `/server/jobs` endpoint is a contract change that needs the snapshot
-regenerated, so it is a separate decision rather than a hole in this slice"*).
+**As it stood.** `jobs` was the one slice with no `presentation/` layer:
+`service/services/jobs/` held `application/job_service.py` and nothing else, and the module
+said so in a paragraph starting *"WHY THERE IS NO presentation/ LAYER"*. The layout guard
+agreed with the code rather than with a comment - `SLICES_WITHOUT_PRESENTATION = {"jobs"}` -
+so the exception was explicit and a slice that *lost* its router still failed the build.
 
-The layout guard knows the exception by name rather than by accident:
-`SLICES_WITHOUT_PRESENTATION = {"jobs"}`
-(`backend/scripts/check_backend_layout.py:121`), so a slice that loses its router fails the
-build while `jobs` stays valid.
+**Why it was written that way.** The cost of the route was known and was not twenty lines: a
+new path under `/server` is a public contract change, so the OpenAPI snapshot had to be
+regenerated, [SERVICE_CONTRACTS.md](SERVICE_CONTRACTS.md) had to grow a section, and the
+router had to be listed in `service/api/registry.py`. Recording the decision was cheaper than
+making it on the way past, and the job machinery was still reachable from Python
+(`state.get_job_service()`), so nothing was stuck.
 
-**Consequence.** The job machinery is reachable only from Python: `enqueue()` and `status()`
-are called by nothing in the request path, which is the dormancy recorded in §13. Two
-different facts are being stated and it is worth keeping them apart - §13 says the platform
-layer has no call sites; this entry says one slice will never have one until the contract
-changes.
+**Status: closed.** The four operations exist - `GET /server/jobs/`, `POST /server/jobs/`,
+`GET /server/jobs/{id}`, `DELETE /server/jobs/{id}` - all behind `JWTBearer(access_level=1)`,
+because enqueuing an arbitrary task with an arbitrary payload is an operator action rather
+than a user one. `presentation/routers/jobs_api/jobs_api.py` is a thin wrapper over the same
+`JobService` the queue calls, so `application/` still imports no framework, and
+`SLICES_WITHOUT_PRESENTATION` is now `set()` with a comment recording that it is empty
+because the exception became a route. The response models sit **inside** `jobs_api.py` on
+purpose: `backend/tests/test_backend_structure.py` globs `*/presentation/routers/*/*.py` and
+requires every module stem to be mounted, so a sibling `schemas.py` would have to be mounted
+as a router too.
 
-**What adding it costs.** A new route under `/server/jobs` is a public contract change: the
-OpenAPI snapshot (`backend/tests/snapshots/critical_endpoint_openapi.json`) has to be
-regenerated with `python -m tests.snapshot_tool --write`, `ml/README.md` and
-[SERVICE_CONTRACTS.md](SERVICE_CONTRACTS.md) grow a section, and the router has to be listed
-in `service/api/registry.py`. That is the whole reason it is a decision instead of a
-20-line patch.
+Three behaviours the route had to decide, all pinned by `backend/tests/test_jobs_api.py`
+(22 tests through `TestClient`, faking only the dispatcher):
+
+- **The POST answers with the state the job is already in.** Inline mode has finished by then,
+  so `state` is `succeeded` or `failed`, not `queued`; a client that assumes "accepted means
+  asynchronous" would poll forever.
+- **A task that raises is a `failed` record, not a `500`.** The submission succeeded and the
+  job failed, and conflating them hides a broken task behind a server error.
+- **An unknown id is `404` on the GET and `200` on the DELETE.** Reading a record that does
+  not exist has to be distinguishable from a `queued` one (with the `memory` cache backend a
+  job is only visible to the process that made it), while cancelling is best-effort and
+  answers with a reason: `unknown job id`, `the job ran inline; nothing to revoke` or
+  `the broker did not accept the revoke request`.
+
+**What this does not fix.** §13 stays open: the jobs routes are the *first* call site of the
+platform layer, not a full one. The cache is still not consulted by listing endpoints, and
+signup still sends no welcome mail.
 
 ## 28. The four inference routes raised `NameError` on every call (closed)
 
@@ -1568,6 +1589,7 @@ slice move: the old module returned the same literal, and doing it during a refa
 whole claim was "the wire behaviour did not move" would have hidden a behaviour change inside
 a rename. It is closed now because the frontend had already moved ahead of the backend, which
 made the placeholder not a limitation but a lie.
+
 ## What is *not* on this list
 
 Three changes to application source ship with this stack, and they are deliberately excluded
@@ -1583,7 +1605,7 @@ from the list above because they are fixed. All three are enumerated in
 
 All three are backwards compatible: with no new configuration they behave exactly as before.
 
-Eighteen entries above are **closed** rather than open, and they are kept because *how* they
+Nineteen entries above are **closed** rather than open, and they are kept because *how* they
 failed is the useful part - each was invisible to the gates and would have surfaced first in
 production:
 
@@ -1607,6 +1629,13 @@ production:
 - §22 - the `ml` service built the API image and published no URL, so the sidecar was never
   used in any deployed configuration. Now enforced by
   `scripts/check_compose_parity.py` rule 6.
+- §27 - the `jobs` slice had no route, so the platform layer had no call site in the request
+  path at all. `/server/jobs/` exists now (submit, poll, cancel, describe) behind an
+  **admin** token, backed by the same `JobService` the queue uses;
+  `backend/tests/test_jobs_api.py` drives it through `TestClient` and fakes only the
+  dispatcher. The three answers that matter are pinned there: the POST reports the state the
+  job is *already* in, a raising task is a `failed` record and not a `500`, and an unknown id
+  is `404` on the GET while the DELETE still answers `200` with a reason.
 - §26 - the personality-vacancy link stored the score against a personality chosen by a
   stale loop index, and against row zero of a matrix (see the entry: there were two faults).
   Both are gone, and the test that used to carry the expectation as `xfail(strict=True)`
@@ -1654,12 +1683,11 @@ production:
   before the row, and maps a stopped sidecar to 503 instead of an opaque 500; a failed embed
   writes nothing at all.
 
-Five entries are new since the slice refactor and are **not** defects. §23 (one inference
+Four entries are new since the slice refactor and are **not** defects. §23 (one inference
 path, serialised GPU work), §24 (a credential rotated at the issuer, still in history) and §25
 (the vertical slices are a package boundary, not a domain model - raw-SQL repositories, no
 transaction boundary, shared entity models) are about the *shape* of the tree rather than a bug.
-§27 (`jobs` has no route, on purpose) is a deliberate absence the layout guard names at
-`backend/scripts/check_backend_layout.py:121`. §29 is a third kind again: notebook output that
+§29 is a third kind again: notebook output that
 looked like a checkpoint and a schema sketch that contradicted the schema, both removed from the
 checkout rather than from the running system. None of them is a bug a test could turn green: they
 are the deliberate stopping point of the refactor that

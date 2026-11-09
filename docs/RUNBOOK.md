@@ -803,8 +803,10 @@ result backend:
 
 The `jobs` contract is `queued -> running -> succeeded|failed` and it lives in the `jobs`
 slice's application layer
-(`backend/service/services/jobs/application/job_service.py`). Nothing in the request path
-enqueues today, so the honest way to exercise it is a one-off in the API container:
+(`backend/service/services/jobs/application/job_service.py`). Since the `/server/jobs/`
+routes landed it is also reachable over HTTP ([SERVICE_CONTRACTS.md §7](SERVICE_CONTRACTS.md#7-the-jobs-surface))
+- but every one of those operations needs an **admin** token, so on a bare dev stack the
+quickest probe is still a one-off in the API container:
 
 ```bash
 ./docker/run.sh --dev exec backend python -c "
@@ -823,7 +825,7 @@ job kind — passing it to `enqueue()` raises `ValueError: unknown job kind
 'hiresnap.send_email'; supported: ...` (`job_service.py:212-215`). The module-level
 functions `enqueue()` and `status()` remain and are what the slice's own tests call, so
 `from service.services.jobs.application.job_service import enqueue, status` works too;
-the composition accessor is the form a route would use.
+the composition accessor is the form the route uses.
 
 With `CELERY=0` the call runs inline and `status()` answers immediately from the in-process
 cache. With `CELERY=1` the id goes to the broker and `status()` refreshes from the worker
@@ -831,6 +833,25 @@ through `infrastructure/messaging/queue.py` (`CeleryDispatcher.state()` at `queu
 `None` means "unknown or expired" and is a real answer — with the `memory` cache backend a
 job is only visible to the process that created it. When the broker refuses the submission the
 record keeps a `fallback_reason` and the work runs inline instead (`job_service.py:234-242`).
+
+Over HTTP, with an admin token (see §15.2 for why the container one-off is often easier):
+
+```bash
+TOKEN=...   # an access token whose user is an admin (role "admin")
+curl -s -X POST http://localhost:8088/api/jobs/ -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"kind":"send_email","payload":{"to":"a@example.com","subject":"s","body":"b"}}'
+#   {"id": "<32 hex>", "kind": "send_email", "state": "succeeded"}
+ID=<the id from the previous answer>
+curl -s "http://localhost:8088/api/jobs/$ID" -H "Authorization: Bearer $TOKEN"             # the record
+curl -s -X DELETE "http://localhost:8088/api/jobs/$ID" -H "Authorization: Bearer $TOKEN"   # best effort
+curl -s http://localhost:8088/api/jobs/ -H "Authorization: Bearer $TOKEN"             # mode + kinds
+```
+
+`state: succeeded` on the POST is correct in inline mode - the job ran inside the request.
+With `CELERY=1` the same POST answers `queued` and the `GET` shows the worker moving it. A
+`403 Have not access` means the token is valid but the user is not an admin, which is the
+answer for every non-admin on this surface.
 
 ### 15.3 The mail inbox
 

@@ -69,7 +69,7 @@ Three data paths leave the backend, and two of them cross a process boundary:
 |------|-----|-----------|------|
 | **Data** | backend → `mysql:3306` | PyMySQL over the internal network | Always — every DB-backed route |
 | **Inference** | backend → `ml:8080` | HTTP (`POST /v1/embed/video`, `/v1/embed/text`, `/v1/transcribe`) | Always — `ml` is a core service, not a profile (§3.5) |
-| **Async** | backend → redis `db 1` → celery workers | celery protocol | Only under `CELERY=1`, and no route enqueues yet (§3.6); the job slice reaches it through `get_dispatcher()`, never by importing celery |
+| **Async** | backend → redis `db 1` → celery workers | celery protocol | Only under `CELERY=1`; `POST /server/jobs/` is the one route that enqueues (§3.6), and the job slice reaches the broker through `get_dispatcher()`, never by importing celery |
 
 | Service  | Image | Internal port | Published (dev) | Published (prod) | Profile |
 |----------|-------|---------------|-----------------|------------------|---------|
@@ -252,10 +252,12 @@ backend/
 
 Router module names follow the route they serve rather than the slice that owns it: the
 `candidates` slice answers `/info_candidates/` from `presentation/routers/info_candidates_api/`,
-`matching` answers the four `/.../inference/` routes from `inference_api/`, and `jobs` has no
-presentation layer at all. A layer directory that holds only `__init__.py` is a
-**placeholder**, not an unfinished TODO: it says this domain has no such concern yet, which
-is the same convention the reference stack uses for its `jobs` vertical.
+`matching` answers the four `/.../inference/` routes from `inference_api/`, and `jobs` answers
+`/jobs/` from `jobs_api/` - the only admin-level surface, because enqueuing a task is an
+operator action. That router is a thin wrapper over the same `JobService` the queue calls, so
+the slice's `application/` still imports no framework. A layer directory that holds only
+`__init__.py` is a **placeholder**, not an unfinished TODO: it says this domain has no such
+concern yet, which is the same convention the reference stack uses for its `jobs` vertical.
 
 **A failed rule raises a domain error, not an `HTTPException`.** `service/shared/errors.py`
 defines `ServiceError(status_code, detail)` with `NotFoundError`, `ConflictError`,
@@ -551,8 +553,9 @@ Three consequences of the boundary, each of which used to be different:
 
 The request still blocks while the sidecar works: moving inference into another container
 moves the *resource*, not the latency. Making the upload asynchronous is the platform
-layer's `jobs` contract (§3.6). That contract is delivered and its workers exist under
-`CELERY=1`, but no API route calls `enqueue()` yet, so the upload stays synchronous
+layer's `jobs` contract (§3.6). That contract is delivered, its workers exist under
+`CELERY=1` and `POST /server/jobs/` can enqueue `embed_candidate`, but the upload route
+itself still calls the sidecar inline, so a video upload stays synchronous
 ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)).
 
 The operational proof that this path is the one being used — and not a stale process
@@ -562,13 +565,13 @@ each side of one upload, plus `describe_transport()` reporting `"transport": "ht
 
 ### 3.6 The asynchronous path (`cache` / celery — delivered, wired to the workers)
 
-The second path exists in the code and its containers ship under the `celery` profile, but
-no API route enqueues into it yet. It is documented because an operator will turn it on, and
-because the shape is now settled:
+The second path exists in the code, its containers ship under the `celery` profile, and
+`POST /server/jobs/` enqueues into it (admin token only). Nothing else does yet, which is
+the open half of [KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin):
 
 ```
-backend route (does not exist yet)
-  │  get_job_service().enqueue(kind, payload)     ← service/composition/state.py:91
+POST /server/jobs/  (service/services/jobs/presentation/routers/jobs_api/jobs_api.py)
+  │  get_job_service().submit(kind, payload)      ← service/composition/state.py:91
   ▼
 [ job slice ]  services/jobs/application/job_service.py writes the record through the cache
   │
@@ -586,7 +589,9 @@ Two boundaries are worth reading in the code rather than inferring from the diag
 duck-typed port (`job_service.py:179-187`), and the only module that touches the celery API is
 `infrastructure/messaging/queue.py` (`queue.py:1-23` says so in its own docstring). That is
 what lets the job contract be tested with no broker at all: `backend/tests/test_jobs_services.py`
-exercises the whole state machine through the inline fallback.
+exercises the whole state machine through the inline fallback, and
+`backend/tests/test_jobs_api.py` drives the four routes the same way - it fakes the
+dispatcher at that seam and nothing else.
 
 Three properties decide whether this path is worth enabling:
 
@@ -803,7 +808,8 @@ unable to embed a single video.
   missing feature — the alternative is N copies of a multi-gigabyte model on one GPU.
 - No asynchronous upload. The `ml` transport moves inference to another container but the
   HTTP request still waits for the vector (§3.5). The `jobs` contract that would make it
-  asynchronous is shipped and dormant ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)).
+  asynchronous is shipped and `POST /server/jobs/` can drive it, but the upload route does not
+  hand its work over ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)).
 - No application-level migration. See [KNOWN_GAPS.md](KNOWN_GAPS.md#5-no-migrations).
 - **No shared build for the three services.** Each submodule still builds independently
   from its own Dockerfile against its own requirements file; the superproject records one

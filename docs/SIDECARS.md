@@ -370,9 +370,9 @@ without loading anything.
 
 | Profile | Flag | dev | prod | Why |
 |---------|------|-----|------|-----|
-| `cache` | `CACHE` | `1` | `1` | ~10 MB, and it is the celery broker. Idles harmlessly while no route reads it. Set `CACHE=0` to drop it — but then `CELERY=1` will re-enable it with a warning. |
+| `cache` | `CACHE` | `1` | `1` | ~10 MB, and it is the celery broker **and** where job records live (`/server/jobs/` reads them; with the `memory` backend a job is only visible to the process that made it). Set `CACHE=0` to drop it — but then `CELERY=1` will re-enable it with a warning. |
 | `storage` | `STORAGE` | `1` | `1` | MinIO idles without S3 clients and the console is handy in dev. Set `STORAGE=0` to drop it. |
-| `celery` | `CELERY` | `0` | `0` | Four containers for queues that nothing enqueues to yet ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)). Forces `CACHE=1`. |
+| `celery` | `CELERY` | `0` | `0` | Four containers for queues whose only producer so far is `POST /server/jobs/` ([KNOWN_GAPS.md §13](KNOWN_GAPS.md#13-the-platform-layer-is-delivered-but-its-call-sites-are-thin)). Forces `CACHE=1`. |
 | `mail` | `MAIL` | `0` | `0` | One container; worth it in dev to read real mail, pointless in prod unless mail is exercised. |
 
 Not in the table, on purpose: `ml` is core (above) and `GPU` is a host capability, not a

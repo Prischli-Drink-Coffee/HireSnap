@@ -377,3 +377,42 @@ because the SPA is served from the same origin as the API and must not be framed
 MIME-sniffed by a third party. The `server` block re-declares them
 (`site.conf.template:49-53`) because `add_header` does not merge across levels: a
 `location` that declares any `add_header` discards every inherited one.
+
+## 7. The jobs surface
+
+`/server/jobs/` is the operator's view of the job machinery (§4 of
+[ARCHITECTURE.md](ARCHITECTURE.md)); it is the first and only route that reaches the platform
+layer. **Every operation requires a level-1 (admin) token** - enqueuing an arbitrary task with
+an arbitrary payload is an operator action, so a normal account gets the usual
+`403 Have not access` from §2.2.
+
+| Method | Path | Body | `200` answer |
+|--------|------|------|----------------|
+| `GET` | `/server/jobs/` | - | `{"ok", "mode", "store", "kinds"}` - `mode` is `celery` or `inline` and describes **this process**: with `CELERY__ENABLED=false` every job runs inside the request |
+| `POST` | `/server/jobs/` | `{"kind": "<one of kinds>", "payload": {...}}` | `{"id", "kind", "state"}` - a 32-hex id and the state the job is **already** in |
+| `GET` | `/server/jobs/{id}` | - | The stored record: `id, kind, state, created_at, updated_at, mode, result, result_url, error, fallback_reason` |
+| `DELETE` | `/server/jobs/{id}` | - | `{"id", "cancelled", "reason"}` |
+
+States are `queued -> running -> succeeded | failed`. Three answers are worth reading twice,
+because a polling client gets them wrong:
+
+- **`state` on the `POST` is often terminal.** Inline mode has already run the work by the
+  time the response is built, so answering `queued` would send a client to poll something that
+  finished. A task that raises is a `failed` record with the exception text in `error`, not a
+  `500` - the submission succeeded and the job failed, and those are different things.
+- **An unknown id on `GET` is `404`**, not a fabricated `queued`: with the `memory` cache
+  backend a job is visible only to the process that created it ([KNOWN_GAPS.md](KNOWN_GAPS.md)
+  §13), so "expired or never seen" has to be observable.
+- **`DELETE` answers `200` even for an id it does not know** (`cancelled: false`,
+  `reason: "unknown job id"`). Cancelling is best-effort by nature; the three reasons are
+  `unknown job id`, `the job ran inline; nothing to revoke` and
+  `the broker did not accept the revoke request`.
+
+`kind` must be one of `embed_candidate`, `reindex_embeddings`, `cleanup_orphan_uploads`,
+`send_email`; anything else is `400` with a detail naming the supported set. A task name
+(`hiresnap.send_email`) is **not** a job kind - the most common mistake here, and the message
+says so.
+
+`backend/tests/test_jobs_api.py` drives this surface through `TestClient`: it fakes the
+dispatcher (the seam to redis and celery) and nothing else, so the routes, the response models
+and the admin requirement are pinned against the production service object.

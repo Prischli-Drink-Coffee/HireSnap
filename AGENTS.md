@@ -13,8 +13,9 @@ valid standalone checkouts:
   entities are the pydantic models in `service/models/`, shared across slices. Router module
   names follow the route they serve, not the slice:
   `candidates` serves `/info_candidates/` from `presentation/routers/info_candidates_api/`,
-  `matching` serves the four `/.../inference/` routes from `inference_api/`, and `jobs` has
-  no presentation layer at all. `service/main.py` is the entry point — `python -m service.main`
+  `matching` serves the four `/.../inference/` routes from `inference_api/`, and `jobs`
+  serves `/jobs/` from `jobs_api/` (admin-level token: enqueuing an arbitrary task is an
+  operator action, not a user one). `service/main.py` is the entry point — `python -m service.main`
   from `backend/`; `service/api/app.py` builds the app, mounts `/server`, an empty `/public`
   and a static `/data`, includes the routers listed in `service/api/registry.py`, and
   registers the single exception handler that renders a `ServiceError` as `{'detail': ...}`
@@ -159,14 +160,15 @@ ML sidecar, inside `ml/`:
 
 Python targets 3.9, four-space indentation. Put a change inside the slice that owns it:
 `service/services/<domain>/` holds `application/`, `persistence/` and `presentation/`
-(twelve slices have the router; `matching` keeps an empty `persistence/` placeholder and
-`jobs` has neither), and a module may import downward — presentation → application →
+(thirteen slices have the router; `matching` keeps an empty `persistence/` placeholder
+and `jobs` owns no table, so its `persistence/` is absent), and a module may import downward — presentation → application →
 persistence — never back up and never sideways into another slice's layers; `shared/`
 imports no framework, and a slice that ever does need entities gets a framework-free
 `domain/` of its own. **A rule that fails raises a domain error, not an
 `HTTPException`**: `service/shared/errors.py` defines `ServiceError(status_code, detail)`
-with `NotFoundError`, `ConflictError`, `InvalidPayloadError` and `UnauthorizedError`
-underneath it, and the one exception handler registered on the `/server` sub-app turns any of
+with `NotFoundError`, `ConflictError`, `InvalidPayloadError`, `UnauthorizedError` and
+`UpstreamUnavailableError` underneath it, and the one exception handler registered on the
+`/server` sub-app turns any of
 them into `{'detail': ...}` with its own status. That is the only place HTTP status codes are
 decided; an application module that imports `fastapi` is a bug, and so is a handler that
 returns a tuple because it wanted a 202. Wiring belongs in `service/composition/`, the only
