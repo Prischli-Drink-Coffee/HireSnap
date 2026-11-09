@@ -151,34 +151,37 @@ Rules:
 
 ### 2.2 What the backend actually returns (partial GAP)
 
-The application answers with **`detail` alone, with no `error` code** — half of the
-contract above:
+One handler renders every domain error, so the envelope is uniform: `{"detail": ...}` with
+whatever status the error carries. The *detail strings* are not uniform - some are sentences,
+some are identifiers - which is the gap [KNOWN_GAPS.md §9](KNOWN_GAPS.md#9-errors-have-no-stable-code)
+records.
 
-```json
-{"detail": "Vacancy not found"}
-```
+The auth dependency is the one place where four failures share a status and differ only in
+the body. All four are `403`, so **branch on `detail`, never on the status code**:
 
-`detail` is therefore the field a client can rely on: it is always present and always a
-string. The `error` code is missing, and adding it is an application change recorded in
-[KNOWN_GAPS.md](KNOWN_GAPS.md#9-errors-have-no-stable-code) rather than done here.
+| Case | `detail` | Owner |
+|------|----------|-------|
+| no `Authorization` header | `Not authenticated` | Starlette's `HTTPBearer`, `auto_error=True` |
+| non-bearer scheme | `Invalid authentication credentials` | Starlette's `HTTPBearer` |
+| the token does not verify, or it expired | `Invalid token or expired token.` | `JWTBearer.__call__` (`backend/service/api/security.py:47-50`) |
+| verified token, `sub` is not `admin`, `access_level=1` | `Have not access` | `JWTBearer.verify_jwt` (`backend/service/api/security.py:77-80`) |
 
-**How the envelope is produced.** A rule that fails raises a domain error, not a
-`HTTPException`: `service/shared/errors.py` defines `ServiceError(status_code, detail)`
-with `NotFoundError`, `ConflictError`, `InvalidPayloadError` and `UnauthorizedError`
-beneath it, and **one** handler registered on the `/server` sub-app renders any of them as
-`{"detail": <detail>}` with its own status. So `domain/` and `application/` modules import
-no HTTP framework — the framework is a leaf at the edge of the process — and the status
-each failure carries is decided in exactly one place. FastAPI's own request-validation
-failure is the one exception: it never becomes a `ServiceError` and keeps its `422`.
+The first two belong to the base class on purpose: the class has no scheme check of its own,
+because `super().__call__` has already rejected every other scheme
+(`backend/service/api/security.py:42-54`, docstring `:1-19`).
+The last two are the ones worth knowing. "Session expired" and "wrong role" used to be one
+message; they are now two, because only the first means *sign in again* - a client cannot
+re-authenticate its way into an admin account, so collapsing them sent a signed-in non-admin
+to a sign-in page they could never get past. Both are `403` and the status deliberately
+did not change. `backend/tests/test_security_jwt.py:150-168` pins all four as a set.
 
-Observed statuses and detail strings, unchanged by that refactor (preserving the wire
-contract beat tidying it):
+Where a domain error is *not* auth, the status carries the meaning:
 
 | Status | Detail strings in use |
 |--------|-----------------------|
 | 400 | Validation failures from the candidate and personality repositories (`InvalidPayloadError`). |
 | 401 | `Invalid password`, `Invalid type user`, `User not found`, `Invalid token error` — all four from `service/services/auth/application/auth_service.py:66`, `:72`, `:84`, `:106`. |
-| 403 | `Not authenticated` (the Starlette base class rejects a missing header, `auto_error=True`), `Invalid token or expired token.` (the token did not verify **or** the subject is not `admin` on a level-1 route), `Invalid authorization code.` (only reachable with `auto_error=False`). |
+| 403 | The four auth denials in the table above. |
 | 404 | `<Entity> not found` — Candidate vacancy, Embedding, File, Info candidate, Magic, Personality, Personality candidate, Personality vacancy, User, Vacancy. **Also `Email already exist`**, which reads like a 409 and has always been a 404: the refactor keeps it because changing it would break every client that already special-cases the 404. |
 
 ### 2.3 What the gateway returns
@@ -219,7 +222,7 @@ The codes the API actually uses, and what they mean for a client:
 | `201` | Created (upload endpoints) | Read the returned object id. |
 | `400` | Malformed request or a rule violation the caller can fix — also the gateway's `bad_request` | Fix the request; do not retry unchanged. |
 | `401` | A sign-in failure: wrong password, wrong account type, unknown user, or a token whose type does not match the route (`service/services/auth/application/auth_service.py:66`, `:72`, `:84`, `:106`) | Refresh the token, then retry once. |
-| `403` | The header is missing (`Not authenticated`) or the token did not verify — including the non-admin case, which surfaces here rather than as a `401` (`backend/service/api/security.py:37-44`, see §2.2) | Do not retry; re-authenticate from scratch. |
+| `403` | Any of the four auth denials: the header is missing (`Not authenticated`), the scheme is not bearer (`Invalid authentication credentials`), the token did not verify (`Invalid token or expired token.`), or a verified non-admin reached a level-1 route (`Have not access`). §2.2 has the table; the status is the same for all four, so read the detail | Do not retry. Re-authenticate when the detail is `Invalid token or expired token.`; anything else is a permissions problem that signing in again cannot fix |
 | `404` | The addressed entity does not exist | Do not retry. |
 | `413` | Body exceeds the gateway limit (`client_max_body_size 500m`, `infra/nginx/nginx.conf:71`) | Shrink the upload. |
 | `422` | FastAPI request-validation failure (body/query schema) | Fix the payload. Not produced by hand-written `HTTPException`s. |
@@ -228,22 +231,26 @@ The codes the API actually uses, and what they mean for a client:
 | `503` | Gateway only: upstream unreachable, crashed or timed out — `service_unavailable` with `Retry-After: 30` | Wait for the header, then retry once. See §4 on why this is the code you will actually see for a slow backend. |
 | `504` | Gateway only: upstream timed out. **Effectively unreachable in this stack** — see §4. | Same as `503`. |
 
-Two documented quirks of the auth dependency are worth knowing before you branch on a status
-(`backend/tests/test_security_jwt.py` pins both, `REPORTED, NOT FIXED`):
+Two things about the auth dependency are worth knowing before you branch on a status
+(`backend/tests/test_security_jwt.py` pins both):
 
-1. **A non-admin on a level-1 route gets `403`, not `401`.** `verify_jwt()` raises
-   `401 Have not access` (`backend/service/api/security.py:52`) *inside its own*
-   `try/except Exception`, so the exception is swallowed, the function returns `False`, and the
-   caller renders `403 Invalid token or expired token.` (`test_security_jwt.py:123-137`). The
-   client cannot tell "not an admin" from "expired".
-2. **`Invalid authentication scheme.` is dead code.** Starlette's `HTTPBearer` rejects a
-   non-bearer scheme before `JWTBearer.__call__` reaches its own check, so that branch
-   (`security.py:33-36`) cannot be reached in either `auto_error` mode
-   (`test_security_jwt.py:71-86`).
+1. **A non-admin on a level-1 route gets `403 Have not access`, not `401`.** The
+   role check is a `403` with its own detail
+   (`backend/service/api/security.py:77-80`), raised *outside* `decode_jwt`'s
+   `except` so it reaches the client instead of being swallowed into "expired". The
+   status is deliberately unchanged - level-1 semantics did not move - so a client
+   distinguishes "wrong account" from "session gone" by the body
+   (`test_security_jwt.py:126-140`, `:150-168`).
+2. **The class has no scheme check of its own.** Starlette's `HTTPBearer` rejects a
+   non-bearer scheme inside `super().__call__`, before `JWTBearer` runs, so a
+   branch of our own could never be reached; the one that existed raised
+   `Invalid authentication scheme.` and was removed rather than made reachable
+   (`security.py:1-19`, `test_security_jwt.py:73-89`).
 
-The 401/403 split is therefore narrower than the table suggests: on an authenticated request,
-treat `401` and `403` identically — re-authenticate once, then surface the error. Both quirks
-are recorded as [KNOWN_GAPS.md](KNOWN_GAPS.md) §30 and §31.
+So the 401/403 split is narrower than the table suggests, and **within 403 the detail is the
+only channel**: re-authenticate on `Invalid token or expired token.`, and treat the
+other three as "this request will not become allowed by retrying". Both points were
+defects recorded in [KNOWN_GAPS.md](KNOWN_GAPS.md) §30 and §31 and are now closed there.
 
 ## 4. Deadlines
 

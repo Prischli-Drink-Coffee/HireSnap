@@ -232,23 +232,30 @@ passed through (`docker/run.sh:313-320`).
 
 Where application logs actually go:
 
-- **Backend** — two things configure logging, and they write the same file.
-  `service/configuration/logging.py` installs the process logger (`setup_logging()`, exposed
-  as `get_logger()`), pointing a `FileHandler` at `logs_dir()/app.log`
-  (`backend/service/configuration/logging.py:43-46`, `:117-124`). `service/main.py` then
-  loads `backend/service/configuration/logging.yaml` with `logging.config.dictConfig` before
-  it starts uvicorn (`backend/service/main.py:58-69`); that YAML's file handler is the
-  relative `logs/app.log` (`backend/service/configuration/logging.yaml:8-12`), which resolves
-  against the process CWD `/app`. Both land on `/app/logs/app.log`. Uvicorn's own loggers go
-  to the console handler only (`backend/service/configuration/logging.yaml:16-25`), so the
-  container's stdout carries the access log while the file carries the application log.
+- **Backend** — one absolute file, configured in two places that now agree.
+  `service/configuration/paths.py:79-90` resolves `log_file()` as
+  `logs_dir()/app.log` = `<backend>/logs/app.log`, and
+  `service/configuration/logging.py` installs the process logger on it
+  (`setup_logging()`, exposed as `get_logger()`; the handler is built at
+  `:90-100`). `run_server()` then calls
+  `logging.config.dictConfig(load_logging_config(LOGGING_YAML))` itself
+  (`backend/service/main.py:64`) and passes `log_config=None` to
+  `uvicorn.run` (`:70`).
+  `load_logging_config()` (`service/configuration/logging.py:49-79`) reads the YAML
+  and rewrites its ONE relative filename - `logs/app.log`, which the YAML still spells
+  relatively on purpose (`service/configuration/logging.yaml:11`) - to that absolute path.
+  So the file lands on `/app/logs/app.log` whatever directory the process was started
+  from; it does not depend on `WORKDIR` being `/app` any more. Uvicorn's own
+  loggers go to the console handler only (`service/configuration/logging.yaml:16-25`), so
+  the container's stdout carries the access log while the file carries the application log.
   `../infra/logs:/app/logs` is the bind mount that puts that file on the host
   (`docker/docker-compose.yaml:155`). Without the mount the directory is created inside the
   container and the log dies with it.
-- There is **no** `log_config=path_to_logging()` call and no uvicorn `--log-config` flag any
-  more: `run_server()` passes `log_config=str(LOGGING_YAML)` to `uvicorn.run`
-  (`backend/service/main.py:66`), which is the same YAML by a direct path rather than a
-  helper.
+- There is **no** `log_config=path_to_logging()` helper and no uvicorn `--log-config`
+  flag any more, and `log_config` is no longer a path: it is `None`, because the dict
+  is applied before uvicorn starts. Handing uvicorn the YAML path would reintroduce the bug this
+  fixed - uvicorn resolves the handler's relative filename against its own CWD, and the
+  reloader's child inherits no useful working directory.
 - **Gateway** — access log per request on stdout, with the rewritten upstream URI
   (`log_format main`, `infra/nginx/nginx.conf:50-53`; `access_log /dev/stdout` at :58).
   This is the fastest way to see whether `/api/x` was forwarded as `/server/x`.

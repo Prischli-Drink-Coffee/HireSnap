@@ -660,17 +660,21 @@ There are two independent init mechanisms, and only one of them is reliable:
    it. On an existing volume nothing runs; that is standard MySQL behavior, not a bug.
    If the dump cannot be found the script exits non-zero and no schema is created — it
    fails loudly rather than silently.
-2. **Application init** — `backend/service/main.py:72-79` runs `CreateSQL` only when
+2. **Application init** — `backend/service/main.py:75-82` runs `CreateSQL` only when
    `DEBUG` is exactly `TRUE` **and** `INIT_DB` is a truthy value (`1`, `true`, `yes`,
-   `on` — `service/main.py:82-86`):
+   `on`, `enabled`, `y`, `t` — `service/main.py:85-93`, which delegates to the single
+   parser in `service/configuration/flags.py` and **raises** on a value nobody meant):
 
    ```python
    if _debug_flag(env) and os_env_flag("INIT_DB"):
        bootstrap_schema(env)
    ```
 
-   `CreateSQL.read_sql()` (`backend/service/infrastructure/database/schema.py:57-124`) executes `HireSnap.sql`
-   against the server and then bulk-inserts every CSV in `$DATA_PATH/tables/`.
+   `CreateSQL.read_sql()` (`backend/service/infrastructure/database/schema.py:285-309`) reads the
+   dump and every seed file before it touches the server, then executes the statements and
+   bulk-inserts the CSVs from `$DATA_PATH/tables/` in one transaction. It raises
+   `SchemaBootstrapError` instead of logging and exiting 0
+   ([KNOWN_GAPS.md §32](KNOWN_GAPS.md#32-a-missing-dump-left-a-half-created-database-and-the-process-still-exited-0-fixed)).
 
 Consequences you must plan for:
 
@@ -682,8 +686,8 @@ Consequences you must plan for:
 - There are no migrations. Changing a table means editing `database/HireSnap.sql` and
   applying it by hand to an existing database.
 - The loader connects **without** a database name and issues
-  `CREATE DATABASE IF NOT EXISTS`, so the database name comes from `DB`
-  (`service/infrastructure/database/schema.py:26-33`, `:80-81`).
+  `CREATE DATABASE IF NOT EXISTS` and then `USE` it, so the database name comes from
+  `DB` (`service/infrastructure/database/schema.py:361-370`).
 - Re-initialising means destroying the volume (`down -v`), which also destroys the
   data. There is no in-place reset.
 
@@ -727,6 +731,14 @@ backend, not abort the boot. `CORS_ALLOW_ORIGINS` sits in this second camp and i
 `_cors_settings()` (`backend/service/api/app.py:67-117`), splatted into `CORSMiddleware` at
 `:175-183`; its one rule — a wildcard origin is never paired with credentials, because
 browsers reject that pair — is [ENV.md §3.2](ENV.md#32-cors_allow_origins--consumed-and-the-wildcardcredentials-rule).
+
+One more convention sits between those two: a **boolean** key is parsed by
+`service/configuration/flags.py`, not by the reader that happens to need it. `read_flag()`
+(`:82-96`) treats an absent key as the caller's default and a **present** value nobody meant
+as `FlagValueError` naming the variable, so a typo refuses to boot instead of starting with a
+feature quietly absent. Numbers keep the old forgiving behaviour on purpose. Every
+`MAIL__*`, `CELERY__ENABLED`, `STORAGE__SECURE` and `INIT_DB` site delegates to it
+([KNOWN_GAPS.md §35](KNOWN_GAPS.md#35-every-boolean-except-debug-could-be-typod-into-off-fixed)).
 
 A manifest key that **no Python module reads** is now a short and shrinking list, and each
 member is honest about why it is there:

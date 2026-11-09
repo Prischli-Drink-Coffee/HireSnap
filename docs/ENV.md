@@ -87,8 +87,8 @@ start unless the Notes column says otherwise.
 |-----|---------|-----|------|-------|
 | `HOST` | Bind address for uvicorn, and the host half of absolute media URLs built by the URL helper. | `0.0.0.0` | `0.0.0.0` | Read in `run_server()` (`backend/service/main.py:58-69`) and passed to `uvicorn.run`, which is why it must not be `127.0.0.1` — see §3.1. |
 | `SERVER_PORT` | In-container port for uvicorn **and** the port half of those URLs. | `8080` | `8080` | Keep `8080`: the gateway upstream and the image healthcheck hardcode it. Changing the host-side publish does not change this. |
-| `DEBUG` | `"TRUE"` or `"FALSE"`, upper case, compared as a string. | `TRUE` | `FALSE` | Any other value raises `RuntimeError: DEBUG must be TRUE or FALSE, got ...` in `_debug_flag()` (`backend/service/main.py:40-47`). `TRUE` enables uvicorn reload **and** is one of the two gates on the schema-creating `CreateSQL` run. |
-| `INIT_DB` | Operator intent: "initialise the schema on start". | `false` | `false` | Read (truthy values `1`/`true`/`yes`/`on`, `os_env_flag()` at `backend/service/main.py:82-86`) but only as an **AND** with `DEBUG`: the bootstrap runs when `DEBUG=TRUE` **and** `INIT_DB` is truthy (`backend/service/main.py:72-79`). It cannot override the `DEBUG` gate. See [KNOWN_GAPS.md](KNOWN_GAPS.md#6-schema-creation-only-happens-when-debugtrue). |
+| `DEBUG` | `"TRUE"` or `"FALSE"`, upper case, compared as a string. | `TRUE` | `FALSE` | Any other value raises `RuntimeError: DEBUG must be TRUE or FALSE, got ...` in `_debug_flag()` (`backend/service/main.py:38-45`). `TRUE` enables uvicorn reload **and** is one of the two gates on the schema-creating `CreateSQL` run. |
+| `INIT_DB` | Operator intent: "initialise the schema on start". | `false` | `false` | Read as a strict boolean (`os_env_flag()`, `backend/service/main.py:85-93`, which delegates to `service/configuration/flags.py`: `1`/`true`/`yes`/`on`/`enabled`/`y`/`t` in any case, and a value nobody meant **raises** rather than reading as off). It is only an **AND** with `DEBUG`: the bootstrap runs when `DEBUG=TRUE` **and** `INIT_DB` is truthy (`backend/service/main.py:75-82`). It cannot override the `DEBUG` gate. See [KNOWN_GAPS.md](KNOWN_GAPS.md#6-schema-creation-only-happens-when-debugtrue). |
 | `DATA_PATH` | Absolute directory for uploads, embeddings and `tables/` CSVs. | `/app/data` | `/app/data` | Bind-mounted from `infra/storage`. The two must agree. Used at `backend/service/infrastructure/uploads.py:15` (also `:31-35`) and `backend/service/infrastructure/database/schema.py:23`. |
 | `PUBLIC_BASE_URL` | Externally reachable origin used for media URLs by the patched URL helper (`backend/service/shared/urls.py`). | `http://localhost:8088` | `https://<real host>` | `${PUBLIC_BASE_URL:?...}` — required at compose level. Optional to the *code*: when it is absent the helper falls back to `http://${HOST}:${SERVER_PORT}`. |
 
@@ -330,7 +330,7 @@ line (`:163-167`). The wiring exports happen afterwards, inside
 One dependency crosses those flags: **`CELERY=1` forces `CACHE=1`.** A worker without
 a broker would retry a connection no container answers, so the cache profile is turned on
 and a warning is printed (`docker/sidecar_profiles.sh:56-60`). Nothing else is coupled,
-and there is no `ML` switch to leave redis alone: inference holds no shared state at all.
+and there is no `ML` switch at all: inference holds no shared state and has nothing to wire.
 See [SIDECARS.md §1](SIDECARS.md#1-how-the-flags-work).
 
 ### 8.1 `cache`
@@ -473,6 +473,11 @@ on the `file` backend, so an unconfigured stack needs no SMTP server at all.
 | `MAIL__FILE_PATH` | `/app/logs/mail_outbox.log` | Where the `file` backend appends; `/app/logs` is the `infra/logs` bind mount, so the outbox is readable on the host |
 | `MP_MAX_MESSAGES` | `5000` | Mailpit inbox bound; a catcher that grows forever is a memory leak with a nice UI |
 | `MAILPIT_PUBLISH_PORT` | `8025` | **Dev only** host port for the inbox, i.e. http://localhost:8025 |
+
+Every `__`-prefixed switch in this section - `MAIL__ENABLED`, `MAIL__STARTTLS`, `MAIL__SSL`, `STORAGE__SECURE`, `CACHE__*` - goes through the same strict parser
+(`backend/service/configuration/flags.py:63-96`): absent means the default, and a present value
+nobody meant raises `FlagValueError` instead of quietly reading as off. That is deliberate; see
+[KNOWN_GAPS.md §35](KNOWN_GAPS.md#35-every-boolean-except-debug-could-be-typod-into-off-fixed).
 
 **What breaks without it:** nothing; with `MAIL__ENABLED=false` the disabled mailer is a
 no-op. Request-path sends use `send_now_or_later`, which swallows every failure on

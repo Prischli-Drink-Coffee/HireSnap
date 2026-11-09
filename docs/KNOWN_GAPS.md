@@ -171,11 +171,13 @@ if _debug_flag(env) and os_env_flag("INIT_DB"):
     bootstrap_schema(env)          # lazily imports CreateSQL and calls read_sql()
 ```
 
-`_debug_flag()` (`:40-47`) is a strict string comparison: `TRUE`, `FALSE`, or a
-`RuntimeError` naming the value it saw. `os_env_flag()` (`:82-86`) accepts
-`1`/`true`/`yes`/`on` in any case. The two are an **AND**, so `INIT_DB=1` alone does
-nothing and `DEBUG=TRUE` alone does nothing — the second key narrows the first, it cannot
-override it.
+`_debug_flag()` (`:38-45`) is a strict string comparison: `TRUE`, `FALSE`, or a
+`RuntimeError` naming the value it saw. `os_env_flag()` (`:85-93`) delegates to the
+same strict parser every other boolean uses (`service/configuration/flags.py`), so it accepts
+`1`/`true`/`yes`/`on`/`enabled`/`y`/`t` in any case and **raises** on a value
+nobody meant instead of reading it as off - see §35 for why that changed and what it costs. The
+two keys are an **AND**, so `INIT_DB=1` alone does nothing and `DEBUG=TRUE` alone does
+nothing — the second key narrows the first, it cannot override it.
 
 **Consequence.** `CreateSQL.read_sql()` creates the database, executes `HireSnap.sql`,
 and bulk-loads the CSVs in the `tables/` directory under `DATA_PATH` for `embeddings`,
@@ -1058,13 +1060,13 @@ asset and link them, keep the SVGs (they are ~1.1 MB together and render in the 
 leave the rest. Do not reach for history rewriting to reclaim the space: the blobs stay in
 every existing clone regardless.
 
-## 30. `Invalid authentication scheme.` is dead code
+## 30. `Invalid authentication scheme.` is dead code (fixed by deletion)
 
-**Defect, as it stands.** `JWTBearer.__call__` has three rejection branches
-(`backend/service/api/security.py:25-44`). The first one compares the scheme:
+**Defect, as it stood.** `JWTBearer.__call__` had three rejection branches, and the
+first one compared the scheme:
 
 ```python
-# backend/service/api/security.py:32-36
+# backend/service/api/security.py, as it was
 if credentials:
     if not credentials.scheme == "Bearer":
         ex = HTTPException(status_code=403, detail="Invalid authentication scheme.")
@@ -1072,111 +1074,181 @@ if credentials:
         raise ex
 ```
 
-It cannot run. `super().__call__(request)` on line 31 is Starlette's
-`HTTPBearer`, which already rejects a non-bearer scheme - with
-`403 Invalid authentication credentials` when `auto_error=True`, and by
-returning `None` (which falls through to this class's own
-`403 Invalid authorization code.`) when it is off. Line 32's `if credentials:` is
-only true after the scheme has been accepted, so the body of the branch is unreachable in
-both modes.
+It could not run. `super().__call__(request)` is Starlette's `HTTPBearer`, which
+already rejects a non-bearer scheme - with `403 Invalid authentication credentials`
+when `auto_error=True`, and by returning `None` (which fell through to this
+class's own `403 Invalid authorization code.`) when it was off. The
+`if credentials:` guard was only true after the scheme had been accepted, so the body
+was unreachable in both modes.
 
-**Why it survives review.** It reads as defence in depth, and it is the kind of code a
+**Why it survived review.** It read as defence in depth, and it is the kind of code a
 reviewer skims and approves precisely *because* it is checking something. The message was
-also quoted in `docs/SERVICE_CONTRACTS.md` as a 403 a client can receive - it said so until
-this pass corrected it - which made the branch self-documenting without ever being exercised.
+also quoted in `docs/SERVICE_CONTRACTS.md` as a 403 a client could receive, which made
+the branch self-documenting without ever being exercised.
 
-**Status: documented, not fixed.** Changing it means either deleting a branch (a no-op for
-every client) or reordering the scheme check ahead of `super()`, which would change the
-403 body a non-bearer request gets today. The second is a wire-contract change, so it is a
-decision rather than a tidy-up - the same rule as `ConflictError` being a 404 (§9).
+**Status: fixed, by deletion.** The branch is gone. `backend/service/api/security.py:42-54`
+is the whole of `__call__` now: the base class's credentials, one
+`verify_jwt()` call, and a fall-through for the `auto_error=False` case. The
+module docstring (`:1-19`) records the two messages that actually reach a client and
+says they belong to `HTTPBearer`, so the next reader does not reintroduce a check that
+cannot run: `403 Invalid authentication credentials` for a non-bearer scheme with
+`auto_error=True`, and `403 Invalid authorization code.` for the same request
+with it off.
 
-**What caught it.** `backend/tests/test_security_jwt.py:71-86` asserts the message a
-client *actually* receives in both modes and says `REPORTED, NOT FIXED` in its docstring.
-Nothing in the suite could have found it by accident: the branch has no observable effect.
+Nothing a client receives changed - the branch never produced a response - which is why this
+was the safe half of the pair: the fix is a delete, not a wire-contract change.
 
-## 31. A non-admin on an admin route gets `403`, not `401`
+**What caught it.** `backend/tests/test_security_jwt.py:73-89`
+(`test_a_non_bearer_scheme_is_rejected_by_the_superclass_not_by_this_class`) asserts
+both messages the base class produces and says `D1 (KNOWN_GAPS 30), FIXED BY DELETION`
+in its docstring. Nothing in the suite could have found the dead branch by accident: it had
+no observable effect.
 
-**Defect, as it stands.** The admin check raises inside the function's own exception
-handler, so the raise is immediately swallowed by it:
+## 31. A non-admin on an admin route was reported as an expired session (fixed)
+
+**Defect, as it stood.** The admin check raised inside `verify_jwt`'s own exception
+handler, so the raise was immediately swallowed by it:
 
 ```python
-# backend/service/api/security.py:46-60, condensed
+# backend/service/api/security.py, as it was, condensed
 try:
     payload = decode_jwt(jwtoken)
     if self.access_level == 1 and payload.get("sub") != "admin":
         raise HTTPException(status_code=401, detail="Have not access")   # :52
-except Exception as ex:          # :55 - catches the line above
+except Exception as ex:          # :55 - caught the line above
     payload = None               # :57
 return bool(payload)             # :60 -> False
 ```
 
-`False` makes `__call__` render `403 Invalid token or expired token.`
-(`:37-40`), so a level-1 route answers `403` to a logged-in non-admin and to an
-expired token alike. There are **17** level-1 dependency sites across nine router modules
-(measured by grepping `JWTBearer(access_level=1)`), including
+`False` made `__call__` render `403 Invalid token or expired token.`, so a
+level-1 route answered the same 403 to a signed-in non-admin and to an expired token. There
+are **17** level-1 dependency sites across nine router modules, including
 `users_api.py:107`, `files_api.py:91` and `candidate_vacancies_api.py:101`.
 
-**Why it survives review.** An expired token *should* be a 403 here, so the common case
-looks right. The wrong case - a valid token with the wrong role - is indistinguishable from
-it at the client, and nothing in the tree tests an admin route end to end.
+**Why it survived review.** An expired token *should* be a 403 here, so the common case
+looked right. The wrong case - a valid token with the wrong role - was indistinguishable
+from it at the client, and nothing in the tree tested an admin route end to end.
 
-**Consequence for clients.** "Not an admin" cannot be told apart from "session expired". A
-SPA cannot decide between *re-authenticate* and *you are in the wrong account*, so it has to
-do the safe thing (re-authenticate) and the user sees a sign-in page they cannot get past.
-An operator reading the log sees the whole traceback, because `log.exception(ex)` runs
-before the re-raise; the client sees nothing of it.
+**Consequence, while it lasted.** "Not an admin" could not be told apart from "session
+expired". A SPA could not decide between *re-authenticate* and *you are in the wrong
+account*, so it had to do the safe thing (re-authenticate) and the user saw a sign-in page
+they could not get past. An operator reading the log saw the whole traceback, because
+`log.exception(ex)` ran before the re-raise; the client saw nothing of it.
 
-**Why it is not fixed here.** The narrow fix is one line - move the admin check after the
-`try`, or catch `HTTPException` and re-raise. Both change the status a client
-receives for a whole class of callers, which is a contract change.
-
-**Pinned as-is.** `backend/tests/test_security_jwt.py:123-137` asserts the 403 and its
-docstring records why the 401 is unreachable. Fixing the code has to change that test in the
-same commit, which is the point.
-
-## 32. A missing dump leaves a half-created database and the process still exits 0
-
-**Defect, as it stands.** `CreateSQL.read_sql()` wraps its whole body in
-`except Exception` and only logs:
+**Status: fixed.** The role check now sits **outside** the `try`
+(`backend/service/api/security.py:70-81`): the handler covers `decode_jwt` only,
+and a payload that decodes is then checked with
 
 ```python
-# backend/service/infrastructure/database/schema.py:128-131
+if self.access_level == 1 and payload.get("sub") != "admin":
+    ex = HTTPException(status_code=403, detail="Have not access")
+    log.exception(ex)
+    raise ex
+```
+
+The status is deliberately **still 403** - the level-1 semantics did not change - so a
+client branches on the *detail*, not the status code. All four denials are 403 and differ
+only in their body:
+
+| Case | Body |
+|------|------|
+| no `Authorization` header | `Not authenticated` (Starlette) |
+| non-bearer scheme | `Invalid authentication credentials` (Starlette) |
+| the token does not verify, or it expired | `Invalid token or expired token.` |
+| verified token, `sub` is not `admin`, `access_level=1` | `Have not access` |
+
+The fourth row is new. [SERVICE_CONTRACTS.md §2.2](SERVICE_CONTRACTS.md#22-what-the-backend-actually-returns-partial-gap)
+carries the same table for callers.
+
+**What caught it.** Three tests in `backend/tests/test_security_jwt.py`:
+`:126-140` (`test_access_level_one_rejects_a_non_admin_subject_as_a_403`) pins
+the new detail; `:150-168`
+(`test_the_four_denials_are_distinguishable_by_status_and_detail`) asserts the set - a
+future edit that collapses two cases back into one string fails there even if every
+single-case assertion was updated; `:206-229`
+(`test_the_admin_denial_is_logged_before_it_is_raised`) keeps the operator's trace.
+`:171-196` (`test_an_expired_token_is_rejected_as_expired_and_not_as_a_role_problem`)
+closes the loop with a real HS256 expiry.
+
+## 32. A missing dump left a half-created database and the process still exited 0 (fixed)
+
+**Defect, as it stood.** `CreateSQL.read_sql()` wrapped its whole body in
+`except Exception` and only logged:
+
+```python
+# backend/service/infrastructure/database/schema.py:128-131, as it was
 except Exception as ex:
     log.warning("Error during SQL script execution", exc_info=ex)
 finally:
     self.connection.close()
 ```
 
-By the time that fires, two statements have already committed: `CREATE DATABASE IF NOT
-EXISTS` (`:87`) and `USE` (`:88`). A dump that is missing, unreadable or
-truncated therefore leaves an empty database behind, plus whatever earlier statements in the
-dump succeeded, and the caller has no way to know: `read_sql()` returns `None` either
-way, `main()` returns 0, and uvicorn then starts against a schema that is not there.
+By the time that fired, two statements had already committed: `CREATE DATABASE IF NOT
+EXISTS` and `USE`. A dump that was missing, unreadable or truncated therefore left
+an empty database behind, plus whatever earlier statements in the dump succeeded, and the
+caller had no way to know: `read_sql()` returned `None` either way,
+`main()` returned 0, and uvicorn then started against a schema that was not there.
 
-**Why it survives review.** Every statement in the dump is itself wrapped in
-`except pymysql.MySQLError` (`:99-104`) on purpose - that is what lets the dump be
-re-applied to a schema that already has half the tables, where "table exists" is an error on
-every line. The outer handler was written in the same spirit ("the bootstrap is a convenience,
-do not crash the server over it"), but the two are not the same case: a rejected DDL statement
-is expected, a missing file is not.
+**Why it survived review.** Every statement in the dump was itself wrapped in
+`except pymysql.MySQLError` on purpose - that is what lets the dump be re-applied to a
+schema that already has half the tables, where "table exists" is an error on every line. The
+outer handler was written in the same spirit ("the bootstrap is a convenience, do not crash
+the server over it"), but the two are not the same case: a rejected DDL statement is
+expected, a missing file is not.
 
-**Consequence.** The first symptom is an API that boots, answers `/server/health` with
-`200`, and then 500s on the first query against a table that was never created. The log line
-is at `WARNING` level among uvicorn's output, so it is easy to miss on a first run - and
-a first run is exactly when the bootstrap matters.
+**Consequence, while it lasted.** The first symptom was an API that booted, answered
+`/server/health` with `200`, and then 500'd on the first query against a table
+that was never created. The log line was at `WARNING` level among uvicorn's output,
+easy to miss on a first run - and a first run is exactly when the bootstrap matters.
 
-**What would change it.** Distinguish the two failures: let the file-open error propagate (or
-exit non-zero), keep the per-statement tolerance. The bootstrap is the one code path in the
-tree whose job is to fail loudly, and it is the one that swallows.
+**Status: fixed.** `backend/service/infrastructure/database/schema.py:1-31` now
+documents the order as part of the contract. `read_sql()` (`:181-205`) runs
+`_load_statements()` (`:208-224`) and `_load_seed_frames()`
+(`:226-255`) **before** it touches the server, so a path typo raises having executed
+nothing; then `_create_database()` (`:257-266`), `_apply_dump()`
+(`:268-284`), `_seed()` (`:286-309`), one `commit()` (`:197`)
+and `close()` in `finally` (`:204-205`).
 
-**Pinned.** `backend/tests/test_schema_bootstrap.py:302-320` asserts what is *correct*
-about this path - the connection is closed even when the dump is missing - and says
-"DOCUMENTED, NOT ENDORSED" in its docstring rather than treating the silence as behaviour.
+The two failure classes are now separate, which was the whole fix:
 
-## 33. The dump is split on `;` with `str.split`
+- `SchemaBootstrapError(RuntimeError)` (`:89-119`) carries `step`,
+  `detail`, a 1-based `statement_index` into the dump and a 200-character
+  `statement` excerpt (`:71-79`). It is raised for an unopenable or empty dump, a
+  refused `CREATE DATABASE` or `USE`, a dead connection mid-dump (`errno`
+  2006/2013/2055 - the class the per-statement tolerance must not swallow, `:50-56`)
+  and any seed failure.
+- A single statement MySQL rejects **while the connection is alive** is still logged and
+  skipped (`:284`), because that is the re-run tolerance the dump's
+  `CREATE TABLE IF NOT EXISTS` depends on. An absent `tables/` directory is still
+  not an error (`:234-237`).
 
-**Defect, as it stands.** `read_sql()` turns the SQL file into statements with a string
-split (`backend/service/infrastructure/database/schema.py:95`):
+The seed phase is transactional in the only way MySQL allows: `begin()` once
+(`:294`), `executemany` per table (`:301-302`), exactly one `commit()`
+on success, and a rollback plus `SchemaBootstrapError` on any failure
+(`:304-309`). The docstring states the limit plainly (`:26-30`): MySQL commits
+implicitly around DDL, so the `CREATE TABLE`s are not rollback-able and only the seed
+rows are.
+
+A smaller defect in the same file went with it: `remove_column_from_csv()`
+(`:147-179`) used to fall off the end into `None` on a frame it could not adapt;
+it now returns the frame unchanged (`:177-179`).
+
+**What caught it.** `backend/tests/test_schema_bootstrap.py`, 19 tests. The ones that
+pin the new behaviour are
+`test_the_connection_is_closed_and_nothing_is_written_when_the_dump_is_missing`
+(`:315`), `test_a_dump_that_holds_no_statement_raises_before_touching_the_server`
+(`:341`), `test_a_rejected_create_database_raises_instead_of_being_logged`
+(`:360`), `test_a_lost_connection_mid_dump_raises_with_the_statement_index`
+(`:379`), `test_one_failing_seed_table_rolls_back_the_whole_seed_phase_and_raises`
+(`:277`) and `test_the_transaction_is_begun_once_and_committed_once_on_success`
+(`:415`). The two that pin what deliberately did **not** change are
+`test_a_dump_statement_that_fails_does_not_abort_the_rest` (`:235`) and
+`test_a_seed_file_that_cannot_be_parsed_raises_before_the_dump_runs` (`:442`).
+
+## 33. The dump was split on every `;` with `str.split` (fixed)
+
+**Defect, as it stood.** `read_sql()` turned the SQL file into statements with a string
+split:
 
 ```python
 statements = [stmt.strip() for stmt in sql_script.split(";") if stmt.strip()]
@@ -1185,65 +1257,115 @@ statements = [stmt.strip() for stmt in sql_script.split(";") if stmt.strip()]
 That cannot tell a statement terminator from a semicolon inside a quoted value. A row like
 `'open; part time'` in the dump would be cut in half, and the two halves would be executed
 as two broken statements - the first of which fails silently under §32's per-statement
-handler.
+handler. Nothing in the tree could see it: the dump of record happens to contain no quoted
+semicolon, so the splitter was correct only by accident of its input.
 
-**Measured today: safe.** `backend/database/HireSnap.sql` splits into exactly 50
-statements, none contains an escaped quote (`\'`), none contains `;;`, and every one
-has balanced single quotes. The full `ENUM('candidate','employer')` form is used rather
-than a comma-joined string (`:134`), which is one reason the dump has stayed
-splitter-friendly.
+**What changed.** `backend/service/infrastructure/database/schema.py` now splits in a
+module-level `split_statements(script) -> List[str]` (`:74-175`), and
+`_load_statements()` calls it instead of `str.split` (`:312-328`, the call at
+`:323`). It tracks the four lexical states that can hold a semicolon - single quote,
+double quote, backtick identifier, block comment - plus both line-comment markers MySQL
+accepts (`--` and `#`) (`:94-170`), treats a backslash escape as consuming the
+next character outside a backtick and `''` / `""` as a doubled quote inside one
+(`:116-141`), and only a semicolon seen outside all of them ends a statement
+(`:162-168`). Double-quoted text is treated as a string, not an identifier: under
+`ANSI_QUOTES` it would be an identifier, but either way its content may hold a
+semicolon, which is the only thing the splitter needs to know (`:91-93`).
 
-**Why the fix is not a SQL parser.** A real splitter is a parser, and a parser in a developer
-convenience script would be more code than the rest of the file. The cheaper invariant is that
-the dump stays simple, so the guard is a test on the *dump* rather than on the splitter:
-`backend/tests/test_schema_bootstrap.py:322-337` asserts the statement count, the balanced
-quotes and the absence of `\'` and `;;`. A future dump that breaks the assumption
-fails there instead of halfway through a bootstrap.
+**Why it is still not a SQL parser.** A real grammar would be more code than the rest of the
+file and would still need exactly these cases. Tracking where a quote is open is enough to
+find a terminator, and it is the difference between a splitter that is right about this dump
+and one that is right about the next one (`:84-89`).
 
-**Residual risk.** The invariant is on the schema of record, not on the CSV seed path, which
-uses parameterised `executemany` (`:107-124`) and is immune. So the exposure is only
-ever a hand-edited dump.
+**What now stops a regression.** `backend/tests/test_schema_bootstrap.py` pins both
+halves, because either half alone proves nothing:
 
-## 34. The log path in the YAML is relative to the working directory
+- `test_split_statements_ignores_a_semicolon_that_does_not_end_a_statement` (`:481-500`)
+  - twelve cases, one per lexical state: quoted, double-quoted, backticked, `''`
+  doubled, backslash-escaped, block comment, `--` and `#` line comments, a
+  statement with no terminator, terminator-only input, and empty input.
+- `test_the_naive_split_would_have_broken_the_case_above` (`:503-513`) - on the
+  same input `str.split` disagrees with the splitter, so a splitter that returned the
+  whole script as one statement would not pass.
+- `test_the_shipped_dump_splits_into_the_same_statements_as_before` (`:516-525`) -
+  the real file still yields the same 50 statements, so the fix did not change what the
+  bootstrap executes.
 
-**Defect, as it stands.** Two places decide where `app.log` goes, and they disagree in
+**Residual risk, and where it now points.** The exposure was always a hand-edited dump
+rather than the CSV seed path, which uses parameterised `executemany` and is immune.
+That is still true, but the failure is no longer silent: a quoted semicolon is now handled,
+and a genuinely malformed statement raises through §32's `SchemaBootstrapError` instead
+of leaving a half-built schema behind.
+
+## 34. The log path in the YAML was relative to the working directory (fixed)
+
+**Defect, as it stood.** Two places decided where `app.log` went, and they disagreed in
 form:
 
-- `backend/service/configuration/logging.yaml:11` says `filename: 'logs/app.log'` -
+- `backend/service/configuration/logging.yaml:11` said `filename: 'logs/app.log'` -
   a **relative** path, resolved by `logging.FileHandler` against the process CWD.
-- `backend/service/configuration/paths.py:74-76` exposes `logs_dir()` =
+- `backend/service/configuration/paths.py:74-76` exposed `logs_dir()` =
   `BACKEND_ROOT / "logs"`, an **absolute** path, and
-  `service/configuration/logging.py:43-46` uses it.
+  `service/configuration/logging.py:43-46` used it.
 
-The YAML is not templated from `paths.py`, and the YAML is what actually configures the
-process: `main.run_server()` loads it with `dictConfig` (`service/main.py:59-60`) and
-passes the same file to `uvicorn.run(log_config=...)` (`:66`).
+The YAML was not templated from `paths.py`, and the YAML is what actually configured the
+process: `main.run_server()` loaded it with `dictConfig` and passed the same file to
+`uvicorn.run(log_config=...)`.
 
-**Why it has not bitten.** In the image `WORKDIR` is `/app` and the backend root is also
-`/app`, so `logs/app.log` and `/app/logs/app.log` are the same file, and
-`infra/logs` is mounted at `/app/logs`. The two definitions agree by coincidence of
+**Why it had not bitten.** In the image `WORKDIR` is `/app` and the backend root is
+also `/app`, so `logs/app.log` and `/app/logs/app.log` were the same file, and
+`infra/logs` is mounted at `/app/logs`. The two definitions agreed by coincidence of
 layout, not by construction.
 
-**Consequence.** Start the server from any other directory - `cd / && python -m service.main`
-or a systemd unit without `WorkingDirectory` - and the application's own log lands in
-`backend/logs/app.log` (via the absolute path) while uvicorn's file handler creates a second
-`logs/` tree under the CWD. Two files, neither complete, and the post-mortem reads half a
-story. A read-only CWD is also the difference between "file logging disabled" and a working
-log.
+**Consequence, while it lasted.** Started from any other directory -
+`cd / && python -m service.main` or a systemd unit without `WorkingDirectory` - the
+application's own log landed in `backend/logs/app.log` (via the absolute path) while
+uvicorn's file handler created a second `logs/` tree under the CWD. Two files, neither
+complete, and the post-mortem read half a story. A read-only CWD was also the difference
+between "file logging disabled" and a working log.
 
-**What would change it.** One templated placeholder, or dropping the file handler from the YAML
-and letting `setup_logging()` own the file - the second is a code change and would
-re-open whether uvicorn's own records reach the file at all.
+**Status: fixed, by resolving the path before the config is applied.**
+`backend/service/configuration/paths.py:79-90` gained `log_file()` =
+`logs_dir() / "app.log"`, and `backend/service/configuration/logging.py:49-79`
+gained `load_logging_config(path=None)`: it `yaml.safe_load`s the file and rewrites
+`handlers.file.filename` to the absolute `log_file()` **only when the YAML spells it
+relatively** (`:75-78`), so a deployment that mounts the log elsewhere can still write an
+absolute path into the YAML and be left alone.
 
-## 35. Every boolean except `DEBUG` can be typo'd into "off"
+`backend/service/main.py:56-72` now applies the dict itself -
+`logging.config.dictConfig(load_logging_config(LOGGING_YAML))` at `:64` - and
+passes `log_config=None` to `uvicorn.run` (`:70`), so uvicorn cannot resolve
+the same relative path against its own CWD. The comment at `:58-63` records why: the
+reloader's child inherits no useful working directory, and one place should know where the log
+file is.
 
-**Defect, as it stands.** `DEBUG` is parsed strictly: `service/main.py:39-46` accepts
-`TRUE` or `FALSE` and raises `RuntimeError("DEBUG must be TRUE or FALSE, got ...")`
-for anything else. Nothing else in the tree is that careful. `settings.py:57-62` is the
-shared flag parser:
+The YAML still says `logs/app.log` **on purpose**
+(`backend/service/configuration/logging.yaml:11`): it stays the source of truth for the
+format, levels, handlers and logger tree, and one relative filename that a single function
+absolutises is easier to read than a generated file. The rewrite is one-way and the fallback is
+unchanged - if the directory cannot be created, `setup_logging()` still degrades to
+console-only (`logging.py:92-100`).
+
+**What caught it.** `backend/tests/test_main_entrypoint.py`:
+`test_run_server_reads_the_log_config_from_the_package_not_the_working_directory`
+(`:216-240`) asserts `uvicorn.run` received `log_config=None`, that
+`LOGGING_YAML` is absolute, and that the configured file handler points at
+`<backend>/logs/app.log`; `test_the_yaml_still_spells_the_log_file_relatively`
+(`:243-255`) pins the YAML on purpose; `test_load_logging_config_makes_the_file_handler_absolute`
+(`:258-269`) also pins the handler class, the encoding, the three uvicorn loggers and the
+`['file','console']` root handlers; `:272-283` leaves an absolute filename alone and
+`:286-293` makes a missing file handler a no-op.
+
+## 35. Every boolean except `DEBUG` could be typo'd into "off" (fixed)
+
+**Defect, as it stood.** `DEBUG` was parsed strictly: `service/main.py:38-45`
+accepts `TRUE` or `FALSE` and raises
+`RuntimeError("DEBUG must be TRUE or FALSE, got ...")` for anything else. Nothing else in
+the tree was that careful. `settings.py` had the shared flag parser, and every facade had
+a copy of the same three lines:
 
 ```python
-# backend/service/settings.py:57-62
+# backend/service/settings.py, as it was
 def _flag(*names, default=False):
     raw = _first(*names, default="")
     if not raw:
@@ -1251,28 +1373,65 @@ def _flag(*names, default=False):
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 ```
 
-`INIT_DB=ture` or `MAIL__ENABLED=tru` is therefore silently `False` - the same value
-as `false`, with no warning. The platform facades clone the same set
-(`infrastructure/cache.py:49`, `storage.py:44`, `mail.py:46`, and a fifth copy in
-`infrastructure/messaging/celery_app.py:75`), so `CELERY__ENABLED=ture` leaves the
-workers idle while the API does the work inline.
+`INIT_DB=ture` or `MAIL__ENABLED=tru` was therefore silently `False` - the
+same value as `false`, with no warning. There were six copies of that rule:
+`settings.py`, `infrastructure/cache.py`, `storage.py`, `mail.py` and
+`infrastructure/messaging/celery_app.py`, plus `main.os_env_flag()`, so
+`CELERY__ENABLED=ture` left the workers idle while the API did the work inline.
 
-**Where it is *not* silent.** A misspelled **backend name** does warn and fall back:
-`CACHE__BACKEND=redys` logs `cache status=unknown_backend value=redys action=using` and
-uses memory (`cache.py:483-486`), with the same pattern in `storage.py:471-473` and
-`mail.py:296-298`. Numbers are forgiving too, deliberately (`settings.py:65-73` falls
-back on `ValueError`). Booleans are the only class that fails silently in the "off"
+**Where it was *not* silent.** A misspelled **backend name** warned and fell back:
+`CACHE__BACKEND=redys` logged `cache status=unknown_backend value=redys action=using`
+and used memory, with the same pattern in `storage.py` and `mail.py`. Numbers were
+forgiving too, deliberately. Booleans were the only class that failed silently in the "off"
 direction.
 
-**Consequence.** The failure is invisible in the worst way: the stack starts, health is green,
-and one optional feature is quietly absent. `MAIL=1` with a typo in `MAIL__ENABLED` gives
-a mailer that writes nothing; `CELERY=1` with a typo gives inline execution inside the
-request thread, which is exactly the latency the profile was turned on to avoid.
+**Consequence, while it lasted.** The failure was invisible in the worst way: the stack
+started, health was green, and one optional feature was quietly absent. `MAIL=1` with a
+typo in `MAIL__ENABLED` gave a mailer that wrote nothing; `CELERY=1` with a typo
+gave inline execution inside the request thread, which is exactly the latency the profile was
+turned on to avoid.
 
-**What would change it.** Treat an unparseable boolean as an error - the `DEBUG` rule
-applied to the rest - or log a warning when a non-empty value does not match the truthy set.
-Either is a behaviour change for a stack that is expected to start, which is why the strict
-parser was only ever applied to the one key whose ambiguity is dangerous.
+**Status: fixed, in one module.** `backend/service/configuration/flags.py` (104 lines) is
+now the only boolean parser in the tree:
+
+- `TRUTHY` = `1/true/yes/on/enabled/y/t` (`:32`) and `FALSY` =
+  `0/false/no/off/disabled/n/f` (`:35`), both as frozensets so the accepted
+  spellings are one visible list rather than an expression.
+- `FlagValueError(ValueError)` (`:38-47`) carries the variable name and the value it
+  read, and says which spellings it accepts.
+- `parse_flag(raw, name)` (`:63-79`) strips and lowercases, raises on an **empty**
+  value (`:72-74`) and on anything in neither set (`:79`).
+- `read_flag(*names, default=False)` (`:82-96`) is the rule that matters: an
+  **absent** variable returns the caller's default, a **present** but unparseable one raises.
+  That is what lets an opt-out flag keep working - `MAIL__STARTTLS` passes
+  `default=True` (`infrastructure/mail.py:290`).
+
+The six copies are gone. `service/settings.py:_flag` (`:58-65`) is now
+`return read_flag(*names, default=default)`; `service/main.py:os_env_flag`
+(`:85-93`) delegates the same way; and the facades call `read_flag` directly -
+`mail.py:272` (`MAIL__ENABLED`), `:290` (`MAIL__STARTTLS`, default
+true), `:292` (`MAIL__SSL`), `storage.py:477` (`STORAGE__SECURE`),
+`messaging/celery_app.py:128` (`CELERY__ENABLED`). `cache.py` no longer has a
+private `_truthy` at all.
+
+**This is a deliberate behaviour change.** A stack whose env file contains
+`MAIL__ENABLED=ture` now refuses to boot instead of starting with mail silently absent.
+That is the trade: the failure moves from "a feature does nothing, forever, and health is green"
+to "the container exits with the variable and the value in its log". The manifest is safe
+because every shipped value is lowercase `true`/`false`; **numbers are still
+forgiving on purpose** (`settings.py:68-76` falls back on `ValueError`), because a
+port or a timeout has a sane default in a way an intent flag does not.
+
+**What caught it.** `backend/tests/test_settings.py:255-272`
+(`test_flag_raises_on_a_value_nobody_meant`, parameters `'maybe'`,
+`'ture'`, `''`, `'  '`, `'true false'`) asserts the exception names
+`MAIL__ENABLED` and quotes the offending value, and its docstring says
+`REPORTED, NOW FIXED (KNOWN_GAPS section 35)`; `:241-252` pins the accepted
+spellings and `:275-280` the absent-means-default rule.
+`backend/tests/test_main_entrypoint.py:81-94`
+(`test_os_env_flag_refuses_a_value_nobody_meant`) covers `INIT_DB` through the same
+path, and `backend/tests/test_storage_local.py:386-397` pins
+`STORAGE__SECURE` with a docstring that names the module the rule moved to.
 
 ## 36. `fastapi` is still imported from `service/shared/`
 
@@ -1310,7 +1469,7 @@ worker, a CLI or a test that does not install the API stack.
 
 **Why it is not fixed here.** `validate_token_type()` raising `HTTPException` is how the
 sign-in flow produces its 401 detail, and two tests assert that shape directly:
-`backend/tests/test_security_jwt.py:216-227` (the message names both token types in repr
+`backend/tests/test_security_jwt.py:302-313` (the message names both token types in repr
 form) and `backend/tests/test_slices_application.py:750-762` (an application-layer test
 catching a `fastapi` exception, and saying in its docstring that this is deliberate).
 Moving it to `UnauthorizedError` changes which handler renders it - correct, but a
@@ -1367,7 +1526,7 @@ from the list above because they are fixed. All three are enumerated in
 
 All three are backwards compatible: with no new configuration they behave exactly as before.
 
-Nine entries above are **closed** rather than open, and they are kept because *how* they
+Fifteen entries above are **closed** rather than open, and they are kept because *how* they
 failed is the useful part - each was invisible to the gates and would have surfaced first in
 production:
 
@@ -1394,6 +1553,36 @@ production:
 - §28 - the four `inference` routes called a module they never imported, so every one of them
   answered `NameError`. ruff's F821 found it; the `Depends` wiring makes a recurrence an
   import error rather than a 500.
+- §30 - `JWTBearer` carried its own scheme check, and Starlette had already rejected
+  every other scheme before it could run. Removed rather than made reachable; nothing a client
+  receives changed, which is what made it the safe half of the pair.
+  `backend/tests/test_security_jwt.py:73-89` pins the two messages that were always the
+  real ones.
+- §31 - a verified token with the wrong subject was reported as "session expired", because the
+  role check raised inside `verify_jwt`'s own `except`. The check now sits outside it
+  and answers `403 Have not access` (`security.py:77-80`); the status deliberately did
+  not move, so the detail is what a client branches on. `test_security_jwt.py:126-140`,
+  `:150-168` and `:206-229`.
+- §32 - `read_sql()` logged and continued on a missing dump, leaving a half-created
+  database behind an API that answered `/server/health` with 200. It now opens the dump and
+  every seed file before it touches the server and raises `SchemaBootstrapError` with the
+  step and the statement index; the per-statement tolerance it exists for is unchanged
+  (`schema.py:181-205`, `19` tests in `test_schema_bootstrap.py`).
+- §33 - the dump was cut on every `;` with `str.split`, so a semicolon inside a
+  quoted value would have split a statement in half and the first half would have failed
+  silently. `split_statements()` tracks quote, identifier and comment state instead
+  (`schema.py:74-175`), and the tests pin both directions: the twelve lexical cases, and the
+  shipped dump still yielding the same 50 statements (`test_schema_bootstrap.py:481-525`).
+- §34 - the file handler's path was relative in the YAML and absolute in the helper, so the two
+  agreed only because `WORKDIR` and the backend root were both `/app`. `log_file()`
+  plus `load_logging_config()` resolve it once, and `run_server()` hands
+  `log_config=None` to uvicorn (`service/main.py:56-72`,
+  `test_main_entrypoint.py:216-293`).
+- §35 - every boolean but `DEBUG` turned a typo into "off". `service/configuration/flags.py`
+  is now the single parser and a present-but-unparseable value raises `FlagValueError`
+  naming the variable (`flags.py:82-96`, `test_settings.py:255-272`). This is the one
+  closed entry that **changes what a bad env file does**: the stack refuses to boot instead of
+  starting with a feature quietly absent.
 
 Six entries are new since the slice refactor. §23 (one inference path, serialised GPU work),
 §24 (a credential rotated at the issuer, still in history) and §25 (the vertical slices are a
@@ -1408,32 +1597,22 @@ checkout rather than from the running system. None of the six is a bug a test co
 they are the deliberate stopping point of the refactor that
 [ADR/0008](ADR/0008-vertical-slice-services.md) records.
 
-Eight more were documented in the same read-through that produced the ratchet and the coverage
-floor, and they are a different kind again - each is a real defect in code that the refactor
-moved without changing, so the behaviour is exactly what it was before the move:
+Six more were documented in the same read-through that produced the ratchet and the coverage
+floor, in code the refactor had moved without changing. They are the ones that have since been
+**fixed**, and they are listed here rather than dropped because the fix is only trustworthy if
+the defect it answers is still written down. §30, §31, §32, §33, §34 and §35 each now name the
+regression test that keeps it fixed, and the entries above carry the mechanism.
 
-- §30 and §31 are the two auth quirks. A dead branch that reads like protection, and a 401 that
-  a client can never receive because the function's own handler swallows it.
-- §32, §33 and §34 are the bootstrap and its logging: a swallowed dump error, a splitter that
-  assumes no semicolons in string literals, and a log path that is relative in the YAML and
-  absolute in the helper.
-- §35 is the flag parser: every boolean except `DEBUG` turns a typo into "off" silently.
-- §36 is the one `shared/` module that still imports `fastapi`, plus the three legacy
-  repositories that do the same as recorded source patches.
-- §37 is the employer vacancy route: it validates, answers, and stores nothing - honestly, and
-  with the frontend saying so.
+Two entries remain **documented, not fixed**, and for the same reason in each case: the narrow
+fix is a one-line change that alters something a client can observe - a status, a message, a
+file that suddenly exists or does not - and a refactor whose claim is "the wire behaviour did not
+move" was the wrong commit to change it in.
 
-All eight are *documented, not fixed*, and in every case for the same reason: the narrow fix is
-a one-line change that alters something a client can observe - a status, a message, a file
-that suddenly exists or does not - and a refactor whose claim is "the wire behaviour did not
-move" is the wrong commit to change it in. Six of the eight are pinned by a test that asserts
-the behaviour as it is and says so in its docstring: `test_security_jwt.py:71-86` (§30),
-`test_security_jwt.py:123-137` (§31), `test_schema_bootstrap.py:302-320` (§32),
-`test_schema_bootstrap.py:322-337` (§33, and only on the input - the dump - not on the
-outcome), `test_main_entrypoint.py:219-233` (§34) and `test_settings.py:255-265` (§35).
-§36 is pinned indirectly: the tests it names assert the current exception shape rather than the
-import. §37 is the one with no test at all - no route test posts a vacancy and checks that
-nothing was stored - which is part of why it is still open.
+- §36 - one `shared/` module still imports `fastapi`. Pinned indirectly: the tests it
+  names assert the current exception shape rather than the import.
+- §37 - the employer vacancy route validates, answers, and stores nothing, honestly. It has no
+  test at all - no route test posts a vacancy and checks that nothing was stored - which is part
+  of why it is still open.
 
 Everything else is documented here rather than patched, so that the next reader can tell
 "the stack works around this" from "the stack is broken here".
