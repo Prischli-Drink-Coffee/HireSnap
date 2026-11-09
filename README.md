@@ -45,7 +45,7 @@ documentation are owned by the superproject and are described below.
 | `ml/`                 | submodule   | Inference sidecar — the owner of the model code: `service/app.py`, `service/engine.py`, `service/settings.py`, the pipeline modules and `cosmos_tokenizer/`, `docker/Dockerfile`, `tests/`, and `README.md` (the canonical HTTP contract). Stateless, no database, no auth. |
 | `docs/`                | superproject| Architecture, environment reference, runbook, service contracts, sidecars, secrets, known gaps, ADRs. |
 | `scripts/`             | superproject| Cross-repo guards (`check_*.py`), run by `make guards`, pre-commit and CI, plus `adopt-submodules.sh` for turning the three checkouts into submodules and `run_guard.sh`, which picks a Python that actually starts before invoking a guard. |
-| `.github/`             | superproject| CI (`.github/workflows/ci.yml`): a loop over every `scripts/check_*.py` guard (seven today) plus `compose config -q` for both stacks, gitleaks, pre-commit, backend pytest, the backend layout and complexity gates, the backend coverage floor (`coverage run --branch`, `fail_under = 90`), ml contract tests (no GPU) and the frontend build. |
+| `.github/`             | superproject| CI (`.github/workflows/ci.yml`): a loop over every `scripts/check_*.py` guard (seven today) plus `compose config -q` for both stacks, gitleaks, pre-commit, backend pytest, the backend layout and complexity gates, the backend coverage floor (`coverage run --branch`, `fail_under = 95`), ml contract tests (no GPU) and the frontend build. |
 | `Makefile`             | superproject| Thin wrappers over `docker/run.sh` and `docker/build.sh`, plus the local gates: `make env`, `make run-dev`, `make run-prod`, `make logs`, `make down`, `make smoke`, `make guards`, `make structure`, `make lint`, `make test`, `make ml-test` and `make coverage` (branch coverage of `backend/service/` against the floor in `backend/pyproject.toml`). |
 
 ## Quickstart
@@ -101,7 +101,7 @@ The root `Makefile` wraps the two scripts: `make env`, `make build`, `make run-d
 `make run-prod`, `make logs`, `make down`, `make smoke` and `make guards` call exactly
 the commands above. The rest are local gates rather than compose wrappers: `make test`,
 `make ml-test`, `make lint`, `make structure` and `make coverage` (branch coverage of
-`backend/service/`, floor `fail_under = 90` in `backend/pyproject.toml`). `make` is
+`backend/service/`, floor `fail_under = 95` in `backend/pyproject.toml`). `make` is
 convenience, not a dependency — every target has a script form that works without it.
 
 ## Optional services

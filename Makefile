@@ -361,15 +361,16 @@ test: _require-python
 # twice in a row without the second run inheriting the first one's format.
 #
 # WHY the threshold is not passed here: it lives in pyproject.toml
-# ([tool.coverage.report] fail_under = 90), so this target, CI and a developer's
-# own command all read ONE number instead of three that drift. Measured: 94.42%
+# ([tool.coverage.report] fail_under = 95), so this target, CI and a developer's
+# own command all read ONE number instead of three that drift. Measured: 99%
 # on Python 3.9 (the CI interpreter) with branch coverage on, so the floor sits a
 # few points BELOW it: a floor one point under the current number turns every
 # honest refactor into a demand for a new test, and a gate that has to be
 # negotiated gets bypassed. It was 65 when the gate landed, 73 after the slice and
 # deployment-module tests, 76 after the settings/schema/JWT/entry-point/connection/
-# composition/S3 tests, and 90 after the router/task/mail/cache/storage/jobs/
-# matching contract tests - the floor follows the tests, never the other way round.
+# composition/S3 tests, 90 after the router/task/mail/cache/storage/jobs/matching
+# contract tests, and 95 after the platform contract/edge, composition seam, container
+# and leftover-branch suites - the floor follows the tests, never the other way round.
 coverage: _require-python
 	@if [ ! -d backend/tests ]; then printf '%s\n' "coverage: SKIP backend - backend/tests/ does not exist"; elif ! $(PYTHON) -c 'import coverage' >/dev/null 2>&1; then printf '%s\n' "coverage: SKIP backend - coverage is not importable by $(PYTHON)" "          install it:  $(PYTHON) -m pip install coverage"; else printf '%s\n' "coverage: backend branch coverage (floor from backend/pyproject.toml)"; ( cd backend && $(PYTHON) -m coverage run --branch --source=service --rcfile=pyproject.toml -m pytest -q && $(PYTHON) -m coverage report --rcfile=pyproject.toml ) || exit 1; fi
 

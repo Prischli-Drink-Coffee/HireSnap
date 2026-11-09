@@ -102,7 +102,7 @@ wrapper over the scripts in `docker/` and only saves typing):
 - `make logs`, `make ps`, `make down`, `make guards` — inspect, stop, and run the
   `scripts/check_*.py` gates. `make smoke` proves the proxy path end to end.
 - `make coverage` — branch coverage of `backend/service/` against the floor in
-  `backend/pyproject.toml` (`fail_under = 90`, several points below the 94% the CI
+  `backend/pyproject.toml` (`fail_under = 95`, several points below the 99% the CI
 interpreter measures - see `docs/RUNBOOK.md` §16.1 for why it is not set one point under).
 It drives the `coverage` CLI, not
   `pytest --cov`: pytest-cov reads `.coveragerc` and ignores `pyproject.toml`, records
@@ -253,7 +253,7 @@ exists because the alternative silently loses work.
   plus the formatting, YAML/JSON, gitleaks and large-file hooks. Both are required before
   a PR; `make lint` fails loudly when `pre-commit` is not installed instead of reporting
   an unverified success. CI adds three more backend gates a local `make test` does not:
-  the coverage floor (`make coverage`, `fail_under = 90` in `backend/pyproject.toml`),
+  the coverage floor (`make coverage`, `fail_under = 95` in `backend/pyproject.toml`),
   the complexity ratchet in its own step (the same script `make structure` runs), and the
   OpenAPI snapshot comparison — a contract change without `python -m tests.snapshot_tool
   --write` fails there rather than in a client.

@@ -901,8 +901,8 @@ dependencies, and a bare `python` on Windows is often the Microsoft Store stub t
 
 `make coverage` measures branch coverage of `backend/service/` and fails below the floor.
 The number lives in exactly one place, `backend/pyproject.toml`
-(`[tool.coverage.run]` at `:111-113` with `source = ["service"]` and `branch = true`;
-`[tool.coverage.report]` at `:115-117`; `fail_under = 90` at `:129`), so the Makefile target
+(`[tool.coverage.run]` at `:118-120` with `source = ["service"]` and `branch = true`;
+`[tool.coverage.report]` at `:122-124`; `fail_under = 95` at `:136`), so the Makefile target
 (`Makefile:370-371`), the CI step (`.github/workflows/ci.yml:437-445`) and a developer's own
 command cannot drift apart.
 
@@ -912,11 +912,12 @@ cd backend && python -m coverage run --branch --source=service --rcfile=pyprojec
 cd backend && python -m coverage report --rcfile=pyproject.toml
 ```
 
-**The floor is 90 and the measurement is 94.42%**, taken on the interpreter that counts:
-Python 3.9 with `requirements.txt` only, the way the CI job runs it
-(`.github/workflows/ci.yml:237` installs that interpreter, `:443` installs `coverage==7.16.2`).
-The 3.10 refactor venv measures a fraction more, 94.44%, because a few stdlib-only branches differ
-between the two pythons.
+**The floor is 95 and the measurement is 99%** (34 missed statements and 21 partial branches
+out of 3939 statements and 630 branches), taken on the interpreter that counts: Python 3.9 with
+`requirements.txt` only, the way the CI job runs it (`.github/workflows/ci.yml:237` installs that
+interpreter, `:443` installs `coverage==7.16.2`). The number is a lower bound in one specific
+sense: three of the uncovered statements are `__all__ = []` in packages that own no table and
+cannot be executed by anything, so the reachable tree is closer to 99.1%.
 
 The floor deliberately sits several points **below** the measurement rather than one point below
 it. A floor one point under the current number turns every honest refactor - a branch deleted
@@ -927,9 +928,10 @@ test file still fails the build while a refactor does not. Raise it in the same 
 the coverage, never ahead of it; the history is in the same comment block - 46% when the suite
 first ran (every application and persistence module sat at zero while the routers answered), 65
 when the gate landed, 73 with the slice and deployment-module tests, 76 with the settings,
-schema-bootstrap, JWT, entry-point, connection-recovery, composition and S3 tests, and 90 with the
+schema-bootstrap, JWT, entry-point, connection-recovery, composition and S3 tests, 90 with the
 router, task, mail, cache, storage, job-service and matching-pipeline contract tests that carried
-the tree to 94%.
+the tree to 94%, and 95 with the platform contract and edge suites, the composition seam and
+container tests, and the leftover-branch sweep that carried it to 99%.
 
 **Why the CLI and not `pytest --cov`.** pytest-cov resolves its configuration from
 `.coveragerc` by default and ignores `pyproject.toml`, so `pytest --cov` silently records
