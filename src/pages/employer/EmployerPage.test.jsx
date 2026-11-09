@@ -5,8 +5,8 @@ import EmployerPage from "pages/employer/EmployerPage";
 import VacancyService from "shared/api/services/vacancyService";
 
 // The page wires three existing endpoints together. What it owns is the
-// selection state: which vacancy the candidate table is scoped to, and when the
-// list is refetched. Both are pinned below.
+// selection state (which vacancy the candidate table is scoped to), when the
+// list is refetched, and which created row it names back to the reader.
 jest.mock("shared/api/services/vacancyService", () => ({
   __esModule: true,
   default: { createWithInference: jest.fn(), getAll: jest.fn() },
@@ -81,11 +81,22 @@ const submitCreate = async () => {
   await flush();
 };
 
+// What the create route answers after it persists: the created row, exactly the
+// six keys the backend documents.
+const CREATED = {
+  id: 42,
+  name: "Аналитик",
+  salary: "180000",
+  description: "Собирать требования и проверять гипотезы.",
+  skill: "SQL",
+  embedding_id: 7,
+};
+
 beforeEach(() => {
   mockVacancyTableRenders.length = 0;
   mockCandidateTableProps.length = 0;
   VacancyService.createWithInference.mockReset();
-  VacancyService.createWithInference.mockResolvedValue({ data: {} });
+  VacancyService.createWithInference.mockResolvedValue({ data: CREATED });
 });
 
 test("renders the three sections and an empty candidate panel", () => {
@@ -122,6 +133,61 @@ test("refetches the vacancy list after a create, by remounting the table", async
 
   await waitFor(() => expect(mockVacancyTableRenders).toHaveLength(2));
   expect(VacancyService.createWithInference).toHaveBeenCalledTimes(1);
+});
+
+test("names the created vacancy and its id once the server has stored it", async () => {
+  // A remount alone shows a page that looks unchanged: the new row is somewhere
+  // in a table the reader has to re-read. Naming it, with the id the response
+  // carried, is what proves the create landed.
+  renderPage();
+  expect(screen.queryByText(/сохранена/)).toBeNull();
+
+  await type("Название вакансии", "Аналитик");
+  await type("Описание", "Собирать требования и проверять гипотезы.");
+  await submitCreate();
+
+  expect(
+    await screen.findByText("Вакансия «Аналитик» сохранена (id 42)."),
+  ).toBeInTheDocument();
+});
+
+test("does not claim a saved row when the create was refused", async () => {
+  VacancyService.createWithInference.mockReset();
+  VacancyService.createWithInference.mockRejectedValue({
+    message: "Request failed with status code 409",
+    response: { status: 409, data: { detail: "Такая вакансия уже есть" } },
+  });
+  renderPage();
+  expect(mockVacancyTableRenders).toHaveLength(1);
+
+  await type("Название вакансии", "Аналитик");
+  await type("Описание", "Собирать требования и проверять гипотезы.");
+  await submitCreate();
+
+  // The server's own explanation is what the reader gets; the list is not
+  // remounted for a row that does not exist, and no confirmation appears.
+  expect(await screen.findByText("Такая вакансия уже есть")).toBeInTheDocument();
+  expect(screen.queryByText(/сохранена/)).toBeNull();
+  expect(mockVacancyTableRenders).toHaveLength(1);
+});
+
+test("survives a create that fails with no response at all", async () => {
+  VacancyService.createWithInference.mockReset();
+  VacancyService.createWithInference.mockRejectedValue({
+    message: "Network Error",
+    response: undefined,
+  });
+  renderPage();
+
+  await type("Название вакансии", "Аналитик");
+  await type("Описание", "Собирать требования и проверять гипотезы.");
+  await submitCreate();
+
+  expect(await screen.findByText("Network Error")).toBeInTheDocument();
+  expect(screen.queryByText(/сохранена/)).toBeNull();
+  // The page is still usable: the form and the list are both still mounted.
+  expect(screen.getByRole("button", { name: "Добавить вакансию" })).toBeInTheDocument();
+  expect(mockVacancyTableRenders).toHaveLength(1);
 });
 
 test("keeps the previous selection visible while the list reloads", async () => {

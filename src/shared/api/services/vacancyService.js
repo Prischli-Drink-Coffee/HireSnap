@@ -19,16 +19,15 @@ export default class VacancyService {
     });
   }
 
-  // POST /api/upload_vacancy/inference/employer - multipart form (name,
-  // description, optional salary and skill).
+  // POST /api/upload_vacancy/inference/employer - Form-encoded (name,
+  // description, optional salary and skill), signed-in only.
   //
-  // WARNING - this route is a stub today: the backend's
-  // service/services/matching/application/matching_service.py:343-353 returns the
-  // literal {"message": "test"} and persists nothing, so a vacancy
-  // created here DOES NOT appear in GET /vacancies/ afterwards. The UI says so
-  // out loud rather than implying the row was saved. Do not "fix" it here by
-  // switching to POST /vacancies/: that skips the embedding the recommendation
-  // routes need, and the backend route is the thing that has to change.
+  // The route persists: it embeds the posted text through the ml sidecar, stores
+  // the embedding and the row, and answers 200 with the created vacancy, keys
+  // exactly {id, name, salary, description, skill, embedding_id}. The created row
+  // therefore shows up in a later GET /vacancies/, and the caller can use the id
+  // straight away. Keep posting here rather than to POST /vacancies/: this is the
+  // path that also creates the embedding the recommendation routes need.
   static createWithInference({ name, description, salary, skill }) {
     const body = new FormData();
     body.append("name", name);

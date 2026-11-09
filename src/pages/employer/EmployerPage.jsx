@@ -10,6 +10,11 @@ import { TableCandidates } from "features/candidates";
 const EmployerPage = () => {
   const [reloadKey, setReloadKey] = useState(0);
   const [selectedVacancy, setSelectedVacancy] = useState(null);
+  // The vacancy the server just created. The reload key already refetches the
+  // table, but a fresh remount shows nothing that says WHICH row is new, and the
+  // created object (with its id) exists nowhere else - so it is kept here and
+  // named once under the form.
+  const [lastCreated, setLastCreated] = useState(null);
 
   return (
     <VStack
@@ -28,7 +33,20 @@ const EmployerPage = () => {
         вакансию, чтобы увидеть подходящих кандидатов.
       </Text>
 
-      <VacancyCreateForm onCreated={() => setReloadKey((value) => value + 1)} />
+      <VacancyCreateForm
+        onCreated={(created) => {
+          setLastCreated(created);
+          // Remounting the table is what refetches it: TableVacancies owns its
+          // own request, so a new key is the only lever the page has.
+          setReloadKey((value) => value + 1);
+        }}
+      />
+
+      {lastCreated && lastCreated.id ? (
+        <Text fontSize="body" color="light_dark">
+          Вакансия «{lastCreated.name}» сохранена (id {lastCreated.id}).
+        </Text>
+      ) : null}
 
       <Divider />
 
