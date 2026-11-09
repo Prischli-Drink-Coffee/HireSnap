@@ -117,8 +117,12 @@ SERVICES_ALLOWED_FILES = {"__init__.py"}
 # when it holds only __init__.py, which is documented as legitimate, not as a to-do.
 LAYER_DIRS = ("application", "persistence", "presentation", "domain")
 REQUIRED_LAYERS = ("application", "presentation")
-# jobs is the documented exception (AGENTS.md): no HTTP surface, so no presentation layer.
-SLICES_WITHOUT_PRESENTATION = {"jobs"}
+# Slices that are documented as having NO HTTP surface, so they are exempt from the
+# presentation/ requirement. Empty today: jobs gained its router (docs/KNOWN_GAPS.md
+# section 27 records the decision), and an entry here is only legitimate while a route
+# genuinely does not exist. The set stays so a future slice can make the same documented
+# claim instead of quietly half-building a layer.
+SLICES_WITHOUT_PRESENTATION = set()
 
 # Rule 5: a module in a routers/ directory that is a helper rather than a router. schemas.py
 # is documented in AGENTS.md as the place a router puts a model the domain does not own.
@@ -551,7 +555,14 @@ def check_slice_layers(report: Report) -> None:
     if not incomplete:
         report.ok.append(
             "all " + str(len(slices)) + " slice(s) under service/services/ have the layers"
-            " their shape implies (jobs/ exempt from presentation/)"
+            " their shape implies"
+            + (
+                ""
+                if not SLICES_WITHOUT_PRESENTATION
+                else " (exempt from presentation/: "
+                + ", ".join(sorted(SLICES_WITHOUT_PRESENTATION))
+                + ")"
+            )
         )
 
 

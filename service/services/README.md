@@ -35,9 +35,10 @@ services/
     └── (domain/)                          # NOT PRESENT YET - see the last section
 ```
 
-A slice may legitimately be smaller than this. `jobs/` has only `application/` because it
-is driven by the queue, not by HTTP, and inventing an empty `presentation/` for it would
-be a directory that lies about what exists. `matching/` has an `application/` and a
+A slice may legitimately be smaller than this. `jobs/` had only `application/` until the
+four `/server/jobs/` routes gave it a `presentation/`; that layer is a thin wrapper over the
+same `JobService` the queue uses, so the application layer still never imports FastAPI.
+`matching/` has an `application/` and a
 `presentation/` but no `persistence/` of its own: its scores are written through the three
 link slices, each of which owns its table.
 
@@ -66,7 +67,7 @@ says nothing about the optional layers.
 | `files` | `files` | `/files/` | `FileService` |
 | `embeddings` | `embeddings` | `/embeddings/` | `EmbeddingService` |
 | `matching` | (none) | `/upload_video`, `/get_all_vacancies` … | `MatchingService` |
-| `jobs` | (none) | **no route, on purpose** | `JobService` |
+| `jobs` | (none) | `/jobs/` (admin) | `JobService` |
 
 `candidates/` is the slice for the `info_candidates` table. The package is named after the
 domain; the route keeps the table's name because the frontend already calls

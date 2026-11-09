@@ -109,6 +109,38 @@
       },
       "required": []
     },
+    "JobAccepted": {
+      "properties": {
+        "id": "string",
+        "kind": "string",
+        "state": "string"
+      },
+      "required": [
+        "id",
+        "kind",
+        "state"
+      ]
+    },
+    "JobCancelled": {
+      "properties": {
+        "cancelled": "boolean",
+        "id": "string",
+        "reason": "anyOf(null, string)"
+      },
+      "required": [
+        "cancelled",
+        "id"
+      ]
+    },
+    "JobRequest": {
+      "properties": {
+        "kind": "string",
+        "payload": "anyOf(null, object)"
+      },
+      "required": [
+        "kind"
+      ]
+    },
     "Magics": {
       "properties": {
         "candidate_answer": "string",
@@ -766,6 +798,89 @@
         "security": "JWTBearer",
         "tags": [
           "InfoCandidate"
+        ]
+      }
+    },
+    "/jobs/": {
+      "get": {
+        "operationId": "describe_jobs_jobs__get",
+        "responses": {
+          "200": {
+            "application/json": "object"
+          }
+        },
+        "security": "JWTBearer",
+        "tags": [
+          "Main"
+        ]
+      },
+      "post": {
+        "operationId": "submit_job_jobs__post",
+        "requestBody": {
+          "content": {
+            "application/json": "JobRequest"
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "application/json": "JobAccepted"
+          },
+          "422": {
+            "application/json": "HTTPValidationError"
+          }
+        },
+        "security": "JWTBearer",
+        "tags": [
+          "Main"
+        ]
+      }
+    },
+    "/jobs/{job_id}": {
+      "delete": {
+        "operationId": "cancel_job_jobs__job_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "application/json": "JobCancelled"
+          },
+          "422": {
+            "application/json": "HTTPValidationError"
+          }
+        },
+        "security": "JWTBearer",
+        "tags": [
+          "Main"
+        ]
+      },
+      "get": {
+        "operationId": "get_job_jobs__job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": "string"
+          }
+        ],
+        "responses": {
+          "200": {
+            "application/json": "object"
+          },
+          "422": {
+            "application/json": "HTTPValidationError"
+          }
+        },
+        "security": "JWTBearer",
+        "tags": [
+          "Main"
         ]
       }
     },

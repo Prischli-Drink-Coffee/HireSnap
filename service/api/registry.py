@@ -30,6 +30,7 @@ from service.services.candidates.presentation.routers.info_candidates_api import
 )
 from service.services.embeddings.presentation.routers.embeddings_api import embeddings_api
 from service.services.files.presentation.routers.files_api import files_api
+from service.services.jobs.presentation.routers.jobs_api import jobs_api
 from service.services.magics.presentation.routers.magics_api import magics_api
 from service.services.matching.presentation.routers.inference_api import inference_api
 from service.services.personalities.presentation.routers.personalities_api import (
@@ -63,6 +64,7 @@ __all__ = [
     "candidate_vacancies_api",
     "files_api",
     "embeddings_api",
+    "jobs_api",
 ]
 
 #: Declaration order, which is OpenAPI order. Auth first because it is the only slice
@@ -81,6 +83,9 @@ ROUTERS = (
     candidate_vacancies_api,
     files_api,
     embeddings_api,
+    # Last because it is the newest: a route added in the middle of this tuple reorders
+    # /server/docs and changes the committed OpenAPI snapshot for no benefit.
+    jobs_api,
 )
 
 #: The stems the structure test requires to be mounted. Derived rather than typed, so

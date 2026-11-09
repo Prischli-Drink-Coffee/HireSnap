@@ -1,6 +1,6 @@
 """Every mounted route on /server, driven from the application, not from a list of files.
 
-WHY THE CATALOGUE IS DERIVED: a hand-written list of twelve router files goes stale the
+WHY THE CATALOGUE IS DERIVED: a hand-written list of router files goes stale the
 first time somebody adds a route, and a coverage list that is stale is worse than none
 because it reports green. This module walks the ROUTES THE APPLICATION ACTUALLY MOUNTED and
 cross-checks them against `service.api.registry.ROUTERS`, so a slice that is written but not
@@ -370,7 +370,7 @@ def test_every_mounted_business_operation_is_in_the_catalogue():
     declared = sum(
         1 for module in ROUTERS for route in module.router.routes if isinstance(route, APIRoute)
     )
-    assert len(CATALOGUE) == declared == 57
+    assert len(CATALOGUE) == declared == 61
 
 
 def test_every_catalogue_entry_belongs_to_a_registry_router():

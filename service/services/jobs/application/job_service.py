@@ -34,9 +34,11 @@ in-memory mode is distributed.
 Business data stays in MySQL. A job record is operational state: it is disposable, it
 expires, and losing it costs a status lookup, never a user's data.
 
-WHY THERE IS NO presentation/ LAYER: no route exposes a job today. `service/api/` mounts
-routers only; adding a `/server/jobs` endpoint is a contract change that needs the
-snapshot regenerated, so it is a separate decision rather than a hole in this slice.
+WHY THERE IS A presentation/ LAYER NOW: there was not one, on purpose, until the job
+machinery had a caller worth exposing (docs/KNOWN_GAPS.md section 27 kept the decision on
+the record). `service/services/jobs/presentation/routers/jobs_api/` exposes submit, poll,
+cancel and describe. The module-level functions below are unchanged for Python callers;
+the two spellings and why they differ are documented on `JobService`.
 """
 
 from __future__ import annotations
@@ -45,6 +47,8 @@ import logging
 import os
 import time
 import uuid
+
+from service.shared.errors import InvalidPayloadError, NotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -388,6 +392,14 @@ class JobService:
 
     It holds no state of its own - the records live in the cache facade - so the instance
     exists to be the thing the composition layer hands out and a test can fake.
+
+    TWO SPELLINGS ON PURPOSE. `enqueue`/`status` are the JobQueue port
+    (service/shared/ports/__init__.py), which speaks ids and records because a worker calls
+    it in Python. `submit`/`require`/`cancel_job` are the HTTP surface's spelling and they
+    differ in exactly one respect: they raise a ServiceError when the caller is wrong,
+    instead of returning None or a ValueError. A route that had to translate those itself
+    would be repeating the rule in four places; the port keeps its old contract so nothing
+    that already calls it changes.
     """
 
     # --- the JobQueue port (service/shared/ports/__init__.py) ---------------
@@ -400,6 +412,65 @@ class JobService:
         return status(job_id)
 
     # --- the rest of the surface -------------------------------------------
+    def submit(self, kind, payload=None, run_inline=None):
+        """Submit a job and return {id, kind, state} - the answer an HTTP client gets.
+
+        An unknown kind is the CLIENT's mistake here, so it raises InvalidPayloadError
+        (400) rather than the ValueError `enqueue` raises for a Python caller, where the
+        same condition is a bug in the program. The state is read back from the store
+        instead of assumed, because an inline job has already finished by now.
+        """
+        if kind not in KINDS:
+            raise InvalidPayloadError(
+                "unknown job kind %r; supported: %s" % (kind, ", ".join(supported_kinds()))
+            )
+        job_id = enqueue(kind, payload, run_inline)
+        record = status(job_id) or {}
+        return {
+            "id": job_id,
+            "kind": kind,
+            "state": record.get("state", STATE_QUEUED),
+        }
+
+    def require(self, job_id):
+        """The record for job_id, or a 404 when the store does not know it.
+
+        A separate method from `status` because the two answer different questions: the
+        port asks "what is the record, if any", which a polling worker must be able to
+        answer with None; the route asks "give me this record or tell the client it does
+        not exist", and "not found" is a response rather than an absence.
+        """
+        record = status(job_id) if job_id else None
+        if record is None:
+            raise NotFoundError(
+                "job %r not found; it was never submitted or it has expired" % (job_id,)
+            )
+        return record
+
+    def cancel_job(self, job_id):
+        """Ask the broker to revoke a job and report what actually happened.
+
+        `cancel` answers a bool because Python callers only need "did it work". A client
+        needs the same answer plus the reason, and it needs "I do not know this job" to be
+        distinguishable from "this job already ran", so the route gets the pair.
+        """
+        if not job_id or status(job_id) is None:
+            return {"id": job_id, "cancelled": False, "reason": "unknown job id"}
+        if cancel(job_id):
+            return {"id": job_id, "cancelled": True, "reason": None}
+        record = status(job_id) or {}
+        if record.get("mode") != "celery":
+            return {
+                "id": job_id,
+                "cancelled": False,
+                "reason": "the job ran inline; nothing to revoke",
+            }
+        return {
+            "id": job_id,
+            "cancelled": False,
+            "reason": "the broker did not accept the revoke request",
+        }
+
     def cancel(self, job_id):
         """Best-effort revoke; True only when a revoke was actually requested."""
         return cancel(job_id)

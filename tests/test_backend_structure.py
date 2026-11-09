@@ -92,9 +92,10 @@ RETIRED_LAYER_DIRS = (
     "api/routers",
 )
 
-#: The twelve routers the API contract has always exposed. Kept as names because the
-#: slice a router lives in is not always the router's name: the `inference` router is
-#: served by the `matching` slice, and `info_candidates` by `candidates`.
+#: The thirteen routers the API contract exposes. Kept as names because the slice a
+#: router lives in is not always the router's name: the `inference` router is served by
+#: the `matching` slice, `info_candidates` by `candidates`, and `jobs` is the slice that
+#: gained a router last (docs/KNOWN_GAPS.md section 27 records why it had none).
 ROUTER_NAMES = (
     "auth",
     "candidate_vacancies",
@@ -102,6 +103,7 @@ ROUTER_NAMES = (
     "files",
     "info_candidates",
     "inference",
+    "jobs",
     "magics",
     "personalities",
     "personality_candidates",
@@ -251,7 +253,7 @@ def test_app_mounts_every_router_module():
         "router nobody mounts looks like an endpoint and is not one" % (on_disk, mounted)
     )
     # Self-consistency above would also pass on a tree that lost a router entirely, so
-    # pin the twelve contract names too. A rename has to be a deliberate contract change.
+    # pin the thirteen contract names too. A rename has to be a deliberate contract change.
     for name in ROUTER_NAMES:
         assert any(stem.startswith(name) for stem in mounted), (
             "the %r router is missing from ROUTERS; mounted: %r" % (name, mounted)
