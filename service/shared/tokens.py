@@ -12,6 +12,14 @@ infra/certs is not mounted. The keys are now read inside the functions, on first
 use, and the error a caller sees when they are missing is the same FileNotFoundError
 one call later than before. No signature changed for any caller that passes a key
 explicitly, and the two call sites in this service pass none.
+
+WHY NO FRAMEWORK HERE: this is a codec, and every other `service/shared/` module is
+framework-free on purpose. `validate_token_type` used to raise `fastapi.HTTPException`
+and the module built a `HTTPBearer` instance, which made the codec unimportable by a
+celery worker, a CLI or a test without the API stack. It now raises
+`service.shared.errors.UnauthorizedError` - the same 401 through the single handler on
+the /server sub-app, the same detail string - and the bearer instance is gone: the HTTP
+transport for authentication lives in `service.api.security`.
 """
 
 from __future__ import annotations
@@ -20,13 +28,11 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional
 
 import jwt
-from fastapi import HTTPException, status
-from fastapi.security import HTTPBearer
 
 from service.models import Settings, Users
+from service.shared.errors import UnauthorizedError
 
 settings = Settings()
-http_bearer = HTTPBearer()
 
 
 def _private_key() -> str:
@@ -117,10 +123,12 @@ def validate_token_type(
 ) -> bool:
     # TODO при добавлении jti (JWT ID) [jti=str(uuid.uuid4())] сделать проверку на хранящиеся
     #  уникальные айди токенов в базе для реализации blacklist
+    # UnauthorizedError, not fastapi.HTTPException: this module is a codec and must be
+    # importable by a worker, a CLI or a test that has no API stack installed. The single
+    # ServiceError handler on the /server sub-app renders it as the same 401 the
+    # HTTPException used to carry, and the detail string is byte-identical - it is the
+    # contract the frontend reads, so it is not reworded here.
     current_token_type = payload.get("TOKEN_TYPE_FIELD")
     if current_token_type == token_type:
         return True
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail=f"Invalid token type {token_type!r} excepted {current_token_type!r}",
-    )
+    raise UnauthorizedError(f"Invalid token type {token_type!r} excepted {current_token_type!r}")

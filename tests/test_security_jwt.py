@@ -33,6 +33,7 @@ from starlette.requests import Request
 from service.api import security as security_module
 from service.api.security import JWTBearer
 from service.shared import tokens as tokens_module
+from service.shared.errors import UnauthorizedError
 
 HAS_CRYPTO = jwt.algorithms.has_crypto
 
@@ -300,11 +301,18 @@ def test_the_dependency_is_a_httpbearer_so_openapi_still_publishes_the_scheme():
 
 # --- the token helpers this dependency is built on --------------------------
 def test_validate_token_type_accepts_the_matching_type_and_names_both_on_mismatch():
+    """A ServiceError, not an HTTPException - and the same 401 with the same wording.
+
+    The codec must stay importable without the API stack (see
+    `tests/test_tokens_without_fastapi.py`), so it raises `UnauthorizedError`; the one
+    ServiceError handler on the /server sub-app renders that as the 401 the client already
+    receives. The detail string is byte-identical on purpose: it is in the contract.
+    """
     payload = {"TOKEN_TYPE_FIELD": "access_token_type"}
 
     assert tokens_module.validate_token_type(payload, "access_token_type") is True
 
-    with pytest.raises(HTTPException) as caught:
+    with pytest.raises(UnauthorizedError) as caught:
         tokens_module.validate_token_type(payload, "refresh_token_type")
     assert caught.value.status_code == 401
     # Both values are in the message, in repr form: that is what makes the log line usable.

@@ -1,12 +1,8 @@
 from typing import Dict
 
-# Imported here because update_*() below raises HTTPException; the module used it
-# without importing it, so any call with an empty payload was a NameError (500)
-# instead of the intended 400. Found by the repo's F821 gate, not by a test.
-from fastapi import HTTPException, status
-
 from service.infrastructure.database.connection import db
 from service.models import PersonalityVacancies
+from service.shared.errors import InvalidPayloadError
 
 
 def get_all_personality_vacancies():
@@ -35,9 +31,10 @@ def create_personality_vacancy(personality_vacancy: PersonalityVacancies):
 
 def update_personality_vacancy(personality_vacancy_id: int, personality_vacancy: Dict):
     if not personality_vacancy:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Not get personality_vacancy_dict"
-        )
+        # InvalidPayloadError (400), not fastapi.HTTPException: a persistence module is
+        # not a place the framework may reach, and the message is byte-identical. The
+        # single ServiceError handler renders the same 400 the HTTPException carried.
+        raise InvalidPayloadError("Not get personality_vacancy_dict")
     fields_to_update = [f"{key}=%s" for key in personality_vacancy.keys()]
     params = list(personality_vacancy.values())
     query = f"UPDATE personality_vacancies SET {', '.join(fields_to_update)} WHERE id=%s"

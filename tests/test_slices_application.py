@@ -32,7 +32,6 @@ import types
 
 import numpy as np
 import pytest
-from fastapi import HTTPException
 
 from service.models import (
     Auth,
@@ -748,18 +747,27 @@ def test_an_undecodable_token_is_a_401(monkeypatch):
 
 
 def test_token_of_the_wrong_type_is_rejected_by_the_shared_helper(monkeypatch):
-    """`validate_token_type` still raises fastapi.HTTPException: it belongs to the shared
-    token helper, not to this slice, and its 401 is what the client already handles."""
+    """The shared codec raises `UnauthorizedError`, not `fastapi.HTTPException`.
+
+    WHAT CHANGED AND WHY THE ASSERTIONS DID: `service/shared/tokens.py` is a codec, and
+    importing fastapi there made it unusable from a celery worker or a CLI
+    (docs/KNOWN_GAPS.md section 36). The status a client sees is unchanged - 401 through
+    the single `ServiceError` handler on the /server sub-app - so this test asserts the
+    error TYPE the codec owns and the exact detail string, which is the part a client can
+    read.
+    """
     service = AuthService(user=FakeRepository())
     monkeypatch.setattr(
         auth_module, "decode_jwt", lambda token: {"TOKEN_TYPE_FIELD": "refresh_token_type"}
     )
 
-    with pytest.raises(HTTPException) as failure:
+    with pytest.raises(UnauthorizedError) as failure:
         service.user_from_token("token", "access_token_type")
 
     assert failure.value.status_code == 401
-    assert "Invalid token type" in failure.value.detail
+    assert failure.value.detail == (
+        "Invalid token type 'access_token_type' excepted 'refresh_token_type'"
+    )
 
 
 def test_a_valid_token_resolves_to_its_user(monkeypatch):

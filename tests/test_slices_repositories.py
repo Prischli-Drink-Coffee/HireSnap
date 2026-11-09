@@ -22,7 +22,7 @@ THE THREE QUIRKS THIS DELIBERATELY RECORDS (not fixed - see the comments at each
     pinned independently or a silent swap reorders data in the table;
   * create_file and create_embedding pass a BARE STRING where the driver expects a
     sequence - it works only because PyMySQL treats a scalar as a one-element list;
-  * the three link repositories raise fastapi.HTTPException(400) on an empty payload
+  * the three link repositories raise InvalidPayloadError(400) on an empty payload
     while their application layer raises domain errors. The repository sits outside the
     domain-error convention; the test pins today's behaviour rather than inventing one.
 """
@@ -33,7 +33,6 @@ from datetime import datetime
 from decimal import Decimal
 
 import pytest
-from fastapi import HTTPException
 
 from service.models import (
     CandidateVacancies,
@@ -60,6 +59,7 @@ from service.services.personality_candidates.persistence import personality_cand
 from service.services.personality_vacancies.persistence import personality_vacancy_repository
 from service.services.users.persistence import user_repository
 from service.services.vacancies.persistence import vacancy_repository
+from service.shared.errors import InvalidPayloadError
 from tests.fixtures.fake_db import UnsupportedStatement, install
 
 CREATED_AT = datetime(2024, 1, 2, 3, 4, 5)
@@ -350,10 +350,10 @@ def test_personalities_update_and_delete(fake_db):
 # --------------------------------------------------------------------------
 # personality_vacancies, personality_candidates, candidate_vacancies
 #
-# The three link tables share a shape and one disagreement with the rest of the tree:
-# their update_* raises fastapi.HTTPException (400) on an empty payload, where every
-# application service raises a domain error. The repository lives outside the convention,
-# so these tests pin today's behaviour rather than proposing one.
+# The three link tables share a shape and an empty-payload guard. The guard used to raise
+# fastapi.HTTPException(400); it now raises InvalidPayloadError (also 400) because a
+# persistence module must not import the framework, and the detail strings are unchanged.
+# The status and the words are asserted here because both are part of the client contract.
 # --------------------------------------------------------------------------
 def test_personality_vacancies_select_and_keyed_select(fake_db):
     fake_db.tables["personality_vacancies"] = [{"id": 1, "personality_id": 2, "vacancy_id": 3}]
@@ -398,7 +398,7 @@ def test_personality_vacancies_update_returns_its_own_message(fake_db):
 
 
 def test_personality_vacancies_update_rejects_an_empty_payload(fake_db):
-    with pytest.raises(HTTPException) as raised:
+    with pytest.raises(InvalidPayloadError) as raised:
         personality_vacancy_repository.update_personality_vacancy(1, {})
 
     assert raised.value.status_code == 400
@@ -437,7 +437,7 @@ def test_personality_candidates_select_insert_update_delete(fake_db):
 
 
 def test_personality_candidates_update_rejects_an_empty_payload(fake_db):
-    with pytest.raises(HTTPException) as raised:
+    with pytest.raises(InvalidPayloadError) as raised:
         personality_candidate_repository.update_personality_candidate(1, {})
 
     assert raised.value.status_code == 400
@@ -474,7 +474,7 @@ def test_candidate_vacancies_update_rejects_an_empty_payload(fake_db):
     The statement text is asserted too: the insert is built as a bare tuple expression
     (params = a, b, c without parentheses), which reads like a bug and is not one.
     """
-    with pytest.raises(HTTPException) as raised:
+    with pytest.raises(InvalidPayloadError) as raised:
         candidate_vacancy_repository.update_candidate_vacancy(1, {})
 
     assert raised.value.status_code == 400
