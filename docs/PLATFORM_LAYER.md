@@ -377,8 +377,8 @@ the four directions.
   its own `try/except`, so a broken storage client does not hide the cache result.
 * `cache_health()`, `storage_health()` and `mail_health()` are all cheap by
   contract: `cache_health()` only pings when the backend is redis
-  (`cache.py:534-541`), `storage_health()` never performs a round trip
-  (`storage.py:516-533`), `mail_health()` never sends (`mail.py:342-347`).
+  (`cache.py:528-535`), `storage_health()` never performs a round trip
+  (`storage.py:512-529`), `mail_health()` never sends (`mail.py:340-345`).
 
 ## Tests
 
