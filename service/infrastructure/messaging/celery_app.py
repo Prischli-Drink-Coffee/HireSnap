@@ -28,6 +28,8 @@ import os
 import re
 import threading
 
+from service.configuration.flags import read_flag
+
 logger = logging.getLogger(__name__)
 
 APP_NAME = "hiresnap"
@@ -72,8 +74,6 @@ TASK_TIME_LIMITS = {
     "hiresnap.reindex_embeddings": (ML_SOFT_TIME_LIMIT, ML_HARD_TIME_LIMIT),
 }
 
-_TRUTHY = {"1", "true", "yes", "on", "enabled", "y"}
-
 _APP = None
 _APP_LOCK = threading.Lock()
 
@@ -84,10 +84,6 @@ def _env(*names, default=""):
         if name in os.environ:
             return os.environ[name]
     return default
-
-
-def _truthy(value):
-    return str(value or "").strip().lower() in _TRUTHY
 
 
 def _bootstrap_env():
@@ -127,7 +123,9 @@ def is_configured():
     inline execution and logs once.
     """
     _bootstrap_env()
-    return _truthy(_env("CELERY__ENABLED", "CELERY_ENABLED", default="false"))
+    # Strict: a typo here left the workers idle while the API did the work inline,
+    # which is exactly the latency the celery profile was enabled to remove.
+    return read_flag("CELERY__ENABLED", "CELERY_ENABLED", default=False)
 
 
 def broker_url():

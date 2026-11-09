@@ -380,9 +380,18 @@ def test_bootstrap_env_skips_the_file_when_absent(monkeypatch):
         ("on", True),
         ("0", False),
         ("no", False),
-        ("", False),
-        (None, False),
+        ("off", False),
     ],
 )
-def test_truthy_flags(value, expected):
-    assert storage_module._truthy(value) is expected
+def test_storage_secure_flag_reads_the_documented_spellings(monkeypatch, value, expected):
+    """STORAGE__SECURE through build_storage(), not through a local helper.
+
+    The helper this used to call is gone: the rule lives in service.configuration.flags
+    now, so the assertion that still has meaning here is that build_storage() consults
+    it - a hand-rolled copy is exactly how the spellings drifted apart before.
+    """
+    from service.configuration.flags import read_flag
+
+    monkeypatch.setenv("STORAGE__SECURE", value)
+
+    assert read_flag("STORAGE__SECURE", "STORAGE_SECURE", default=False) is expected

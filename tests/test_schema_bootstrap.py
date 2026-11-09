@@ -10,10 +10,11 @@ WHY THE CONNECTION IS FAKED AT pymysql.connect AND NOT AT A REPOSITORY: the subj
 order of the statements (create database, use it, then the dump, then the seed rows) and the
 error handling around them. A fake below that boundary would not observe either.
 
-WHY THE DUMP ITSELF IS ASSERTED: read_sql() splits the SQL file on ";" with str.split, which
-is only correct while the dump contains no semicolon inside a quoted value. That is true
-today (measured: 50 statements, every one with balanced single quotes) and this test makes a
-future dump that breaks the assumption fail here instead of halfway through a bootstrap.
+WHY THE SPLITTER IS TESTED DIRECTLY (docs/KNOWN_GAPS.md section 33): the dump used to be cut
+on every ";" with str.split, which cannot tell a terminator from a semicolon inside a quoted
+value. That was safe only because of what the dump happens to contain. split_statements()
+now tracks the quote and comment states instead, and the tests below pin both halves: the
+naive split would break these inputs, and the real dump still yields the statements it did.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ import pymysql
 import pytest
 
 from service.infrastructure.database import schema as schema_module
-from service.infrastructure.database.schema import CreateSQL
+from service.infrastructure.database.schema import CreateSQL, SchemaBootstrapError
 
 BACKEND_ROOT = schema_module.DATABASE_DIR.parent
 DUMP = BACKEND_ROOT / "database" / "HireSnap.sql"
@@ -68,6 +69,9 @@ class FakeConnection:
         cursor = FakeCursor(self)
         self.cursors.append(cursor)
         return cursor
+
+    def begin(self):
+        self.events.append(("begin",))
 
     def commit(self):
         self.events.append(("commit",))
@@ -271,17 +275,23 @@ def test_seed_csv_files_are_inserted_after_the_dump_in_one_batch_per_table(
     assert any("knn" in message for message in warnings)
 
 
-def test_a_seed_insert_failure_is_rolled_back_and_does_not_stop_the_other_tables(
+def test_one_failing_seed_table_rolls_back_the_whole_seed_phase_and_raises(
     tmp_path, monkeypatch, connect_calls
 ):
+    """A half-loaded seed is worse than none: the phase is one transaction and it aborts.
+
+    The failure must also be LOUD. read_sql() used to log the insert error and carry on to
+    the next table, which left the schema with rows in some tables and none in the rest, and
+    returned as if the bootstrap had succeeded.
+    """
     _calls, connection = connect_calls
     bootstrap = _build(tmp_path, monkeypatch)
     tables = tmp_path / "tables"
     tables.mkdir()
     (tmp_path / "dump.sql").write_text("CREATE TABLE files (id INT);", encoding="utf-8")
     bootstrap.path_to_sql = str(tmp_path / "dump.sql")
-    pd.DataFrame({"url": ["a.mp4"]}).to_csv(tables / "files.csv", index=False)
     pd.DataFrame({"url": ["u.npy"]}).to_csv(tables / "embeddings.csv", index=False)
+    pd.DataFrame({"url": ["a.mp4"]}).to_csv(tables / "files.csv", index=False)
     original_executemany = FakeCursor.executemany
 
     def explode(self, statement, rows):
@@ -291,31 +301,162 @@ def test_a_seed_insert_failure_is_rolled_back_and_does_not_stop_the_other_tables
 
     monkeypatch.setattr(FakeCursor, "executemany", explode)
 
-    bootstrap.read_sql()
+    with pytest.raises(SchemaBootstrapError) as caught:
+        bootstrap.read_sql()
 
+    assert caught.value.step == "loading the seed rows"
+    assert caught.value.detail.startswith("table files failed")
+    assert ("begin",) in connection.events
     assert ("rollback",) in connection.events
-    assert [statement for statement, _rows in connection.inserts] == [
-        "INSERT INTO embeddings (url) VALUES (%s)"
-    ]
+    # Rolled back, not committed: the first table had been written before the second failed.
+    assert ("commit",) not in connection.events
+    assert connection.closed is True
 
 
-def test_the_connection_is_closed_even_when_the_dump_is_missing(
+def test_the_connection_is_closed_and_nothing_is_written_when_the_dump_is_missing(
     tmp_path, monkeypatch, connect_calls
 ):
-    """The finally block is the only thing standing between a bad path and a leaked socket.
+    """The finally block is the only thing between a bad path and a leaked socket; the ORDER
+    of the phases is what keeps the server untouched.
 
-    DOCUMENTED, NOT ENDORSED (reported to the Lead): read_sql() swallows the missing-file
-    error at schema.py:128, so the caller cannot tell a completed bootstrap from an aborted
-    one and the schema is left half-created. This test pins the resource cleanup, which is
-    correct, not the silence.
+    This is defect D3 (docs/KNOWN_GAPS.md section 32) in one test: the dump is resolved and
+    read BEFORE CREATE DATABASE, so a typo in the path cannot leave an empty database behind
+    and a warning in the log. The old code did the opposite on both counts.
     """
     _calls, connection = connect_calls
     bootstrap = _build(tmp_path, monkeypatch)
     (tmp_path / "tables").mkdir()
     bootstrap.path_to_sql = str(tmp_path / "absent.sql")
 
+    with pytest.raises(SchemaBootstrapError) as caught:
+        bootstrap.read_sql()
+
+    assert caught.value.step == "opening the schema dump"
+    assert "absent.sql" in caught.value.detail
+    assert connection.statements == []
+    assert not any(event[0] == "execute" for event in connection.events)
+    assert ("commit",) not in connection.events
+    assert connection.closed is True
+
+
+def test_a_dump_that_holds_no_statement_raises_before_touching_the_server(
+    tmp_path, monkeypatch, connect_calls
+):
+    """An empty dump is not an empty schema to re-run: it is a checkout missing its file."""
+    _calls, connection = connect_calls
+    bootstrap = _build(tmp_path, monkeypatch)
+    (tmp_path / "tables").mkdir()
+    (tmp_path / "empty.sql").write_text(";\n;\n  \n", encoding="utf-8")
+    bootstrap.path_to_sql = str(tmp_path / "empty.sql")
+
+    with pytest.raises(SchemaBootstrapError) as caught:
+        bootstrap.read_sql()
+
+    assert caught.value.step == "reading the schema dump"
+    assert "holds no SQL statement" in caught.value.detail
+    assert connection.statements == []
+    assert connection.closed is True
+
+
+def test_a_rejected_create_database_raises_instead_of_being_logged(
+    tmp_path, monkeypatch, connect_calls
+):
+    """The database is what the rest of the bootstrap assumes; no statement may survive it."""
+    _calls, connection = connect_calls
+    bootstrap = _build(tmp_path, monkeypatch)
+    (tmp_path / "tables").mkdir()
+    (tmp_path / "dump.sql").write_text("CREATE TABLE a (id INT);", encoding="utf-8")
+    bootstrap.path_to_sql = str(tmp_path / "dump.sql")
+    connection.fail_on = "CREATE DATABASE"
+
+    with pytest.raises(SchemaBootstrapError) as caught:
+        bootstrap.read_sql()
+
+    assert caught.value.step == "creating the database"
+    assert "CREATE TABLE a (id INT)" not in connection.statements
+    assert connection.closed is True
+
+
+def test_a_lost_connection_mid_dump_raises_with_the_statement_index(
+    tmp_path, monkeypatch, connect_calls
+):
+    """A rejected statement is skipped; a DEAD connection is not.
+
+    MySQL error 2006 is the server not being there any more. Continuing would execute every
+    remaining statement against a socket that cannot answer, and the bootstrap would return
+    having applied part of the dump - the exact shape this refactor removes.
+    """
+    _calls, connection = connect_calls
+    bootstrap = _build(tmp_path, monkeypatch)
+    (tmp_path / "tables").mkdir()
+    (tmp_path / "dump.sql").write_text(
+        "CREATE TABLE a (id INT);\nCREATE TABLE b (id INT);\n", encoding="utf-8"
+    )
+    bootstrap.path_to_sql = str(tmp_path / "dump.sql")
+    original_execute = FakeCursor.execute
+
+    def gone_away(self, statement, params=None):
+        if "CREATE TABLE b" in statement:
+            raise pymysql.MySQLError(2006, "MySQL server has gone away")
+        return original_execute(self, statement, params)
+
+    monkeypatch.setattr(FakeCursor, "execute", gone_away)
+
+    with pytest.raises(SchemaBootstrapError) as caught:
+        bootstrap.read_sql()
+
+    assert caught.value.step == "applying the schema dump"
+    # 1-based over the DUMP, not over everything the bootstrap runs: CREATE DATABASE and
+    # USE are bootstrap steps, not statements of the file, so the second CREATE TABLE is 2.
+    assert caught.value.statement_index == 2
+    assert "the connection died" in caught.value.detail
+    assert connection.closed is True
+
+
+def test_the_transaction_is_begun_once_and_committed_once_on_success(
+    tmp_path, monkeypatch, connect_calls
+):
+    """One commit, after the seed phase, and not one per table.
+
+    A commit per table would make the phase exactly as atomic as the old code: a failure in
+    the third table leaves the first two in the database for good.
+    """
+    _calls, connection = connect_calls
+    bootstrap = _build(tmp_path, monkeypatch)
+    tables = tmp_path / "tables"
+    tables.mkdir()
+    (tmp_path / "dump.sql").write_text("CREATE TABLE files (id INT);", encoding="utf-8")
+    bootstrap.path_to_sql = str(tmp_path / "dump.sql")
+    pd.DataFrame({"url": ["a.mp4"]}).to_csv(tables / "files.csv", index=False)
+    pd.DataFrame({"url": ["u.npy"]}).to_csv(tables / "embeddings.csv", index=False)
+
     bootstrap.read_sql()
 
+    assert [event[0] for event in connection.events].count("begin") == 1
+    assert [event[0] for event in connection.events].count("commit") == 1
+    assert ("rollback",) not in connection.events
+    assert len(connection.inserts) == 2
+    assert ("commit",) in connection.events
+    assert connection.closed is True
+
+
+def test_a_seed_file_that_cannot_be_parsed_raises_before_the_dump_runs(
+    tmp_path, monkeypatch, connect_calls
+):
+    """The seed files are read in the same pre-flight as the dump, for the same reason."""
+    _calls, connection = connect_calls
+    bootstrap = _build(tmp_path, monkeypatch)
+    tables = tmp_path / "tables"
+    tables.mkdir()
+    (tmp_path / "dump.sql").write_text("CREATE TABLE files (id INT);", encoding="utf-8")
+    bootstrap.path_to_sql = str(tmp_path / "dump.sql")
+    (tables / "files.csv").write_bytes(b"\xff\xfe\x00 not a csv")
+
+    with pytest.raises(SchemaBootstrapError) as caught:
+        bootstrap.read_sql()
+
+    assert caught.value.step == "reading a seed file"
+    assert connection.statements == []
     assert connection.closed is True
 
 
@@ -334,6 +475,54 @@ def test_the_shipped_dump_survives_the_naive_semicolon_split():
         assert statement.count("'") % 2 == 0, f"unbalanced quotes split at: {statement[:80]!r}"
         assert "\\'" not in statement, "a backslash-escaped quote is invisible to the splitter"
     assert ";;" not in script
+
+
+# --- split_statements: the quote-aware splitter ------------------------------
+@pytest.mark.parametrize(
+    "script, expected",
+    [
+        ("SELECT 1; SELECT 2;", ["SELECT 1", "SELECT 2"]),
+        ("SELECT 'a;b'; SELECT 2;", ["SELECT 'a;b'", "SELECT 2"]),
+        ('INSERT INTO t VALUES ("x;y");', ['INSERT INTO t VALUES ("x;y")']),
+        ("SELECT `weird;name` FROM t;", ["SELECT `weird;name` FROM t"]),
+        ("SELECT 'it''s; fine';", ["SELECT 'it''s; fine'"]),
+        ("SELECT 'a\\';b'; SELECT 2;", ["SELECT 'a\\';b'", "SELECT 2"]),
+        ("/* a; b */ SELECT 1;", ["/* a; b */ SELECT 1"]),
+        ("-- a; b\nSELECT 1;", ["-- a; b\nSELECT 1"]),
+        ("# a; b\nSELECT 1;", ["# a; b\nSELECT 1"]),
+        ("SELECT 1", ["SELECT 1"]),
+        ("   ;;  ;  ", []),
+        ("", []),
+    ],
+)
+def test_split_statements_ignores_a_semicolon_that_does_not_end_a_statement(script, expected):
+    """The cases the old str.split got wrong, each one a silent half-statement."""
+    assert schema_module.split_statements(script) == expected
+
+
+def test_the_naive_split_would_have_broken_the_case_above():
+    """Pins WHY the splitter exists: on the same input, str.split disagrees.
+
+    Without this, the test above proves only that the new function is self-consistent -
+    and a splitter that returned the whole script as one statement would pass a weaker
+    version of it.
+    """
+    script = "INSERT INTO t VALUES ('open; part time');"
+
+    assert schema_module.split_statements(script) == ["INSERT INTO t VALUES ('open; part time')"]
+    assert script.split(";") != schema_module.split_statements(script)
+
+
+def test_the_shipped_dump_splits_into_the_same_statements_as_before():
+    """The real file must not change meaning under the new splitter."""
+    script = DUMP.read_text(encoding="utf-8")
+
+    aware = schema_module.split_statements(script)
+    naive = [stmt.strip() for stmt in script.split(";") if stmt.strip()]
+
+    assert len(aware) == len(naive) >= 40
+    for index, (left, right) in enumerate(zip(aware, naive)):
+        assert left == right, f"statement {index} differs: the dump holds a quoted semicolon"
 
 
 # --- remove_column_from_csv ------------------------------------------------

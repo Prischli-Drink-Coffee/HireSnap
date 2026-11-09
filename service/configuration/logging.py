@@ -41,9 +41,42 @@ _log: Optional[logging.Logger] = None
 
 
 def _log_file() -> Path:
-    from service.configuration.paths import logs_dir
+    from service.configuration.paths import log_file
 
-    return logs_dir() / "app.log"
+    return log_file()
+
+
+def load_logging_config(path: Optional[Path] = None) -> dict:
+    """Read the YAML and resolve its ONE relative path to an absolute one.
+
+    WHY THIS EXISTS. The YAML names the file handler's target as "logs/app.log",
+    which logging.config resolves against the process's working directory. Inside
+    the image that happens to be /app and the file lands where the bind mount
+    expects, so nothing complained - but uvicorn's reloader starts its child with
+    whatever directory it inherits, a developer starting the server from backend/
+    writes a different file than one starting it from the repository root, and a
+    process launched from a directory with no logs/ fails to configure the handler
+    at all (dictConfig raises and the service does not start).
+
+    The YAML stays the source of truth for the format, the levels, the handlers and
+    the logger tree. Only the filename is rewritten, and only when it is relative,
+    so a deployment that mounts the log somewhere else can still write an absolute
+    path there. There is ONE caller of the YAML (service/main.py, which hands the
+    result to uvicorn and to dictConfig), which is what keeps this honest.
+    """
+    import yaml
+
+    from service.configuration.paths import LOGGING_YAML
+
+    source = Path(path) if path is not None else LOGGING_YAML
+    with open(source, "r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle.read())
+
+    handler = (config.get("handlers") or {}).get("file") or {}
+    filename = handler.get("filename")
+    if filename and not Path(filename).is_absolute():
+        handler["filename"] = str(_log_file())
+    return config
 
 
 def setup_logging(clean: bool = False, debug: bool = False) -> logging.Logger:

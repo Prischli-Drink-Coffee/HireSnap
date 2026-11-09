@@ -72,8 +72,22 @@ def data_dir() -> Path:
 
 
 def logs_dir() -> Path:
-    """Directory the YAML logging config writes into (`logs/app.log`)."""
+    """Directory the logging config writes into."""
     return BACKEND_ROOT / "logs"
+
+
+def log_file() -> Path:
+    """The one log file: the bind-mounted /app/logs/app.log in the image.
+
+    Absolute on purpose. The YAML names the handler's file relatively
+    (`logs/app.log`), which only resolves when the process happens to run from a
+    directory that has a `logs/` beside it - true inside the image because WORKDIR
+    is /app, false for the reloader's child, false for a developer who started the
+    server from anywhere else, and false for every test. `load_logging_config()`
+    in service/configuration/logging.py rewrites the relative name through this
+    function, so the file the process writes is decided here and nowhere else.
+    """
+    return logs_dir() / "app.log"
 
 
 def schema_file(database_name: str) -> Path:

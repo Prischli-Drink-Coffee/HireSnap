@@ -46,8 +46,6 @@ DEFAULT_MAX_ENTRIES = 2048
 DEFAULT_TIMEOUT = 0.5
 DEFAULT_BACKOFF = 30.0
 
-_TRUTHY = {"1", "true", "yes", "on", "enabled", "y"}
-
 
 def _env(*names, default=""):
     """First of the given environment names that is present, else the default.
@@ -63,10 +61,6 @@ def _env(*names, default=""):
         if name in os.environ:
             return os.environ[name]
     return default
-
-
-def _truthy(value):
-    return str(value or "").strip().lower() in _TRUTHY
 
 
 def _bootstrap_env():

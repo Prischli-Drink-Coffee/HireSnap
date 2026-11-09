@@ -34,14 +34,14 @@ import os
 import shutil
 import threading
 
+from service.configuration.flags import read_flag
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_BACKEND = "local"
 DEFAULT_BUCKET = "hiresnap-uploads"
 DEFAULT_PRESIGN_TTL = 3600
 DEFAULT_REGION = "us-east-1"
-
-_TRUTHY = {"1", "true", "yes", "on", "enabled", "y"}
 
 
 class StorageError(RuntimeError):
@@ -62,10 +62,6 @@ def _env(*names, default=""):
         if name in os.environ:
             return os.environ[name]
     return default
-
-
-def _truthy(value):
-    return str(value or "").strip().lower() in _TRUTHY
 
 
 def _bootstrap_env():
@@ -478,7 +474,7 @@ def build_storage(backend=None):
         access_key=_env("STORAGE__ACCESS_KEY", "STORAGE_ACCESS_KEY", default=""),
         secret_key=_env("STORAGE__SECRET_KEY", "STORAGE_SECRET_KEY", default=""),
         region=_env("STORAGE__REGION", "STORAGE_REGION", default=DEFAULT_REGION),
-        secure=_truthy(_env("STORAGE__SECURE", "STORAGE_SECURE", default="false")),
+        secure=read_flag("STORAGE__SECURE", "STORAGE_SECURE", default=False),
         prefix=_env("STORAGE__PREFIX", "STORAGE_PREFIX", default=""),
         presign_ttl=_env(
             "STORAGE__PRESIGN_TTL", "STORAGE_PRESIGN_TTL", default=str(DEFAULT_PRESIGN_TTL)

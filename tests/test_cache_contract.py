@@ -150,24 +150,12 @@ def test_memory_backend_ping_and_delete():
 
 
 # --------------------------------------------------------------------------- #
-# _truthy / _bootstrap_env / _glob_escape
+# _bootstrap_env / _glob_escape
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize(
-    "value, expected",
-    [
-        ("1", True),
-        ("true", True),
-        (" TRUE ", True),
-        ("yes", True),
-        ("on", True),
-        ("0", False),
-        ("off", False),
-        ("", False),
-        (None, False),
-    ],
-)
-def test_truthy_accepts_the_documented_spellings(value, expected):
-    assert cache_module._truthy(value) is expected
+# The flag parser moved to service.configuration.flags (one strict rule for the whole
+# process); its spellings are covered by test_flags.py. What matters HERE is that the
+# cache still reads its own two flags through it, which test_infra_fallbacks.py proves
+# from the other side (a dead redis configured with CACHE__BACKEND=redis degrades).
 
 
 def test_bootstrap_env_reads_the_backend_env_file_once(monkeypatch):

@@ -26,10 +26,9 @@ import logging
 from typing import Optional
 
 import uvicorn
-import yaml
 
 from service.configuration.env import Env
-from service.configuration.logging import get_logger
+from service.configuration.logging import get_logger, load_logging_config
 from service.configuration.paths import LOGGING_YAML
 from service.shared.debug import debug_info
 
@@ -56,14 +55,19 @@ def bootstrap_schema(env: Env) -> None:
 
 def run_server() -> None:
     env = Env()
-    with open(LOGGING_YAML, "r", encoding="utf-8") as handle:
-        logging.config.dictConfig(yaml.safe_load(handle.read()))
+    # The YAML is applied HERE, not handed to uvicorn as a path: uvicorn would read the
+    # same file but resolve the handler's relative "logs/app.log" against the process's
+    # working directory, and the reloader's child does not inherit a useful one. Applying
+    # the parsed (and path-resolved) dict ourselves makes the log file absolute and gives
+    # one place that knows where it is; log_config=None then tells uvicorn not to install
+    # its own default logging config over it.
+    logging.config.dictConfig(load_logging_config(LOGGING_YAML))
     debug = _debug_flag(env)
     uvicorn.run(
         "service.api.app:app",
         host=env.__getattr__("HOST"),
         port=int(env.__getattr__("SERVER_PORT")),
-        log_config=str(LOGGING_YAML),
+        log_config=None,
         reload=debug,
     )
 
@@ -79,10 +83,14 @@ def main(argv: Optional[list] = None) -> int:
 
 
 def os_env_flag(name: str) -> bool:
-    """True when the variable is set to a truthy value (`1`, `true`, `yes`)."""
-    import os
+    """A boolean from the environment, strict unless the variable is absent.
 
-    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+    Delegates to service.configuration.flags so INIT_DB follows the same rule as every
+    other flag: absent means off, set-but-unparseable raises instead of reading as off.
+    """
+    from service.configuration.flags import read_flag
+
+    return read_flag(name, default=False)
 
 
 if __name__ == "__main__":

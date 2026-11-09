@@ -28,6 +28,7 @@ from dataclasses import dataclass, replace
 from functools import lru_cache
 from typing import Optional
 
+from service.configuration.flags import read_flag
 from service.configuration.paths import BACKEND_ROOT, data_dir, logs_dir
 
 DEFAULT_CACHE_BACKEND = "memory"
@@ -55,11 +56,13 @@ def _first(*names: str, default: str = "") -> str:
 
 
 def _flag(*names: str, default: bool = False) -> bool:
-    """A truthy environment flag: 1/true/yes/on, case-insensitive."""
-    raw = _first(*names, default="")
-    if not raw:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    """A boolean flag, strict: absent means *default*, set-but-unparseable raises.
+
+    WHY strict here and forgiving for numbers below: a malformed number degrades one
+    call, while a malformed boolean silently changes which components exist - the
+    process boots, health is green, and mail or the workers are simply absent.
+    """
+    return read_flag(*names, default=default)
 
 
 def _number(*names: str, default: float) -> float:

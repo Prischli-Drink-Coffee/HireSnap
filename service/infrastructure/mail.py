@@ -36,14 +36,14 @@ import threading
 import time
 from email.message import EmailMessage
 
+from service.configuration.flags import read_flag
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_SMTP_PORT = 587
 DEFAULT_FROM = "no-reply@hiresnap.local"
 DEFAULT_TIMEOUT = 10.0
 DEFAULT_FILE_PATH = "mail_outbox.log"
-
-_TRUTHY = {"1", "true", "yes", "on", "enabled", "y"}
 
 
 class MailError(RuntimeError):
@@ -56,10 +56,6 @@ def _env(*names, default=""):
         if name in os.environ:
             return os.environ[name]
     return default
-
-
-def _truthy(value):
-    return str(value or "").strip().lower() in _TRUTHY
 
 
 def _bootstrap_env():
@@ -271,7 +267,9 @@ def get_mailer():
     no connection is opened until send().
     """
     _bootstrap_env()
-    if not _truthy(_env("MAIL__ENABLED", "MAIL_ENABLED", default="false")):
+    # Strict on purpose: MAIL__ENABLED=ture used to read as "off", which is the one
+    # mistake an operator cannot see - health stays green and the inbox stays empty.
+    if not read_flag("MAIL__ENABLED", "MAIL_ENABLED", default=False):
         return DisabledMailer()
 
     backend = str(_env("MAIL__BACKEND", "MAIL_BACKEND", default="file")).strip().lower() or "file"
@@ -289,9 +287,9 @@ def get_mailer():
             user=_env("MAIL__USER", "MAIL_USER", default=""),
             password=_env("MAIL__PASSWORD", "MAIL_PASSWORD", default=""),
             sender=_env("MAIL__FROM", "MAIL_FROM", default=DEFAULT_FROM),
-            starttls=_truthy(_env("MAIL__STARTTLS", "MAIL_STARTTLS", default="true")),
+            starttls=read_flag("MAIL__STARTTLS", "MAIL_STARTTLS", default=True),
             timeout=_env("MAIL__TIMEOUT", "MAIL_TIMEOUT", default=str(DEFAULT_TIMEOUT)),
-            ssl=_truthy(_env("MAIL__SSL", "MAIL_SSL", default="false")),
+            ssl=read_flag("MAIL__SSL", "MAIL_SSL", default=False),
         )
     if backend != "file":
         logger.warning("mail status=unknown_backend value=%s action=using file", backend)

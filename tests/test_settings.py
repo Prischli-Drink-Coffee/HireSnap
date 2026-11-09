@@ -245,22 +245,37 @@ def test_flag_truthy_spellings(monkeypatch, raw):
     assert build_settings().mail_enabled is True
 
 
-@pytest.mark.parametrize("raw", ["0", "false", "FALSE", "no", "off", "", "  "])
+@pytest.mark.parametrize("raw", ["0", "false", "FALSE", "no", "off", "disabled"])
 def test_flag_falsy_spellings(monkeypatch, raw):
     monkeypatch.setenv("MAIL__ENABLED", raw)
 
     assert build_settings().mail_enabled is False
 
 
-def test_flag_does_not_raise_on_an_unrecognised_value(monkeypatch):
-    """REPORTED, NOT FIXED: settings._flag returns False for "maybe" instead of raising.
+@pytest.mark.parametrize("raw", ["maybe", "ture", "", "  ", "true false"])
+def test_flag_raises_on_a_value_nobody_meant(monkeypatch, raw):
+    """REPORTED, NOW FIXED (KNOWN_GAPS section 35): a typo used to read as "off".
 
-    The strict TRUE/FALSE guard the manifest documents lives one layer up, in
-    service.main._debug_flag, which raises RuntimeError for DEBUG. Here an unknown flag
-    silently means "off" - the safe direction for a feature flag, and what the code does
-    today, so this test pins the behaviour rather than wishing it different.
+    "Mail is on" is a claim the operator makes about production, so a value that is
+    neither true nor false stops the boot and names the variable instead of quietly
+    building a DisabledMailer. An ABSENT variable still returns its default - see the
+    test below - because "not configured" is a legitimate state.
     """
-    monkeypatch.setenv("MAIL__ENABLED", "maybe")
+    from service.configuration.flags import FlagValueError
+
+    monkeypatch.setenv("MAIL__ENABLED", raw)
+
+    with pytest.raises(FlagValueError) as caught:
+        build_settings()
+
+    assert caught.value.name == "MAIL__ENABLED"
+    assert caught.value.value == raw
+
+
+def test_an_absent_flag_returns_its_default(monkeypatch):
+    """The strictness is about VALUES, not about a key the operator never set."""
+    monkeypatch.delenv("MAIL__ENABLED", raising=False)
+    monkeypatch.delenv("MAIL_ENABLED", raising=False)
 
     assert build_settings().mail_enabled is False
 

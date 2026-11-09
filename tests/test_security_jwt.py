@@ -1,9 +1,11 @@
 """service/api/security.py: the JWT Bearer dependency every authenticated route uses.
 
-WHY THE THREE FAILURE MODES ARE PINNED ONE BY ONE: this dependency is the only thing between
-an unauthenticated request and a write endpoint, and all three of its rejections are the same
+WHY THE FOUR FAILURE MODES ARE PINNED ONE BY ONE: this dependency is the only thing between
+an unauthenticated request and a write endpoint, and three of its rejections are the same
 HTTP 403 with a DIFFERENT body. A client that retries on "Invalid token or expired token."
-must not silently start retrying on a missing header, so the exact strings matter.
+must not silently start retrying on a missing header or on "not an admin", so the exact
+strings matter - and since the admin check now answers on its own, "wrong role" and "expired"
+are the two a client can finally tell apart.
 
 WHY THE CRYPTOGRAPHY-DEPENDENT CASE IS A LOUD SKIP: PyJWT needs the optional `cryptography`
 package to sign or verify RS256, and neither the refactor venv nor the CI venv
@@ -69,12 +71,13 @@ def test_a_missing_header_with_auto_error_off_falls_through_to_the_own_branch():
 
 
 def test_a_non_bearer_scheme_is_rejected_by_the_superclass_not_by_this_class():
-    """REPORTED, NOT FIXED: JWTBearer's "Invalid authentication scheme." branch is DEAD CODE.
+    """D1 (KNOWN_GAPS 30), FIXED BY DELETION: starlette owns this message, not JWTBearer.
 
-    starlette's HTTPBearer already rejects a non-bearer scheme with "Invalid authentication
-    credentials" when auto_error is on, and returns None (-> "Invalid authorization code.")
-    when it is off. The class's own scheme check cannot be reached through __call__ in either
-    mode; it is unreachable code, so it is not asserted as a message a client can receive.
+    The module used to carry its own scheme check raising "Invalid authentication scheme.",
+    which could never run - HTTPBearer validates the scheme inside super().__call__ first.
+    Removing it changed nothing a client receives, so the wire contract below is the one that
+    was always true; what changed is that the code no longer implies a check it does not do.
+    Both messages are asserted because the pair is the whole reason the branch was pointless.
     """
     assert _reject(JWTBearer(), _request(("Authorization", "Basic abc"))) == (
         403,
@@ -121,19 +124,19 @@ def test_access_level_zero_accepts_any_subject(monkeypatch):
 
 
 def test_access_level_one_rejects_a_non_admin_subject_as_a_403(monkeypatch):
-    """REPORTED, NOT FIXED: the 401 "Have not access" is raised INSIDE verify_jwt's try/except.
+    """D2 (KNOWN_GAPS 31), FIXED: "wrong role" is now a distinct 403 from "expired".
 
-    The inner HTTPException is caught by the module's own "except Exception", so it becomes
-    False and the caller renders 403 "Invalid token or expired token.". A level-1 route
-    therefore cannot distinguish "not an admin" from "expired" - the client sees one status.
-    Pinned as-is: it is a documented behaviour of the moved code, and changing it would change
-    every admin endpoint's error contract.
+    The admin check used to raise INSIDE verify_jwt's own `except Exception`, which swallowed
+    its own raise, turned it into False and let __call__ render "Invalid token or expired
+    token." - so a signed-in non-admin was told their session had expired and a SPA could only
+    answer with a sign-in page the user could never get past. The status is deliberately still
+    403 (the level-1 semantics did not change); only the detail is now its own.
     """
     monkeypatch.setattr(security_module, "decode_jwt", lambda _token: {"sub": "user"})
 
     assert _reject(JWTBearer(access_level=1), _request(("Authorization", "Bearer t"))) == (
         403,
-        "Invalid token or expired token.",
+        "Have not access",
     )
 
 
@@ -141,6 +144,89 @@ def test_access_level_one_accepts_the_admin_subject(monkeypatch):
     monkeypatch.setattr(security_module, "decode_jwt", lambda _token: {"sub": "admin"})
 
     assert _call(JWTBearer(access_level=1), _request(("Authorization", "Bearer t"))) == "t"
+
+
+# --- the four denials, compared as a set ------------------------------------
+def test_the_four_denials_are_distinguishable_by_status_and_detail(monkeypatch):
+    """The contract table a client branches on, in one place: no two cases share a body.
+
+    D1/D2 are only worth fixing if the outcomes are actually distinguishable end to end, so
+    this asserts the SET rather than each message alone: a future edit that collapses two
+    cases back into one string fails here even if every single-case assertion was updated.
+    All four are 403s, so the body is the ONLY channel a client has.
+    """
+    no_header = _reject(JWTBearer(), _request())
+    wrong_scheme = _reject(JWTBearer(), _request(("Authorization", "Basic abc")))
+    bad_token = _reject(JWTBearer(), _request(("Authorization", "Bearer not-a-jwt")))
+    monkeypatch.setattr(security_module, "decode_jwt", lambda _token: {"sub": "user"})
+    wrong_role = _reject(JWTBearer(access_level=1), _request(("Authorization", "Bearer t")))
+
+    assert no_header == (403, "Not authenticated")
+    assert wrong_scheme == (403, "Invalid authentication credentials")
+    assert bad_token == (403, "Invalid token or expired token.")
+    assert wrong_role == (403, "Have not access")
+    assert len({no_header[1], wrong_scheme[1], bad_token[1], wrong_role[1]}) == 4
+
+
+def test_an_expired_token_is_rejected_as_expired_and_not_as_a_role_problem(monkeypatch):
+    """A REAL expiry, not a patched decoder: HS256 keeps it verifiable without cryptography.
+
+    This is the case D2 could hide behind, so it is asserted through the dependency rather
+    than on the decoder: the token is genuinely past its `exp`, and the message must be the
+    "session is gone" one - never "Have not access", which stays reserved for a token that
+    verified but carries the wrong role.
+    """
+    from datetime import timedelta
+
+    expired = tokens_module.encode_jwt(
+        {"sub": "admin"},
+        private_key="secret",
+        algorithm="HS256",
+        expire_timedelta=timedelta(minutes=-5),
+    )
+    monkeypatch.setattr(
+        security_module,
+        "decode_jwt",
+        lambda raw: tokens_module.decode_jwt(raw, public_key="secret", algorithm="HS256"),
+    )
+
+    assert _reject(JWTBearer(access_level=1), _request(("Authorization", "Bearer " + expired))) == (
+        403,
+        "Invalid token or expired token.",
+    )
+
+
+def test_access_level_one_lets_the_admin_subject_through(monkeypatch):
+    """The level-1 happy path, restated next to the denial: same token shape, only `sub` differs."""
+    monkeypatch.setattr(security_module, "decode_jwt", lambda _token: {"sub": "admin", "ID": 1})
+
+    assert _call(JWTBearer(access_level=1), _request(("Authorization", "Bearer t"))) == "t"
+
+
+def test_the_admin_denial_is_logged_before_it_is_raised(monkeypatch, caplog):
+    """An operator must see the role failure in the log, not only the client in the body.
+
+    `log.exception` runs where the decision is made; if a later refactor moved the raise into
+    a place with no logging, the operator would lose the only trace of who was refused.
+
+    The application logger is `logging.getLogger("sd")` with `propagate = False` and its own
+    rich/file handlers, so pytest's capture handler never sees a record unless it is attached
+    to that logger directly - hence the explicit addHandler/removeHandler pair.
+    """
+    monkeypatch.setattr(security_module, "decode_jwt", lambda _token: {"sub": "user"})
+    logger = security_module.log
+    previous_level = logger.level
+    logger.addHandler(caplog.handler)
+    logger.setLevel("ERROR")
+    try:
+        with pytest.raises(HTTPException) as caught:
+            _call(JWTBearer(access_level=1), _request(("Authorization", "Bearer t")))
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.setLevel(previous_level)
+
+    assert caught.value.detail == "Have not access"
+    assert any("Have not access" in record.getMessage() for record in caplog.records)
 
 
 # --- the untestable-without-cryptography case -------------------------------

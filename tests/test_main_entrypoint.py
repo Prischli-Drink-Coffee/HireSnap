@@ -20,6 +20,8 @@ import types
 import pytest
 
 from service import main as main_module
+from service.configuration.logging import load_logging_config
+from service.configuration.paths import BACKEND_ROOT, LOGGING_YAML
 from service.main import _debug_flag, bootstrap_schema, main, os_env_flag, run_server
 
 
@@ -69,11 +71,27 @@ def test_os_env_flag_truthy_spellings(monkeypatch, raw):
     assert os_env_flag("INIT_DB") is True
 
 
-@pytest.mark.parametrize("raw", ["0", "false", "no", "off", "", "  ", "maybe"])
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off", "FALSE"])
 def test_os_env_flag_falsy_spellings(monkeypatch, raw):
     monkeypatch.setenv("INIT_DB", raw)
 
     assert os_env_flag("INIT_DB") is False
+
+
+@pytest.mark.parametrize("raw", ["", "  ", "maybe", "ture", "трuе"])
+def test_os_env_flag_refuses_a_value_nobody_meant(monkeypatch, raw):
+    """REPORTED, NOW FIXED (KNOWN_GAPS section 35): a typo used to read as "off".
+
+    INIT_DB gates the schema bootstrap, so a typo silently skipped it and the container
+    came up against an empty database. An unparseable value now raises at boot, which is
+    the loud failure; see service/configuration/flags.py for the rule and the reason.
+    """
+    from service.configuration.flags import FlagValueError
+
+    monkeypatch.setenv("INIT_DB", raw)
+
+    with pytest.raises(FlagValueError):
+        os_env_flag("INIT_DB")
 
 
 def test_os_env_flag_is_false_for_an_unset_variable(monkeypatch):
@@ -161,7 +179,10 @@ def test_run_server_hands_uvicorn_an_absolute_target_and_the_yaml_log_config(
     assert uvicorn_calls["host"] == "127.0.0.1"
     assert uvicorn_calls["port"] == 18099  # cast from the string in the environment
     assert uvicorn_calls["reload"] is False
-    assert uvicorn_calls["log_config"] == str(main_module.LOGGING_YAML)
+    # None, not the path: this module applies the YAML itself so the file handler's
+    # relative name can be resolved. Handing uvicorn the path would make it apply the
+    # config a second time, against the working directory.
+    assert uvicorn_calls["log_config"] is None
 
 
 def test_run_server_enables_the_reloader_only_for_debug_true(monkeypatch, uvicorn_calls):
@@ -211,26 +232,65 @@ def test_run_server_reads_the_log_config_from_the_package_not_the_working_direct
 
     run_server()
 
-    assert uvicorn_calls["log_config"] == str(main_module.LOGGING_YAML)
+    assert uvicorn_calls["log_config"] is None
     assert main_module.LOGGING_YAML.is_absolute()
     assert len(configured) == 1
+    # The handler target is absolute even though the YAML spells it relatively, so a
+    # process started from tmp_path writes the same log file as one started from backend/.
+    assert configured[0]["handlers"]["file"]["filename"] == str(BACKEND_ROOT / "logs" / "app.log")
 
 
-def test_the_log_file_handler_is_relative_to_the_working_directory():
-    """REPORTED, NOT FIXED: the app's file handler writes "logs/app.log" relative to the CWD.
+def test_the_yaml_still_spells_the_log_file_relatively():
+    """The FILE keeps the relative spelling; load_logging_config() resolves it at load.
 
-    It works in the image only because WORKDIR is /app and /app/logs exists - the same
-    directory service.configuration.paths.logs_dir() computes. A process started from
-    anywhere else writes its log somewhere else (or fails to configure the handler at all,
-    which is what a chdir to a directory without logs/ produces). The absolute path already
-    exists in the codebase (logs_dir()); wiring the YAML to it means templating the file,
-    which is a change to how logging is configured, not a capture-coverage fix.
+    Pinning the file's own text matters because the fix lives in the loader: a later edit
+    that hard-codes an absolute path into the YAML would make the same file useless on any
+    host whose log directory is not this checkout's, and the resolver would stop being the
+    one place that decides where the log goes.
     """
     import yaml
 
     config = yaml.safe_load(main_module.LOGGING_YAML.read_text(encoding="utf-8"))
 
     assert config["handlers"]["file"]["filename"] == "logs/app.log"
+
+
+def test_load_logging_config_makes_the_file_handler_absolute(monkeypatch, tmp_path):
+    """The resolved config is what dictConfig receives, so this is where the CWD stops."""
+    monkeypatch.chdir(tmp_path)
+
+    config = load_logging_config(LOGGING_YAML)
+
+    assert config["handlers"]["file"]["filename"] == str(BACKEND_ROOT / "logs" / "app.log")
+    # Everything else is untouched: the YAML stays the source of truth for the rest.
+    assert config["handlers"]["file"]["class"] == "logging.FileHandler"
+    assert config["handlers"]["file"]["encoding"] == "utf-8"
+    assert sorted(config["loggers"]) == ["uvicorn", "uvicorn.access", "uvicorn.error"]
+    assert config["root"]["handlers"] == ["file", "console"]
+
+
+def test_load_logging_config_leaves_an_absolute_filename_alone(tmp_path):
+    """A deployment that mounts its log elsewhere writes the path it configured."""
+    import yaml
+
+    source = tmp_path / "logging.yaml"
+    payload = {
+        "version": 1,
+        "handlers": {"file": {"class": "logging.FileHandler", "filename": str(tmp_path / "x.log")}},
+    }
+    source.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    assert load_logging_config(source)["handlers"]["file"]["filename"] == str(tmp_path / "x.log")
+
+
+def test_load_logging_config_without_a_file_handler_is_a_no_op(tmp_path):
+    """A config with no file handler must not grow one - absence is not a request."""
+    import yaml
+
+    source = tmp_path / "logging.yaml"
+    source.write_text(yaml.safe_dump({"version": 1, "handlers": {}}), encoding="utf-8")
+
+    assert load_logging_config(source)["handlers"] == {}
 
 
 # --- main -------------------------------------------------------------------
