@@ -80,25 +80,19 @@ describe("constants", () => {
       expect(ACCESS_ANY_SIGNED_IN.length).toBeGreaterThan(0);
     });
 
-    // KNOWN INCONSISTENCY, recorded not fixed. The backend's RoleEnum is
-    // lowercase ("user" | "admin"), while USER_ROLES.admin is "ADMIN". The
-    // cookie carries the JWT's "sub" claim verbatim, so this entry can never
-    // match and the registration link is invisible. Making it match changes who
-    // can reach the signup screen - a product decision, not a refactor.
-    test("USER_ROLES values do not match the backend's lowercase role spelling (documented, currently unreachable)", () => {
+    // The backend's RoleEnum is lowercase ("user" | "admin") and the cookie
+    // carries the JWT's "sub" claim verbatim, so a constant spelled "ADMIN"
+    // would never match and would silently close the registration screen. This
+    // is the drift check: if the server's spelling ever changes, it fails here
+    // rather than showing up as a link that does nothing.
+    test("USER_ROLES values match the backend's lowercase role spelling", () => {
       const backendRoleSpelling = /^[a-z]+$/;
 
       for (const [name, value] of Object.entries(USER_ROLES)) {
-        expect({
+        expect({ role: name, value, matchesBackend: backendRoleSpelling.test(value) }).toEqual({
           role: name,
           value,
-          matchesBackend: backendRoleSpelling.test(value),
-        }).toEqual({
-          role: name,
-          value,
-          // Deliberately false: if this ever becomes true, the ADMIN guard starts
-          // working and somebody must confirm the backend still spells it that way.
-          matchesBackend: false,
+          matchesBackend: true,
         });
       }
     });

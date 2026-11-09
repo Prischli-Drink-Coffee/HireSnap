@@ -85,14 +85,15 @@ describe("PrivateRoute", () => {
     expectRedirectedToSignIn();
   });
 
-  // The case that makes the ADMIN entry inert today, and the reason
-  // constants.test.js records the mismatch: the guard compares the cookie to the
-  // constant by strict equality, so the lowercase role the backend issues never
-  // opens an ADMIN route.
-  test("redirects a lowercase backend role away from the ADMIN group", () => {
+  // The guard compares the cookie to the constant by strict equality, so this
+  // case is the one that used to fail: USER_ROLES.admin was "ADMIN" while the
+  // backend issues lowercase, and every real administrator was bounced off the
+  // registration screen. constants.test.js pins the spelling; this pins that the
+  // guard then opens.
+  test("opens an ADMIN route for the lowercase role the backend issues", () => {
     renderGuarded(USER_ROLES.admin, ["/protected"], { role: "admin" });
 
-    expectRedirectedToSignIn();
+    expectAllowed();
   });
 
   // Defensive: a route author who forgets the prop gets a closed door, not an

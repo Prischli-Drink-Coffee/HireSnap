@@ -33,14 +33,14 @@ export const ACCESS_ANY_SIGNED_IN = "AUTH";
 
 // Role names a screen may gate on.
 //
-// The value mirrors the "role" claim of the access token. NOTE: the backend
-// spells roles lowercase (RoleEnum is "user" | "admin"), so the ADMIN entry
-// below describes an intent the cookie cannot currently satisfy - the
-// registration link is therefore never visible. It is kept exactly as it was:
-// making it match changes who can reach the signup screen, which is a product
-// decision, not part of a tree refactor.
+// The value mirrors the "role" claim of the access token, which lands in the
+// cookie verbatim (shared/auth/session.js reads payload.sub). The backend's
+// RoleEnum is lowercase ("user" | "admin"), so the value here MUST be lowercase
+// too: the guard and the menu compare with strict equality, and "ADMIN" against
+// a cookie holding "admin" silently closed both the registration link and the
+// /signup_page route to every real administrator.
 export const USER_ROLES = {
-  admin: "ADMIN",
+  admin: "admin",
 };
 
 // Table pagination, shared by the table that owns the state and the two pieces
