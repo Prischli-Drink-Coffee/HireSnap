@@ -885,10 +885,11 @@ grows past a few queries earns an aggregate (25.1). None of that should be impos
 see the second rejected alternative in [ADR/0008](ADR/0008-vertical-slice-services.md), where
 full hexagonal ports and protocols for a 40-line repository are rejected for the same reason.
 
-## 26. The personality-vacancy link is written against the wrong personality
+## 26. The personality-vacancy link was written against the wrong personality (closed)
 
-**Defect, preserved on purpose.** `similarity_for_user()` scores one candidate against every
-personality and every vacancy, then writes two link tables. The second loop is wrong:
+**Defect, now fixed.** `similarity_for_user()` scores one candidate against every
+personality and every vacancy, then writes two link tables. The second loop was wrong twice
+over:
 
 ```python
 for j, personality in enumerate(personalities):        # j ends at len(personalities) - 1
@@ -898,45 +899,56 @@ for similarity, vacancy in zip(P[0, :], vacancies):
     ...create_personality_vacancy(personality_id=personalities[j].ID, ...)   # j is stale
 ```
 
-`personalities[j]` reads the index left over from the **previous** loop instead of the
-personality the `C`/`P` row actually belongs to
-(`backend/service/services/matching/application/matching_service.py:247-266`, `j` reused at
-`:262`). `P` is vacancy-vs-personality (`:72`, built at `:78` inside `build_matrix()`), so the
-score is right and the personality it is attributed to is arbitrary - whichever one the first
-loop happened to stop on.
+Two independent faults, and the second one was invisible while the first was being discussed:
 
-**Why it is not fixed here.** Correcting it changes rows that are already stored: the
-`personality_vacancies` table would need a backfill, which is a migration, not a refactor.
-The docstring says so in the code itself (`matching_service.py:222-227`: *"KNOWN DEFECT,
-PRESERVED ON PURPOSE ... Fixing it changes stored data, which is a migration"*), so a reader
-who finds the loop is told why it is still there rather than assuming it was missed.
+1. `personalities[j]` read the index left over from the **previous** loop instead of the
+   personality the `P` row actually belonged to - so the id was decided by where the
+   candidate loop happened to stop. For the fixture now in the suite that meant id 5 for a
+   score that described id 1.
+2. `zip(P[0, :], vacancies)` walked **row zero** of the vacancy-vs-personality matrix - the
+   *first vacancy's* scores against all five axes - and paired those five numbers with the
+   vacancy list, which truncated the sequence to the number of vacancies. With one vacancy
+   the loop saw one number, the first vacancy's distance to O, and attributed it to vacancy
+   one regardless of which vacancy it described. With three vacancies it recorded three axes
+   of the first vacancy against three different vacancies.
 
-**Why it is invisible in production.** No route calls the function. It has no route of its
-own - the four `inference` routes call `upload_video`, `upload_vacancy`, `get_all_vacancies`
-and `get_all_candidates` - so this deployment never wrote a wrong row; the defect is a trap
-for whoever wires the pipeline back up, which is why it is recorded here rather than silently
-fixed or silently dropped. Outside `tests/`, a tree-wide search finds exactly one occurrence
-of the name: its own `def` at `matching_service.py:216`.
+`_ocean_matrix()` compounded it: it returned **every** row of the personalities table beside
+a matrix built from only the five axes (`backend/tests/test_matching_pipeline.py` used to
+pin that with `assert returned is personalities`), so a table holding one non-axis row -
+an MBTI profile, say - shifted every column.
 
-**Mitigation.** Fix it in the same change that gives the function a caller, together with
-the backfill for rows already written by the old `main_services.py`: the pair is one
-migration and one loop. Until then the honest statement is that the link table cannot be
-trusted if it has any rows in it, and a fresh database has none.
+**The fix.** Three changes in
+`backend/service/services/matching/application/matching_service.py`:
 
-**Pinned by a test, not merely described.**
+- `_ocean_matrix()` filters and **sorts** by `OCEAN_NAMES`, so `returned[j]` is always the
+  row whose vector is column `j`, and column 0 is O because the module says so rather than
+  because of insertion order.
+- The link loop is a nested `for i, vacancy` / `for j, personality` over the matrix's own
+  coordinates: row `i` is vacancy `i`, column `j` is axis `j`. No index is carried between
+  loops.
+- `_embedding_path()` resolves the stored `embeddings/...` URL against `DATA_PATH` instead of
+  the process working directory, so the pipeline reads the same vectors the container wrote
+  regardless of where the process was started.
+
+**Was it a migration after all?** No, and that matters: the original note assumed stored rows
+would have to be backfilled. They do not, because **no route reaches this function** - the
+four `inference` routes call `upload_video`, `upload_vacancy`, `get_all_vacancies` and
+`get_all_candidates` - so no row produced by this code path was ever written by this
+deployment. A `personality_vacancies` table with rows in it predates the fix and should be
+rebuilt, not trusted.
+
+**Pinned by a test that now passes.**
 `backend/tests/test_slices_application.py::test_similarity_stores_the_personality_the_score_belongs_to`
-(`:861-921`) states the correct expectation - a vacancy that scores against OCEAN column 0
-must be stored against `personalities[0]` - and is marked `xfail(strict=True)` with a reason
-naming this section (`:861-869`). Two consequences worth knowing: the suite is green **on** the
-bug rather than blind to it, and `strict=True` turns an unexpected pass into a failure, so
-fixing the loop and deleting the marker have to happen in the same commit.
+was a `xfail(strict=True)` naming this section; it is now a plain test asserting that a
+vacancy orthogonal to O and E stores exactly the O and E rows (`[1, 3]` for that fixture),
+and that the old behaviour - one row naming id 5 - fails it. `strict=True` is why the marker
+could not simply be left behind: an unexpected pass would have failed the suite, so the fix
+and the marker removal had to land together.
 
-**What would have caught it originally.** Nothing in the tree did. It is not a syntax error,
-it is not a type error (`j` is an `int` and `personalities[j]` type-checks), and until the
-slice move no test exercised the function at all. ruff and mypy are both clean on it, which is
-the same lesson as §18 from the other side: a shape-only suite reads as coverage. What changed
-is that the gap is now asserted from the outside - an xfail is a recorded expectation, not a
-green tick.
+**What would have caught it originally.** Nothing shape-based: not a syntax error, not a type
+error (`j` is an `int` and `personalities[j]` type-checks), and ruff and mypy are both clean
+on it. It took an assertion about *which* row was stored, which is why the expectation was
+written down as a failing test rather than a paragraph.
 
 ## 27. The `jobs` slice has no HTTP route, on purpose
 
@@ -1433,16 +1445,16 @@ spellings and `:275-280` the absent-means-default rule.
 path, and `backend/tests/test_storage_local.py:386-397` pins
 `STORAGE__SECURE` with a docstring that names the module the rule moved to.
 
-## 36. `fastapi` is still imported from `service/shared/`
+## 36. `fastapi` was imported from `service/shared/` (closed)
 
-**Defect, as it stands.** [ADR/0008](ADR/0008-vertical-slice-services.md) moved the HTTP mapping
+**Defect, now fixed.** [ADR/0008](ADR/0008-vertical-slice-services.md) moved the HTTP mapping
 to the edge: application and domain modules raise `ServiceError` and no framework reaches
-the middle of the tree. `service/shared/validation.py` is clean - its docstring says so
-explicitly ("WHY no fastapi here any more") and it raises `ConflictError` at `:41` and
-`:54`. One shared module is not:
+the middle of the tree. `service/shared/validation.py` was already clean - its docstring says
+so explicitly ("WHY no fastapi here any more") and it raises `ConflictError` at `:41` and
+`:54`. One shared module was not:
 
 ```python
-# backend/service/shared/tokens.py:23-24, :114-126
+# backend/service/shared/tokens.py, before the fix
 from fastapi import HTTPException, status
 from fastapi.security import HTTPBearer
 
@@ -1452,65 +1464,110 @@ raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                     detail=f"Invalid token type ...")
 ```
 
-Three legacy repositories do the same, and those are recorded as source patches in
-[ADR/0005](ADR/0005-source-patches.md): `candidate_vacancy_repository.py:3-6`,
-`personality_candidate_repository.py:3-6` and `personality_vacancy_repository.py:3-6` -
-each imports `HTTPException` to raise a 400 where the old code did, so the layer keeps a
-framework dependency its siblings do not.
+Three legacy repositories did the same, and those are recorded as source patches in
+[ADR/0005](ADR/0005-source-patches.md): `candidate_vacancy_repository.py`,
+`personality_candidate_repository.py` and `personality_vacancy_repository.py` - each
+imported `HTTPException` to raise a 400 where the old code did, so the layer kept a
+framework dependency its siblings did not.
 
-**Why no gate catches it.** The boundary suite asserts the framework-free rule for a
+**Why no gate caught it.** The boundary suite asserts the framework-free rule for a
 slice's `presentation/` (rule 2), for `application/` (rule 3) and for a `domain/` that exists
 (rule 4), and `backend/scripts/check_backend_layout.py` rule 7 asserts that `models/` and
 `shared/` do not import *upward* into `service.api` or `service.services`. Neither says
 anything about a third-party framework: `fastapi` is not an upward import, so the shape
-checks are silent and the module keeps a dependency its siblings do not have. `tokens.py` is
-a token *codec*, and a codec that cannot be imported without starlette cannot be reused by a
-worker, a CLI or a test that does not install the API stack.
+checks were silent while the module kept a dependency its siblings did not have. `tokens.py`
+is a token *codec*, and a codec that cannot be imported without starlette cannot be reused by
+a worker, a CLI or a test that does not install the API stack - which is precisely what a
+worker needs.
 
-**Why it is not fixed here.** `validate_token_type()` raising `HTTPException` is how the
-sign-in flow produces its 401 detail, and two tests assert that shape directly:
-`backend/tests/test_security_jwt.py:302-313` (the message names both token types in repr
-form) and `backend/tests/test_slices_application.py:750-762` (an application-layer test
-catching a `fastapi` exception, and saying in its docstring that this is deliberate).
-Moving it to `UnauthorizedError` changes which handler renders it - correct, but a
-contract-adjacent change that belongs with a route test rather than a docs pass.
+**What changed.** `validate_token_type()` raises `service.shared.errors.UnauthorizedError`
+(401) with a **byte-identical** detail string, and both fastapi imports plus the unused
+`http_bearer` instance are gone (`tokens.py:33`, `:126-134`). The three repositories raise
+`InvalidPayloadError` with the same `Not get <x>_dict` text they used to pass to
+`HTTPException`. The key fact that made this a rename rather than a contract change: the
+single handler registered at `service/api/app.py:142` is looked up by exception *class*
+through the MRO, so a `ServiceError` subclass renders through the same `{"detail": ...}`
+path a bare `ServiceError` does, with the subclass's own `status_code`. Nothing a client
+receives moved.
 
-## 37. The employer vacancy route accepts a vacancy and stores nothing
+**Pinned by a test that could not have passed before.**
+`backend/tests/test_tokens_without_fastapi.py` imports `service.shared.tokens` in a
+**subprocess** whose `sys.meta_path` carries a finder that blocks `fastapi` and `starlette`
+and whose `sys.modules` entries for them are set to `None`, then asserts the import
+succeeds and the raised error is an `UnauthorizedError`. The subprocess matters: an
+in-process test would pass against a module that had merely been imported earlier, and the
+import-blocker has an anti-vacuity control asserting the blocker actually blocks.
 
-**Not a stub a refactor introduced - the feature is half-built and honest about it.**
-`POST /upload_vacancy/inference/employer` validates four form fields and then returns a fixed
-body:
+## 37. The employer vacancy route accepted a vacancy and stored nothing (closed)
+
+**Defect, now fixed.** `POST /upload_vacancy/inference/employer` validated four form fields
+and then returned a fixed body:
 
 ```python
-# backend/service/services/matching/application/matching_service.py:343-353
+# backend/service/services/matching/application/matching_service.py, before the fix
 def upload_vacancy(self, name, description, salary, skill):
-    """... the form posts text and the pipeline needs an embedding the
-    employer has not produced ..."""
     log.info("vacancy received but not persisted: name=%r salary=%r", name, salary)
     return {"message": "test"}
 ```
 
-**What that means for a user.** The form succeeds, the toast says "request sent", and the
-vacancy does not appear in `GET /vacancies/`. The frontend says so in two places rather
-than hiding it: `frontend/src/shared/api/services/vacancyService.js:22-31` warns that the
-route is a stub and explicitly says *not* to "fix" it by switching to `POST /vacancies/`
-(that would skip the embedding the recommendation routes need), and
-`frontend/src/features/vacancies/components/VacancyCreateForm.jsx:8-16` explains why the
-success toast is worded "request sent" rather than "vacancy added".
+**What that meant for a user.** The form succeeded, the toast said the request was sent, and
+the vacancy did not appear in `GET /vacancies/`. Worse, the frontend had already been rewritten
+to describe the *intended* contract (`frontend/src/shared/api/services/vacancyService.js`
+documents the route as persisting and returning `{id, name, salary, description, skill,
+embedding_id}`; the form toast says "Вакансия добавлена"; `EmployerPage.jsx` prints
+"Вакансия «<name>» сохранена (id <id>)"), so the UI was describing something the backend did
+not do.
 
-**What implementing it needs.** The bridge already exists and has no caller:
-`backend/service/infrastructure/ml_sidecar.py:383-398` can embed a string through the
-sidecar's `/v1/embed/text`, and its docstring says as much - *"No call site uses this yet
-... the first caller that needs text embeddings (the vacancy side of the ranking) should not
-have to re-derive it."* So the work is: embed the vacancy text, persist the vacancy and its
-vector in one transaction, and give the ranking a vacancy embedding to compare against.
+**What the route does now.** `MatchingService.upload_vacancy` embeds the posting through the
+ml sidecar and stores the row and its vector in the same order `upload_video` uses:
 
-**Why it is recorded rather than done.** It is a feature, not a defect in the move: the old
-module returned the same literal. Doing it here would mean a new call path, a schema question
-(where does a vacancy embedding live) and a contract change, in a refactor whose whole claim
-is that the wire behaviour did not move. The honest state is written down so the next reader
-does not mistake it for a regression.
+1. the four form fields are normalised (trimmed; a blank optional field becomes `NULL`, and a
+   blank `name` or `description` is a 400 that **names the field**) - `_vacancy_fields()`;
+2. `get_text_embedding()` posts the posting to `/v1/embed/text` and returns a vector in the
+   same 384-dimensional space as the candidate vectors - `_vacancy_document()` builds the text
+   from title + description + skills, because the title is the most informative token in a
+   posting and a candidate vector is built from a transcript;
+3. `write_embedding_into_server("vacancies", vector)` writes
+   `DATA_PATH/embeddings/vacancies/<uuid>.npy` and the `embeddings` row records the
+   `DATA_PATH`-relative URL, exactly as the user path does;
+4. `VacancyService.create_vacancy()` inserts and re-reads, so the response is the stored row
+   and not the payload that was sent;
+5. the response body is `vacancy.model_dump(by_alias=True)` - the six snake_case keys the
+   frontend contract names.
 
+**Failure mapping, which is the part that used to be a silent 500.** The sidecar transport
+raises `RuntimeError` subclasses, none of which `service/api/app.py` understands:
+
+| Failure | Rendered | Why |
+|---|---|---|
+| `MLUnavailable` (stopped, starting, out of GPU memory, timeout) | **503** `UpstreamUnavailableError` | Not the client's fault (so not 4xx) and not a bug of ours (so not 500). The detail is the transport's own sentence, which names the URL that could not be reached. |
+| `MLRejected` (the sidecar refused the text, e.g. `empty_body` or too long) | **400** `InvalidPayloadError` | The input is the problem and the caller can fix it. |
+| `MLContractError` (2xx with a body this client cannot use) | **400** `InvalidPayloadError` | The text got through but no usable vector came back; treating it as a retryable outage would be a lie. |
+| any other `MLClientError` | **500** `ServiceError` | Still a 500, but with the transport's sentence instead of a bare traceback. |
+
+In **every** one of those cases the vacancy and its embedding are **not** written. A text-only
+row cannot be scored, so storing one would hide the failure behind a vacancy that never
+matches anyone. The order above is the contract: embedding row first, vacancy row second, so a
+vacancy can never point at a vector that does not exist.
+
+**Why the ordering lives in the matching slice rather than in `VacancyService`.**
+`VacancyService` owns the table and knows nothing about the sidecar; the matching slice is
+already the orchestrator that imports both, and keeping the sequence in one place is what lets
+the upload path read top to bottom as the contract.
+
+**Pinned by tests, not described.** `backend/tests/test_matching_pipeline.py` now asserts the
+write order (`embed` → `write_embedding` → `create_embedding` → `create_vacancy`), the
+embedding namespace (`vacancies`), the six-key response, the text that gets embedded, the
+blank-optional-field rule, the blank-required-field 400 that names the field, and both the 503
+and 400 translations - including that neither writes a row. The 503 path is also exercised
+for every route in `backend/tests/test_routers_contract.py` (`SERVICE_ERRORS`), which is what
+proves the single `ServiceError` handler renders the fifth subclass as well as the first four.
+
+**Why it was recorded rather than done at the time.** It was a feature, not a defect in the
+slice move: the old module returned the same literal, and doing it during a refactor whose
+whole claim was "the wire behaviour did not move" would have hidden a behaviour change inside
+a rename. It is closed now because the frontend had already moved ahead of the backend, which
+made the placeholder not a limitation but a lie.
 ## What is *not* on this list
 
 Three changes to application source ship with this stack, and they are deliberately excluded
@@ -1526,7 +1583,7 @@ from the list above because they are fixed. All three are enumerated in
 
 All three are backwards compatible: with no new configuration they behave exactly as before.
 
-Fifteen entries above are **closed** rather than open, and they are kept because *how* they
+Eighteen entries above are **closed** rather than open, and they are kept because *how* they
 failed is the useful part - each was invisible to the gates and would have surfaced first in
 production:
 
@@ -1550,6 +1607,10 @@ production:
 - §22 - the `ml` service built the API image and published no URL, so the sidecar was never
   used in any deployed configuration. Now enforced by
   `scripts/check_compose_parity.py` rule 6.
+- §26 - the personality-vacancy link stored the score against a personality chosen by a
+  stale loop index, and against row zero of a matrix (see the entry: there were two faults).
+  Both are gone, and the test that used to carry the expectation as `xfail(strict=True)`
+  passes.
 - §28 - the four `inference` routes called a module they never imported, so every one of them
   answered `NameError`. ruff's F821 found it; the `Depends` wiring makes a recurrence an
   import error rather than a 500.
@@ -1583,36 +1644,40 @@ production:
   naming the variable (`flags.py:82-96`, `test_settings.py:255-272`). This is the one
   closed entry that **changes what a bad env file does**: the stack refuses to boot instead of
   starting with a feature quietly absent.
+- §36 - `service/shared/tokens.py` imported `fastapi`, so the token codec could not be used
+  from a worker or from a test that does not install the API stack. It raises
+  `UnauthorizedError` now with a byte-identical detail, and
+  `backend/tests/test_tokens_without_fastapi.py` proves it by *blocking* `fastapi` in a
+  subprocess and checking the module still loads.
+- §37 - the employer vacancy route accepted a vacancy and stored nothing, while the form told
+  the user it had been saved. It now embeds the posting through the sidecar, stores the vector
+  before the row, and maps a stopped sidecar to 503 instead of an opaque 500; a failed embed
+  writes nothing at all.
 
-Six entries are new since the slice refactor. §23 (one inference path, serialised GPU work),
-§24 (a credential rotated at the issuer, still in history) and §25 (the vertical slices are a
-package boundary, not a domain model - raw-SQL repositories, no transaction boundary, shared
-entity models) are about the *shape* of the tree rather than a bug. §26 (the personality-vacancy
-link is written against the stale index) and §27 (`jobs` has no route, on purpose) are the
-two the slice move made worth writing down: one is a real defect preserved because fixing it is
-a migration, the other is a deliberate absence the layout guard names at
+Five entries are new since the slice refactor and are **not** defects. §23 (one inference
+path, serialised GPU work), §24 (a credential rotated at the issuer, still in history) and §25
+(the vertical slices are a package boundary, not a domain model - raw-SQL repositories, no
+transaction boundary, shared entity models) are about the *shape* of the tree rather than a bug.
+§27 (`jobs` has no route, on purpose) is a deliberate absence the layout guard names at
 `backend/scripts/check_backend_layout.py:121`. §29 is a third kind again: notebook output that
 looked like a checkpoint and a schema sketch that contradicted the schema, both removed from the
-checkout rather than from the running system. None of the six is a bug a test could turn green:
-they are the deliberate stopping point of the refactor that
+checkout rather than from the running system. None of them is a bug a test could turn green: they
+are the deliberate stopping point of the refactor that
 [ADR/0008](ADR/0008-vertical-slice-services.md) records.
 
 Six more were documented in the same read-through that produced the ratchet and the coverage
 floor, in code the refactor had moved without changing. They are the ones that have since been
-**fixed**, and they are listed here rather than dropped because the fix is only trustworthy if
-the defect it answers is still written down. §30, §31, §32, §33, §34 and §35 each now name the
-regression test that keeps it fixed, and the entries above carry the mechanism.
+**fixed**, and they are listed above rather than dropped because the fix is only trustworthy if
+the defect it answers is still written down. §30, §31, §32, §33, §34 and §35 each name the
+regression test that keeps it fixed, and their entries carry the mechanism.
 
-Two entries remain **documented, not fixed**, and for the same reason in each case: the narrow
-fix is a one-line change that alters something a client can observe - a status, a message, a
-file that suddenly exists or does not - and a refactor whose claim is "the wire behaviour did not
-move" was the wrong commit to change it in.
-
-- §36 - one `shared/` module still imports `fastapi`. Pinned indirectly: the tests it
-  names assert the current exception shape rather than the import.
-- §37 - the employer vacancy route validates, answers, and stores nothing, honestly. It has no
-  test at all - no route test posts a vacancy and checks that nothing was stored - which is part
-  of why it is still open.
+§26, §36 and §37 were the last three documented-but-not-fixed entries, and all three were
+waiting for the same thing: an observable change that a refactor claiming "the wire behaviour did
+not move" had no business making. The frontend moving ahead of the backend supplied it for §37, a
+worker that needs the token codec without starlette for §36, and for §26 the discovery that the
+defect it was preserving is unreachable - no route reaches `similarity_for_user` - so the fix
+needed tests rather than a data migration. Each entry carries the mechanism and the test that
+keeps it closed.
 
 Everything else is documented here rather than patched, so that the next reader can tell
 "the stack works around this" from "the stack is broken here".

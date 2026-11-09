@@ -259,9 +259,13 @@ is the same convention the reference stack uses for its `jobs` vertical.
 
 **A failed rule raises a domain error, not an `HTTPException`.** `service/shared/errors.py`
 defines `ServiceError(status_code, detail)` with `NotFoundError`, `ConflictError`,
-`InvalidPayloadError` and `UnauthorizedError` beneath it; the single exception handler
+`InvalidPayloadError`, `UnauthorizedError` and `UpstreamUnavailableError` beneath it; the
+single exception handler
 registered on the `/server` sub-app renders any of them as `{"detail": ...}` with its own
-status ([SERVICE_CONTRACTS.md](SERVICE_CONTRACTS.md) §2). So `domain/` and `application/`
+status ([SERVICE_CONTRACTS.md](SERVICE_CONTRACTS.md) §2). `UpstreamUnavailableError` is the
+one subclass that is not about the client's request: it means a service we call did not
+answer, which is why it is 503 and why the handler's `get`-by-MRO lookup is what makes it
+work without a second registration. So `domain/` and `application/`
 stay framework-free and the HTTP mapping exists in exactly one file - the reason
 `test_service_boundary.py` can assert "no module under `application/` or `domain/` imports
 FastAPI" instead of relying on review.

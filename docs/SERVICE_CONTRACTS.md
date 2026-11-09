@@ -179,10 +179,11 @@ Where a domain error is *not* auth, the status carries the meaning:
 
 | Status | Detail strings in use |
 |--------|-----------------------|
-| 400 | Validation failures from the candidate and personality repositories (`InvalidPayloadError`). |
+| 400 | Validation failures from the candidate and personality repositories, and from the employer vacancy form (`InvalidPayloadError`). The vacancy route raises it for a blank name or description, and for a posting the sidecar refuses to embed - a refusal is the caller's input being wrong, not the server failing. |
 | 401 | `Invalid password`, `Invalid type user`, `User not found`, `Invalid token error` — all four from `service/services/auth/application/auth_service.py:66`, `:72`, `:84`, `:106`. |
 | 403 | The four auth denials in the table above. |
 | 404 | `<Entity> not found` — Candidate vacancy, Embedding, File, Info candidate, Magic, Personality, Personality candidate, Personality vacancy, User, Vacancy. **Also `Email already exist`**, which reads like a 409 and has always been a 404: the refactor keeps it because changing it would break every client that already special-cases the 404. |
+| 503 | The model server did not answer at all (`UpstreamUnavailableError`). Today the only producer is the employer vacancy route: it embeds the posting through the sidecar before it writes anything, so an unreachable sidecar means the vacancy was **not** stored and the caller may retry. The string is the client's own message, which names the configured URL. |
 
 ### 2.3 What the gateway returns
 

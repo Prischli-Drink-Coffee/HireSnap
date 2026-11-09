@@ -942,13 +942,15 @@ got discovered.
 **Why branch coverage.** Half of this tree's rules *are* the error branch - a 404 that no test
 ever triggers is untested work that a line-coverage number happily counts as covered.
 
-The suite has exactly one **skip** and one **xfail**, and both are intentional. The skip is
+The suite has exactly one **skip** and no **xfail**. The skip is
 `tests/test_service_boundary.py:302` — no slice has a `domain/` layer, and the rule says so
-rather than passing vacuously. The xfail is the preserved defect of
-[KNOWN_GAPS.md](KNOWN_GAPS.md#26-the-personality-vacancy-link-is-written-against-the-wrong-personality)
-and its `strict=True` marker means an unexpected pass fails the run, so the fix and the marker
-removal land together. No pass count is quoted here on purpose: it changes with every test and
-would be stale within a day.
+rather than passing vacuously. The one xfail this project carried was the preserved defect of
+[KNOWN_GAPS.md](KNOWN_GAPS.md#26-the-personality-vacancy-link-was-written-against-the-wrong-personality-closed):
+the personality-vacancy link stored its score against a personality chosen by a stale loop
+index, and against row zero of the matrix. Its `strict=True` marker was what made closing it
+safe — an unexpected pass fails the run, so the fix and the marker removal had to land in the
+same commit, and they did. Re-check the count with `pytest -q -ra`; no pass count is quoted
+here on purpose, because it changes with every test and would be stale within a day.
 
 ### 16.2 Regenerating the OpenAPI contract snapshot
 
