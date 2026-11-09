@@ -35,7 +35,20 @@ class CeleryDispatcher:
     """Thin, lazy, and honest about a missing celery."""
 
     def configured(self) -> bool:
-        """True when a broker is configured AND celery is importable."""
+        """True when the operator asked for celery, i.e. when CELERY__ENABLED is on.
+
+        WHAT THIS DELIBERATELY DOES NOT CHECK: whether the `celery` PACKAGE is
+        importable. That looks like an omission and is the opposite: checking it
+        here would turn "flag on, package missing" from a recorded misconfiguration
+        into a silent inline run. `job_service.enqueue` would then take the inline
+        branch directly and never write `fallback_reason`, so the operator would
+        see jobs completing normally while the queue they turned on did nothing.
+        Answering True instead lets `submit()` fail once per job with the exact
+        ImportError text, which is what lands in the job record.
+
+        A failed import of the adapter module itself is still False: that means the
+        deployment module is broken, not that celery is absent.
+        """
         try:
             from service.infrastructure.messaging.celery_app import is_configured
         except Exception:

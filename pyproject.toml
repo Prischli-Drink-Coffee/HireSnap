@@ -104,10 +104,17 @@ follow_imports = "silent"
 # The history of this number, because it is the argument for the rule: 46% when the gate was
 # introduced at 65 (every application and persistence module was at zero), 73 with the slice
 # and deployment-module tests, 76 with the settings / schema-bootstrap / JWT / entry-point /
-# connection-recovery / composition / S3 tests, and 90 with the router, task, mail, cache,
-# storage, job-service and matching-pipeline contract tests that took the tree to 94%. Each
-# time the floor moved in the SAME commit that added the coverage. Keep that rule: raise it
-# WITH the tests, never without them and never ahead of them.
+# connection-recovery / composition / S3 tests, 90 with the router, task, mail, cache,
+# storage, job-service and matching-pipeline contract tests that took the tree to 94%, and 95
+# with the platform contract/edge suites, the composition seam and container tests and the
+# leftover-branch sweep that took it to 99%. Each time the floor moved in the SAME commit that
+# added the coverage. Keep that rule: raise it WITH the tests, never without them and never
+# ahead of them.
+#
+# WHY NOT 99, WHILE THE MEASUREMENT IS 99: the four points between the floor and the number are
+# the margin a refactor gets without a new test. Three of the uncovered statements are
+# `__all__ = []` in packages that own no table - unreachable by design, and a floor that
+# demands them would demand deleting them.
 [tool.coverage.run]
 source = ["service"]
 branch = true
@@ -126,4 +133,4 @@ show_missing = true
 #
 # fail_under lives HERE and nowhere else: the Makefile 'coverage' target, the CI step and a
 # developer's own command all read this number, so they cannot drift apart.
-fail_under = 90
+fail_under = 95
